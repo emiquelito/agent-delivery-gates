@@ -21,7 +21,7 @@ set -euo pipefail
 # needs are deliberately absent from both: robust, invariant, harness, ensure,
 # underscore.
 PATTERN_REPO='\bgenuine(ly)?\b|\bdisciplin\w*\b|\bshap(e|es|ed|ing)\b|\binstinct\w*\b|\bsurfac(e|es|ed|ing)\b|\bbolt(ed)?[- ]on\b|\bcalls for\b|\brather than\b|—|[[:alpha:]] - [[:alpha:]]'
-PATTERN_TELLS='\bdelv(e|es|ed|ing)\b|\bsubstrate\b|\bload[- ]bearing\b|\btapestry\b|\btestament\b|\brealms?\b|\bnuanc(e|es|ed)\b|\bplethora\b|\bmyriad\b|\bmeticulous(ly)?\b|\bseamless(ly)?\b|\bintricate\b|\bprofound(ly)?\b|\bparadigm\b|\bholistic\b|\bcutting[- ]edge\b|\bgame[- ]chang(er|ing)\b|\bembark\w*\b|\bfoster(s|ed|ing)?\b|\belevat(e|es|ed|ing)\b|\bunlock(s|ed|ing)?\b|\bpivotal\b|\bcrucial\b|\blandscape\b|\bnavigat(e|es|ed|ing)\b|\butiliz(e|es|ed|ing)\b|\bleverag(e|es|ed|ing)\b|\bdeep dive\b|\bdive into\b|\bworth noting\b'
+PATTERN_TELLS='\bdelv(e|es|ed|ing)\b|\bsubstrates?\b|\bload[- ]bearing\b|\btapestr(y|ies)\b|\btestaments?\b|\brealms?\b|\bnuanc(e|es|ed|ing)\b|\bplethora\b|\bmyriads?\b|\bmeticulous(ly)?\b|\bseamless(ly)?\b|\bintricate\b|\bprofound(ly)?\b|\bparadigms?\b|\bholistic(ally)?\b|\bcutting[- ]edge\b|\bgame[- ]chang(er|ing)\b|\bembark(s|ed|ing)?\b|\bfoster(s|ed|ing)?\b|\belevat(e|es|ed|ing)\b|\bunlock(s|ed|ing)?\b|\bpivotal(ly)?\b|\bcrucial\b|\blandscape\b|\bnavigat(e|es|ed|ing)\b|\butiliz(e|es|ed|ing|ation)\b|\bleverag(e|es|ed|ing)\b|\bdeep dive\b|\bdive into\b|\bworth noting\b'
 PATTERN="$PATTERN_REPO|$PATTERN_TELLS"
 
 die() {
@@ -57,11 +57,20 @@ else
   # status visible and the bytes intact.
   tmpd=$(mktemp -d) || die "could not create a temporary directory"
   trap 'rm -rf "$tmpd"' EXIT
-  if ! git ls-files -z '*.md' 'rules/*.json' >"$tmpd/list" 2>"$tmpd/err"; then
-    die "git ls-files failed, is this a git repository? git said: $(cat "$tmpd/err")"
+  # Anchor to the repo root. git resolves a pathspec against the current
+  # directory, so running this from a subdirectory would quietly match fewer
+  # files, or none, and still report a clean scan.
+  if ! root=$(git rev-parse --show-toplevel 2>"$tmpd/err"); then
+    die "not a git repository. git said: $(cat "$tmpd/err")"
+  fi
+  if ! git -C "$root" ls-files -z -- '*.md' 'rules/*.json' >"$tmpd/list" 2>"$tmpd/err"; then
+    die "git ls-files failed. git said: $(cat "$tmpd/err")"
   fi
   if [ -s "$tmpd/list" ]; then
-    mapfile -d '' -t files <"$tmpd/list"
+    mapfile -d '' -t rel <"$tmpd/list"
+    for r in "${rel[@]}"; do
+      files+=("$root/$r")
+    done
   fi
   if [ "${#files[@]}" -eq 0 ]; then
     echo "scan-prose: no tracked markdown or rule records to scan"
