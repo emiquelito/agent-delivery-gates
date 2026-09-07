@@ -30,6 +30,8 @@ if [ "$#" -gt 0 ]; then
   for arg in "$@"; do
     if [ -d "$arg" ]; then
       die "'$arg' is a directory, expected a file"
+    elif [ -L "$arg" ] && [ ! -e "$arg" ]; then
+      die "'$arg' is a symlink whose target does not exist"
     elif [ ! -e "$arg" ]; then
       die "'$arg' does not exist"
     elif [ ! -f "$arg" ]; then
@@ -42,13 +44,18 @@ if [ "$#" -gt 0 ]; then
 else
   # No arguments: scan tracked markdown. git failing here is an error, not an
   # empty result. Capturing status separately keeps the failure visible.
-  # Newline delimited, not -z: command substitution strips null bytes, which
-  # would silently join filenames together. git quotes odd paths by default.
-  if ! tracked=$(git ls-files '*.md' 2>&1); then
-    die "git ls-files failed, is this a git repository? git said: $tracked"
+  # Null delimited, through a temp file. Two traps to avoid here: command
+  # substitution strips null bytes, and plain newline-delimited output makes
+  # git quote any non-ASCII path (core.quotepath defaults to true), which
+  # yields a filename that cannot be opened. A temp file keeps git's exit
+  # status visible and the bytes intact.
+  tmpd=$(mktemp -d) || die "could not create a temporary directory"
+  trap 'rm -rf "$tmpd"' EXIT
+  if ! git ls-files -z '*.md' >"$tmpd/list" 2>"$tmpd/err"; then
+    die "git ls-files failed, is this a git repository? git said: $(cat "$tmpd/err")"
   fi
-  if [ -n "$tracked" ]; then
-    mapfile -t files <<< "$tracked"
+  if [ -s "$tmpd/list" ]; then
+    mapfile -d '' -t files <"$tmpd/list"
   fi
   if [ "${#files[@]}" -eq 0 ]; then
     echo "scan-prose: no tracked markdown files to scan"
@@ -76,7 +83,7 @@ for f in "${files[@]}"; do
   esac
 done
 
-echo "scan-prose: scanned ${#files[@]} file(s), $matched_count matched"
+echo "scan-prose: scanned ${#files[@]} file(s), $matched_count contained matches"
 
 [ "$had_match" -eq 1 ] && exit 1
 exit 0
