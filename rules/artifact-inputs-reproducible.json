@@ -1,0 +1,10 @@
+{
+  "id": "artifact-inputs-reproducible",
+  "name": "Artifact inputs reproducible",
+  "claim_class": "A claim that a step produced an artifact whose content depends on specific inputs, such as a generated image with a prompt and a seed, a scaffold built from a template, or a dataset pulled from a query.",
+  "proof_obligation": "The delivery report prints the exact inputs needed to regenerate the artifact: the full prompt and seed for a generated image, the template name and version and the parameters passed to it for a scaffold, the exact query and any filters or date range for a dataset. Keep this short. It is a printed record, not an essay.",
+  "failure_mode": "An artifact is reported as delivered but the inputs that produced it were never written down anywhere. Nobody, including the agent, can regenerate it later, check whether a small change to an input produced the reported output, or confirm the artifact matches what was actually asked for.",
+  "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern: an artifact ships without the inputs that produced it recorded anywhere, so it cannot be regenerated or checked against a changed input later.",
+  "severity": "medium",
+  "enforcement": "prompt"
+}

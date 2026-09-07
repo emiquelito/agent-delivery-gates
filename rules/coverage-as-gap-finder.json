@@ -1,0 +1,10 @@
+{
+  "id": "coverage-as-gap-finder",
+  "name": "Coverage as gap finder",
+  "claim_class": "A claim that test coverage supports confidence in a phase or step.",
+  "proof_obligation": "At each phase boundary, and after any step that adds a new error type or a new routing branch, run a coverage pass to find gaps, not to produce a score. The aggregate percentage carries no information on its own; what matters is naming the specific branches that never ran, especially failure and error paths, and closing the real gaps with tests that inject the fault they are supposed to cover. The pass stops once the gaps are named and addressed. There is no target percentage to chase.",
+  "failure_mode": "Coverage turns into a number to defend instead of a way to find what was never tested. The percentage climbs while the failure and error branches it was supposed to point at go on running for the first time in production.",
+  "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern: coverage tooling gets used to justify a score instead of to point at exactly which branches, disproportionately failure paths, never ran.",
+  "severity": "medium",
+  "enforcement": "prompt"
+}

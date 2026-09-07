@@ -1,0 +1,10 @@
+{
+  "id": "builder-reviewer-separation",
+  "name": "Builder reviewer separation",
+  "claim_class": "A claim that independent review happened during a build.",
+  "proof_obligation": "Lead with the caveat: a reviewer agent spawned inside the same session as the builder shares the builder's context and framing, which makes its review weaker than one that crosses a session boundary or reaches a human being. It still helps, because it catches more problems before that more expensive boundary is crossed, but it does not remove the need to cross it. A same-session subagent's review is never treated as satisfying the independent review a phase boundary needs; that review still has to run in a fresh session carrying no history of the build. The ordinary version of this practice, common across the field: every build step runs at minimum a separate builder agent and a separate reviewer agent, plus more specialized agents when the work needs them. The builder implements. The reviewer runs the adversarial checklist against the builder's output as an independent role and reports findings the builder has to address before the gate passes. Each deliverable states which agents ran and in which role. A deliverable produced by one agent reviewing its own work is malformed. This shares a source with the existing `commit-before-mutation` record, which covers the ordering requirement between committing and review; see that record for the ordering rule, not duplicated here.",
+  "failure_mode": "A same-session subagent's review gets treated as equivalent to the independent review a phase boundary requires, so the boundary-crossing review never happens, and any blind spot the builder and its subagent share, because they work from the same context and the same framing, goes unexamined all the way to delivery.",
+  "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern: one agent reviewing its own output, whether directly or through a subagent that shares its context, repeats the same blind spots the original work had.",
+  "severity": "high",
+  "enforcement": "human_gate"
+}
