@@ -19,9 +19,16 @@ set -euo pipefail
 # Two groups. The first is this repo's own banned vocabulary. The second is
 # the stock vocabulary that marks text as machine written. Words this project
 # needs are deliberately absent from both: robust, invariant, harness, ensure,
-# underscore.
+# underscore. So are navigation and elevation, which are ordinary technical
+# words, and foster, which rejects the surname and the phrase foster care.
+#
+# Two known limits, both accepted:
+#   - Fenced code blocks are scanned like prose, so an identifier that matches
+#     a banned word is rejected. Revisit if that starts to bite.
+#   - The JSON half of the default file set covers rules/ only. Widen it when
+#     prose-bearing JSON appears elsewhere.
 PATTERN_REPO='\bgenuine(ly)?\b|\bdisciplin\w*\b|\bshap(e|es|ed|ing)\b|\binstinct\w*\b|\bsurfac(e|es|ed|ing)\b|\bbolt(ed)?[- ]on\b|\bcalls for\b|\brather than\b|—|[[:alpha:]] - [[:alpha:]]'
-PATTERN_TELLS='\bdelv(e|es|ed|ing)\b|\bsubstrates?\b|\bload[- ]bearing\b|\btapestr(y|ies)\b|\btestaments?\b|\brealms?\b|\bnuanc(e|es|ed|ing)\b|\bplethora\b|\bmyriads?\b|\bmeticulous(ly)?\b|\bseamless(ly)?\b|\bintricate\b|\bprofound(ly)?\b|\bparadigms?\b|\bholistic(ally)?\b|\bcutting[- ]edge\b|\bgame[- ]chang(er|ing)\b|\bembark(s|ed|ing)?\b|\bfoster(s|ed|ing)?\b|\belevat(e|es|ed|ing)\b|\bunlock(s|ed|ing)?\b|\bpivotal(ly)?\b|\bcrucial\b|\blandscape\b|\bnavigat(e|es|ed|ing)\b|\butiliz(e|es|ed|ing|ation)\b|\bleverag(e|es|ed|ing)\b|\bdeep dive\b|\bdive into\b|\bworth noting\b'
+PATTERN_TELLS='\bdelv(e|es|ed|ing)\b|\bsubstrates?\b|\bload[- ]bearing\b|\btapestr(y|ies)\b|\btestaments?\b|\brealms?\b|\bnuanc(e|es|ed|ing)\b|\bplethora\b|\bmyriads?\b|\bmeticulous(ly)?\b|\bseamless(ly)?\b|\bintricate\b|\bprofound(ly)?\b|\bparadigms?\b|\bholistic(ally)?\b|\bcutting[- ]edge\b|\bgame[- ]chang(er|ing)\b|\bembark(s|ed|ing)?\b|\belevat(e|es|ed|ing)\b|\bunlock(s|ed|ing)?\b|\bpivotal(ly)?\b|\bcrucial\b|\blandscape\b|\bnavigat(e|es|ed|ing)\b|\butiliz(e|es|ed|ing|ation)\b|\bleverag(e|es|ed|ing)\b|\bdeep dive\b|\bdive into\b|\bworth noting\b'
 PATTERN="$PATTERN_REPO|$PATTERN_TELLS"
 
 die() {
