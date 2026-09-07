@@ -4,7 +4,7 @@
 # See CLAUDE.md for the constraints themselves.
 #
 # Usage:
-#   scan-prose.sh              scan every tracked markdown file
+#   scan-prose.sh              scan tracked markdown and tracked rule records
 #   scan-prose.sh FILE...      scan exactly these files
 #
 # Exit codes:
@@ -16,7 +16,13 @@
 # as a checker that read the input and found it clean.
 set -euo pipefail
 
-PATTERN='\bgenuine(ly)?\b|\bdisciplin\w*\b|\bshap(e|es|ed|ing)\b|\binstinct\w*\b|\bsurfac(e|es|ed|ing)\b|\bbolt(ed)?[- ]on\b|\bcalls for\b|\brather than\b|—|[[:alpha:]] - [[:alpha:]]'
+# Two groups. The first is this repo's own banned vocabulary. The second is
+# the stock vocabulary that marks text as machine written. Words this project
+# needs are deliberately absent from both: robust, invariant, harness, ensure,
+# underscore.
+PATTERN_REPO='\bgenuine(ly)?\b|\bdisciplin\w*\b|\bshap(e|es|ed|ing)\b|\binstinct\w*\b|\bsurfac(e|es|ed|ing)\b|\bbolt(ed)?[- ]on\b|\bcalls for\b|\brather than\b|—|[[:alpha:]] - [[:alpha:]]'
+PATTERN_TELLS='\bdelv(e|es|ed|ing)\b|\bsubstrate\b|\bload[- ]bearing\b|\btapestry\b|\btestament\b|\brealms?\b|\bnuanc(e|es|ed)\b|\bplethora\b|\bmyriad\b|\bmeticulous(ly)?\b|\bseamless(ly)?\b|\bintricate\b|\bprofound(ly)?\b|\bparadigm\b|\bholistic\b|\bcutting[- ]edge\b|\bgame[- ]chang(er|ing)\b|\bembark\w*\b|\bfoster(s|ed|ing)?\b|\belevat(e|es|ed|ing)\b|\bunlock(s|ed|ing)?\b|\bpivotal\b|\bcrucial\b|\blandscape\b|\bnavigat(e|es|ed|ing)\b|\butiliz(e|es|ed|ing)\b|\bleverag(e|es|ed|ing)\b|\bdeep dive\b|\bdive into\b|\bworth noting\b'
+PATTERN="$PATTERN_REPO|$PATTERN_TELLS"
 
 die() {
   echo "scan-prose: $1" >&2
@@ -51,14 +57,14 @@ else
   # status visible and the bytes intact.
   tmpd=$(mktemp -d) || die "could not create a temporary directory"
   trap 'rm -rf "$tmpd"' EXIT
-  if ! git ls-files -z '*.md' >"$tmpd/list" 2>"$tmpd/err"; then
+  if ! git ls-files -z '*.md' 'rules/*.json' >"$tmpd/list" 2>"$tmpd/err"; then
     die "git ls-files failed, is this a git repository? git said: $(cat "$tmpd/err")"
   fi
   if [ -s "$tmpd/list" ]; then
     mapfile -d '' -t files <"$tmpd/list"
   fi
   if [ "${#files[@]}" -eq 0 ]; then
-    echo "scan-prose: no tracked markdown files to scan"
+    echo "scan-prose: no tracked markdown or rule records to scan"
     exit 0
   fi
 fi
