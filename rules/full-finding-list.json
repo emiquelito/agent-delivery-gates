@@ -1,0 +1,10 @@
+{
+  "id": "full-finding-list",
+  "name": "Full finding list",
+  "claim_class": "A deliverable that runs an automated or human reviewer over the work and then reports on the review.",
+  "proof_obligation": "The report must include the reviewer's complete finding list, every severity level, Low and Info included, each with an ID, severity, description, and disposition. A deferral is a proposal for someone else to adjudicate out of band; the agent never marks a finding deferred on its own authority.",
+  "failure_mode": "A finding gets summarized away before it reaches review, the same failure class as a test quietly excluded from a green count. The report reads clean precisely because the item carrying the risk was the one left out.",
+  "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern instead: an agent's own summary of a reviewer's output drops the lower-severity findings, and the boundary the review was meant to cross only works if the reviewer's full output crosses it, not a filtered version of it.",
+  "severity": "high",
+  "enforcement": "hook"
+}

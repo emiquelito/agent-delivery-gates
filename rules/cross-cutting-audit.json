@@ -1,0 +1,10 @@
+{
+  "id": "cross-cutting-audit",
+  "name": "Cross-cutting audit at phase boundaries",
+  "claim_class": "A claim that a multi-step build is internally consistent across steps, not just correct step by step.",
+  "proof_obligation": "A step-by-step review loop catches local defects but cannot catch drift across steps: an invariant that held early and got quietly broken later, or an assumption one layer made that a later layer invalidated. At each phase boundary, before the next phase stacks on top, a separate audit must run as a gate, in a brand new session with no build history, given only the spec files, the final code, and an up-to-date list of the load-bearing invariants, with instructions not to re-check per-component conformance since the step loop already owns that. Each finding from this audit must name two layers, the shared invariant between them, and both code locations; anything that cannot name two layers and a shared invariant is per-component noise and does not count. Because the audit has no build history, it generates findings cold without ruling on them; the findings go back to the review thread that holds the decision history, where real drift is separated from a false positive caused by missing context.",
+  "failure_mode": "Each step passes its own review, yet an invariant established early in the build is silently violated by a later step, or a later layer invalidates an assumption an earlier layer depended on. Because no reviewer ever looks across the seams, the break is only caught late, if at all, well after the next phase has already been built on top of the broken invariant.",
+  "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern instead: a per-step review loop verifies each component against its own spec and misses the seams between components, where a cross-cutting invariant quietly stops holding a few steps after it was introduced.",
+  "severity": "high",
+  "enforcement": "human_gate"
+}

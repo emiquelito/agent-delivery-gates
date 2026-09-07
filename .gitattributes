@@ -1,0 +1,14 @@
+# Normalize line endings for a TypeScript repo.
+* text=auto eol=lf
+
+*.md linguist-documentation
+*.sh text eol=lf
+
+# Binary-ish assets should never go through line-ending conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

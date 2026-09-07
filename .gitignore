@@ -142,5 +142,26 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 
+# Generic build output
+dist/
+build/
+out/
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Claude Code: hooks and settings are committed on purpose, they are the
+# deliverable, not local config. Only local/machine state is ignored here.
+.claude/settings.local.json
+.claude/state/
+.claude/cache/
+.claude/logs/
+.claude/todos/
+.claude/shell-snapshots/
+.claude/projects/
+
 # Working context. Scaffolding for producing this repo, never published.
 .workspace/

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-delivery-gates/rules/schema.json",
+  "title": "Rule record",
+  "description": "A single proof obligation a delivery gate enforces against an AI coding agent's own claims about its work.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable identifier for the rule, written as a kebab-case slug. Used as the rule's file name and as a reference key from other tooling."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human readable name for the rule. Exists because a bare identifier or number is not usable in a link or a conversation."
+    },
+    "claim_class": {
+      "type": "string",
+      "description": "The class of claim this rule governs, for example a robustness claim, a completeness claim, or a claim about review findings."
+    },
+    "proof_obligation": {
+      "type": "string",
+      "description": "What evidence a claim in this class must carry before it can be accepted as validated."
+    },
+    "failure_mode": {
+      "type": "string",
+      "description": "What goes wrong, concretely, when this rule is not followed."
+    },
+    "origin_incident": {
+      "type": "string",
+      "description": "The real event or documented failure pattern that motivates this rule. Where no single recorded event exists, this describes the recurring pattern instead of inventing one."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"],
+      "description": "How much damage this rule prevents when it fires, ranked from critical down to low."
+    },
+    "enforcement": {
+      "type": "string",
+      "enum": ["hook", "prompt", "human_gate"],
+      "description": "The mechanism that enforces this rule: an automated hook, a prompt-level instruction, or a human review gate."
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "claim_class",
+    "proof_obligation",
+    "failure_mode",
+    "origin_incident",
+    "severity",
+    "enforcement"
+  ],
+  "additionalProperties": false
+}
