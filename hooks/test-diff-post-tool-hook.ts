@@ -11,6 +11,7 @@
 // logic lives in ../src/test-diff-separator.ts.
 
 import process from "node:process";
+import { readAllStdin } from "../src/hook-io.ts";
 import { execFileSync } from "node:child_process";
 import { readSync } from "node:fs";
 import { formatSignalText, separateTestDiff } from "../src/test-diff-separator.ts";
@@ -20,24 +21,6 @@ function block(message: string): never {
   process.exit(2);
 }
 
-function readAllStdin(): string {
-  const chunks: Buffer[] = [];
-  const buf = Buffer.alloc(65536);
-  for (;;) {
-    let read: number;
-    try {
-      read = readSync(0, buf, 0, buf.length, null);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EAGAIN") continue;
-      if (code === "EOF") break;
-      return chunks.length > 0 ? Buffer.concat(chunks).toString("utf8") : "";
-    }
-    if (read === 0) break;
-    chunks.push(Buffer.from(buf.subarray(0, read)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 /** A command "runs a git commit" when `git commit` appears as its own words, not inside a longer word or path. */
 function runsGitCommit(command: string): boolean {
@@ -96,7 +79,7 @@ function main(): void {
   } catch (err) {
     const e = err as { stderr?: string; message?: string };
     const detail = typeof e.stderr === "string" && e.stderr.trim() !== "" ? e.stderr.trim() : e.message ?? String(err);
-    block(`test-diff-post-tool-hook: could not read HEAD's diff (${detail}).`);
+    block(`test-diff-post-tool-hook: the gate could not run, so nothing was checked: could not read HEAD's diff (${detail}).`);
     return;
   }
 
@@ -106,7 +89,7 @@ function main(): void {
   }
 
   const lines = [
-    `test-diff-post-tool-hook: this commit changed test files with ${result.signals.length} weakening signal(s):`,
+    `test-diff-post-tool-hook: the gate ran and found ${result.signals.length} weakening signal(s) in this commit:`,
     ...result.signals.map((s) => `  ${formatSignalText(s)}`),
   ];
   block(lines.join("\n"));

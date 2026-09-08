@@ -10,31 +10,40 @@
 // Any operational failure exits 2, never 0.
 
 import process from "node:process";
-import { readFileSync, readSync } from "node:fs";
-import { formatFindingText, validateReport } from "../src/report-validator.ts";
+import { readAllStdin, parseHookPayload } from "../src/hook-io.ts";
+import { readFileSync } from "node:fs";
+import { formatFindingText, parsePriorFindingIds, validateReport } from "../src/report-validator.ts";
 
 function block(message: string): never {
   process.stderr.write(message.endsWith("\n") ? message : `${message}\n`);
   process.exit(2);
 }
 
-function readAllStdin(): string {
-  const chunks: Buffer[] = [];
-  const buf = Buffer.alloc(65536);
-  for (;;) {
-    let read: number;
-    try {
-      read = readSync(0, buf, 0, buf.length, null);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EAGAIN") continue;
-      if (code === "EOF") break;
-      return chunks.length > 0 ? Buffer.concat(chunks).toString("utf8") : "";
+
+/**
+ * Prior open finding ids, from ADG_PRIOR_FINDINGS or a prior_findings_path in
+ * the payload. Without a channel for these the rule that catches a finding
+ * quietly dropped between reports could only ever fire from a command line,
+ * which is not where an agent is gated.
+ */
+function readPriorFindingIds(raw: string): string[] {
+  let path: string | undefined;
+  const fromEnv = process.env.ADG_PRIOR_FINDINGS;
+  if (fromEnv !== undefined && fromEnv.trim() !== "") {
+    path = fromEnv;
+  } else {
+    const payload = parseHookPayload(raw);
+    if (!("error" in payload) && typeof payload.prior_findings_path === "string") {
+      const candidate = payload.prior_findings_path.trim();
+      if (candidate !== "") path = candidate;
     }
-    if (read === 0) break;
-    chunks.push(Buffer.from(buf.subarray(0, read)));
   }
-  return Buffer.concat(chunks).toString("utf8");
+  if (path === undefined) return [];
+  try {
+    return parsePriorFindingIds(readFileSync(path, "utf8"));
+  } catch (err) {
+    block(`delivery-report-stop-hook: could not read prior findings at '${path}' (${(err as Error).message}).`);
+  }
 }
 
 /** Finds the report path: ADG_REPORT wins, else payload.report_path, else none. */
@@ -55,6 +64,15 @@ function resolveReportPath(env: Record<string, string | undefined>, raw: string)
 
 function main(): void {
   const raw = readAllStdin();
+  // Input that cannot be parsed is an error, not an empty payload. The same
+  // condition blocks in the clean-tree gate, and the two hooks disagreeing
+  // about it is how one of them ends up passing work nobody checked.
+  if (raw.trim() !== "") {
+    const payload = parseHookPayload(raw);
+    if ("error" in payload) {
+      block(`delivery-report-stop-hook: ${payload.error}.`);
+    }
+  }
   const reportPath = resolveReportPath(process.env, raw);
   if (reportPath === null) {
     process.exit(0);
@@ -73,7 +91,7 @@ function main(): void {
     return;
   }
 
-  const findings = validateReport(reportText);
+  const findings = validateReport(reportText, { priorFindingIds: readPriorFindingIds(raw) });
   if (findings.length === 0) {
     process.exit(0);
   }

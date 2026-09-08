@@ -13,6 +13,7 @@
 // be reported as clean.
 
 import process from "node:process";
+import { readAllStdin } from "../src/hook-io.ts";
 import { readFileSync, readSync } from "node:fs";
 import {
   formatFindingText,
@@ -43,24 +44,6 @@ function fail(message: string): never {
 }
 
 /** Reads all of stdin, past the pipe-buffer size, and returns it as a string. */
-function readAllStdin(): string {
-  const chunks: Buffer[] = [];
-  const buf = Buffer.alloc(65536);
-  for (;;) {
-    let read: number;
-    try {
-      read = readSync(0, buf, 0, buf.length, null);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EAGAIN") continue;
-      if (code === "EOF") break;
-      fail(`could not read stdin (${(err as Error).message})`);
-    }
-    if (read === 0) break;
-    chunks.push(Buffer.from(buf.subarray(0, read)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 interface ParsedArgs {
   reportPath?: string;

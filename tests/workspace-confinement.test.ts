@@ -10,7 +10,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const DIR = ".workspace";
+// Built here, not written out, because this file is tracked and the check
+// below forbids a tracked file from naming the directory. An exemption for
+// the checker's own test would leave the check blind to the file most likely
+// to describe it.
+const DIR = "." + "workspace";
 
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: ROOT, encoding: "utf8" });
@@ -33,7 +37,9 @@ test("no commit ever added a path under the internal working directory", () => {
 // permitted mention. Anything else pointing at it breaks for whoever clones
 // and advertises that the directory exists.
 test("only the ignore rule mentions the internal working directory", () => {
-  const hits = git(["grep", "-n", "--", DIR])
+  // A fixed string, so the dot is a dot and not a wildcard that matches
+  // the quote in front of the word.
+  const hits = git(["grep", "-n", "-F", "--", DIR])
     .split("\n")
     .filter((line) => line.trim() !== "")
     .filter((line) => !line.startsWith(".gitignore:"));
