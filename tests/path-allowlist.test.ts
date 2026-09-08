@@ -23,7 +23,7 @@ function fakeResolver(overrides: Record<string, string>): PathResolver {
   };
 }
 
-const CWD = "/home/build/work";
+const CWD = "/srv/project";
 
 test("a path inside a root is allowed", () => {
   const resolver = fakeResolver({ "/repo": "/repo", "/repo/src/a.ts": "/repo/src/a.ts" });
@@ -83,12 +83,12 @@ test("/repo-evil is not counted as inside /repo", () => {
 
 test("a relative path is resolved against the working directory", () => {
   const resolver = fakeResolver({
-    "/home/build/work": "/home/build/work",
-    "/home/build/work/src/a.ts": "/home/build/work/src/a.ts",
+    "/srv/project": "/srv/project",
+    "/srv/project/src/a.ts": "/srv/project/src/a.ts",
   });
-  const result = checkPathAllowed("src/a.ts", ["/home/build/work"], resolver, CWD);
+  const result = checkPathAllowed("src/a.ts", ["/srv/project"], resolver, CWD);
   assert.equal(result.allowed, true);
-  assert.equal(result.realPath, "/home/build/work/src/a.ts");
+  assert.equal(result.realPath, "/srv/project/src/a.ts");
 });
 
 test("a candidate equal to the root itself is allowed", () => {

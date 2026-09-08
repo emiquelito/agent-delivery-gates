@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Git pre-commit hook. Not run automatically until a person turns it on with:
+#
+#   git config core.hooksPath .githooks
+#
+# Runs, in order: the typecheck, the test suite, the prose scan, and the
+# tally check. Stops at the first failure, prints which check failed and the
+# exact command to run it alone, and exits non-zero so the commit does not
+# happen.
+#
+# Deliberate exception: set ADG_SKIP_PRECOMMIT=1 to skip this hook for one
+# commit. The skip is never quiet; it prints loudly to say so.
+set -euo pipefail
+
+if [ -n "${ADG_SKIP_PRECOMMIT:-}" ]; then
+  echo "=============================================================="
+  echo " pre-commit: SKIPPED because ADG_SKIP_PRECOMMIT is set."
+  echo " None of the usual checks ran for this commit. Unset"
+  echo " ADG_SKIP_PRECOMMIT to run them again next time."
+  echo "=============================================================="
+  exit 0
+fi
+
+# Strip every GIT_* override before running git, the same reason
+# scripts/pre-publication-check.sh does: a leftover GIT_DIR or
+# GIT_WORK_TREE would point git at a different tree than the one being
+# committed.
+while IFS='=' read -r -d '' entry; do
+  name=${entry%%=*}
+  case "$name" in
+    GIT_*) unset "$name" ;;
+  esac
+done < <(env -0)
+
+if ! ROOT=$(git rev-parse --show-toplevel 2>&1); then
+  echo "pre-commit: not a git repository. git said: $ROOT" >&2
+  exit 2
+fi
+cd "$ROOT"
+
+fail_step() {
+  echo "=============================================================="
+  echo " pre-commit: FAILED at: $1"
+  echo " Run it alone with:"
+  echo "   $2"
+  echo "=============================================================="
+  exit 1
+}
+
+echo "pre-commit: running typecheck"
+if ! npx tsc --noEmit; then
+  fail_step "typecheck" "npx tsc --noEmit"
+fi
+
+echo "pre-commit: running tests"
+if ! npm test; then
+  fail_step "tests" "npm test"
+fi
+
+echo "pre-commit: running the prose scan"
+if ! scripts/scan-prose.sh; then
+  fail_step "prose scan" "scripts/scan-prose.sh"
+fi
+
+echo "pre-commit: running the tally check"
+if ! node scripts/tally-report.ts --check; then
+  fail_step "tally check" "node scripts/tally-report.ts --check"
+fi
+
+echo "pre-commit: all checks passed"
+exit 0

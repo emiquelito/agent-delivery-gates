@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
-    "scan": "scripts/scan-prose.sh"
+    "scan": "scripts/scan-prose.sh",
+    "verify": "tsc --noEmit && node --test tests/*.test.ts && scripts/scan-prose.sh && node scripts/tally-report.ts --check"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",
