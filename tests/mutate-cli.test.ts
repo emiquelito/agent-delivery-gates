@@ -264,24 +264,101 @@ test("with no selector, the source files changed by HEAD are the ones mutated", 
   });
 });
 
-test("--staged mutates the source files in the staged diff", () => {
+test("--staged mutates the staged diff and puts every file back byte for byte", () => {
+  // An earlier version of this test asserted the opposite: it recorded the
+  // clean-tree check refusing every --staged run, because a staged change
+  // counts as dirty, and called that the point. It was not the point. It
+  // meant --staged could never do any work in any git state. This is what
+  // the flag is supposed to do.
   const dir = orderRepo(STRONG_SUITE, { "src/other.mjs": "export const other = 1;\n" });
   withRepo(dir, () => {
-    // Stage a change to one file, then commit it so the tree is clean but
-    // the staged-diff selector still has something to name.
+    const staged = "export const other = 1 + 1;\n";
+    writeFileSync(join(dir, "src/other.mjs"), staged);
+    runGit(dir, ["add", "src/other.mjs"]);
+    const statusBefore = runGit(dir, ["status", "--porcelain"]);
+
+    const result = runCli(dir, ["--staged", "--command", SUITE_COMMAND, "--format", "json"]);
+    // The suite says nothing about other.mjs, so its one mutation survives:
+    // a real verdict on a real mutation, not a refusal.
+    assert.equal(result.status, 1, result.stderr);
+    const report = JSON.parse(result.stdout) as {
+      files: string[];
+      planned: number;
+      attempted: number;
+      results: Array<{ verdict: string; mutation: { file: string; line: number; original: string } }>;
+    };
+    assert.deepEqual(report.files, ["src/other.mjs"]);
+    assert.equal(report.planned, 1);
+    assert.equal(report.attempted, 1);
+    assert.equal(report.results.length, 1);
+    assert.equal(report.results[0].verdict, "survived");
+    assert.equal(report.results[0].mutation.file, "src/other.mjs");
+    assert.equal(report.results[0].mutation.original, "+");
+
+    assert.equal(readFileSync(join(dir, "src/other.mjs"), "utf8"), staged, "the staged text is back byte for byte");
+    assert.equal(readFileSync(join(dir, "src/order.mjs"), "utf8"), ORDER_SOURCE);
+    assert.equal(runGit(dir, ["status", "--porcelain"]), statusBefore, "the index and the tree are as they were");
+    assert.equal(runGit(dir, ["diff"]), "", "nothing is left unstaged");
+  });
+});
+
+test("--staged refuses when there is unstaged work under the staged change", () => {
+  const dir = orderRepo(STRONG_SUITE, { "src/other.mjs": "export const other = 1;\n" });
+  withRepo(dir, () => {
     writeFileSync(join(dir, "src/other.mjs"), "export const other = 1 + 1;\n");
     runGit(dir, ["add", "src/other.mjs"]);
-    const result = runCli(dir, ["--staged", "--command", SUITE_COMMAND, "--format", "json"]);
-    // The tree is dirty (a staged change is dirty), so this is the refusal
-    // path: the selector never gets a chance to run, which is the point.
+    // A further edit on top of the staged one: no commit holds it, and this
+    // tool writes to that file.
+    const unstaged = "export const other = 1 + 2;\n";
+    writeFileSync(join(dir, "src/other.mjs"), unstaged);
+    const result = runCli(dir, ["--staged", "--command", SUITE_COMMAND]);
     assert.equal(result.status, 2);
-    assert.match(result.stderr, /working tree is not clean/);
-    runGit(dir, ["commit", "-q", "-m", "second"]);
-    // Committed, the tree is clean and the staged diff is empty, so the
-    // selector names no file. That is exit 2, never a quiet exit 0.
-    const empty = runCli(dir, ["--staged", "--command", SUITE_COMMAND]);
-    assert.equal(empty.status, 2);
-    assert.match(empty.stderr, /named no files/);
+    assert.match(result.stderr, /These changes are not staged/);
+    assert.match(result.stderr, /src\/other\.mjs/);
+    assert.match(result.stderr, /--staged expects the unstaged tree to be clean/);
+    assert.equal(result.stdout, "", "a refused run prints no report");
+    assert.equal(readFileSync(join(dir, "src/other.mjs"), "utf8"), unstaged, "the unstaged work is untouched");
+  });
+});
+
+test("--staged refuses when an untracked file is sitting in the tree", () => {
+  const dir = orderRepo(STRONG_SUITE, { "src/other.mjs": "export const other = 1;\n" });
+  withRepo(dir, () => {
+    writeFileSync(join(dir, "src/other.mjs"), "export const other = 1 + 1;\n");
+    runGit(dir, ["add", "src/other.mjs"]);
+    writeFileSync(join(dir, "src/loose.mjs"), "export const loose = 1 + 1;\n");
+    const result = runCli(dir, ["--staged", "--command", SUITE_COMMAND]);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /These changes are not staged/);
+    assert.match(result.stderr, /src\/loose\.mjs/);
+  });
+});
+
+test("--staged with an empty staged diff: exit 2, never a quiet pass", () => {
+  const dir = orderRepo(STRONG_SUITE);
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--staged", "--command", SUITE_COMMAND]);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /named no files/);
+  });
+});
+
+test("a --paths target git ignores: exit 2, and the file is left alone", () => {
+  // An ignored file has no committed copy, and git status never reports it,
+  // so the clean-tree check cannot see it either. If a run were killed
+  // partway through mutating it, nothing could put it back.
+  const dir = orderRepo(STRONG_SUITE, { ".gitignore": "scratch-out/\n" });
+  withRepo(dir, () => {
+    mkdirSync(join(dir, "scratch-out"), { recursive: true });
+    const scratch = "export const scratch = 1 + 1;\n";
+    writeFileSync(join(dir, "scratch-out/scratch.mjs"), scratch);
+    assert.equal(runGit(dir, ["status", "--porcelain"]), "", "an ignored file leaves the tree looking clean");
+    const result = runCli(dir, ["--paths", "scratch-out/scratch.mjs", "--command", SUITE_COMMAND]);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /git ignores scratch-out\/scratch\.mjs/);
+    assert.match(result.stderr, /no committed copy to restore from/);
+    assert.equal(result.stdout, "");
+    assert.equal(readFileSync(join(dir, "scratch-out/scratch.mjs"), "utf8"), scratch);
   });
 });
 
@@ -306,6 +383,35 @@ test("--max caps how many mutations are attempted", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Mutations: 3 planned, 1 attempted/);
     assert.match(result.stdout, /killed 1, survived 0/);
+  });
+});
+
+test("--max takes the first N in order, and the report says a later file was never reached", () => {
+  // The cap is not spread across the selection: it takes the first N of the
+  // path, then line, then column order. A big file early in that order can
+  // use the whole budget, and a reader who sees "survived 0" has to be told
+  // that the rest of the selection was never touched.
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module" }, null, 2)}\n`,
+    "src/a_big.mjs": "export const one = 1 + 1;\nexport const two = 2 + 2;\nexport const three = 3 + 3;\n",
+    "src/z_small.mjs": "export const four = 4 + 4;\n",
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, [
+      "--paths",
+      "src/a_big.mjs",
+      "src/z_small.mjs",
+      "--command",
+      "node -e ''",
+      "--max",
+      "2",
+    ]);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /Mutations: 4 planned, 2 attempted/);
+    assert.match(result.stdout, /Not every planned mutation was attempted: --max stopped the run at 2 of 4\./);
+    assert.match(result.stdout, /leaves 2 of the 4 planned mutations unmeasured/);
+    assert.doesNotMatch(result.stdout, /z_small\.mjs:/, "the later file was never attempted");
+    assert.match(result.stdout, /Files: src\/a_big\.mjs, src\/z_small\.mjs/);
   });
 });
 
@@ -353,10 +459,14 @@ assert.equal(drain([1, 2, 3]), 0);
       "--timeout",
       "3",
     ]);
-    assert.equal(result.status, 0, result.stderr);
+    // Exit 3, not 0: nothing survived, but nothing was judged either, and a
+    // run that could not measure its own work must never read as a clean
+    // one.
+    assert.equal(result.status, 3, result.stderr);
     assert.match(result.stdout, /killed 0, survived 0, timeout 1, skipped 0/);
-    assert.match(result.stdout, /Timed out \(1\)/);
-    assert.match(result.stdout, /src\/drain\.mjs:3:22\s+comparison-boundary\s+> to >=/);
+    assert.match(result.stdout, /No verdict on these \(1\):/);
+    assert.match(result.stdout, /timeout\s+src\/drain\.mjs:3:22\s+comparison-boundary\s+> to >=/);
+    assert.match(result.stdout, /never got a verdict: those lines are still unmeasured \(exit 3\)/);
   });
 });
 
@@ -428,6 +538,13 @@ test("--help: prints the usage and the operator list, exits 0", () => {
     assert.match(result.stdout, /Usage: mutate/);
     assert.match(result.stdout, /comparison boundary/);
     assert.match(result.stdout, /at least one mutation survived/);
+    // The four things a caller cannot work out from the output alone.
+    assert.match(result.stdout, /3\s+nothing survived, but at least one mutation never got a verdict/);
+    assert.match(result.stdout, /A SIGKILL, a power cut, or a hard crash/);
+    assert.match(result.stdout, /leaves the last mutated file mutated\n\s+on disk/);
+    assert.match(result.stdout, /git checkout -- <path>/);
+    assert.match(result.stdout, /the cap keeps the first N of that\n\s+order/);
+    assert.match(result.stdout, /A path git ignores is refused/);
   });
 });
 

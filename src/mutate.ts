@@ -133,9 +133,18 @@ const IDENT_CHAR = /[A-Za-z0-9_$]/;
  * what precedes the slash.
  *
  * What it does not handle, stated plainly:
- *   - An expression inside a template literal's ${...} counts as string, so
- *     nothing in it is ever mutated. This loses candidates; it never
- *     produces a wrong one.
+ *   - A template literal is skipped whole, from its opening backtick to the
+ *     matching closing one, with every ${...} interpolation inside it
+ *     counted as string too. Nesting is tracked, so a template literal
+ *     written inside an interpolation closes on its own backtick and not on
+ *     the outer literal's. Nothing inside a template literal is ever
+ *     mutated: that loses candidates and invents none.
+ *   - Inside an interpolation the scan counts braces to find the end. An
+ *     unescaped closing brace written inside a regular expression literal
+ *     there, as in ${x.replace(/}/g, "")}, ends the interpolation early.
+ *     What follows is still read as template text, so the literal still
+ *     ends at the right backtick and no candidate is invented, unless a
+ *     backtick appears in the part that was misread.
  *   - A regular-expression literal is told from division by a look-back
  *     heuristic. Where the guess goes wrong it goes toward "string", so
  *     again a candidate is lost and none is invented.
@@ -169,23 +178,13 @@ export function codeMask(text: string): boolean[] {
       i += 2;
       continue;
     }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      i++;
-      while (i < text.length) {
-        if (text[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (text[i] === ch) {
-          i++;
-          break;
-        }
-        // An unterminated single or double quoted string ends at the line
-        // end, so a stray apostrophe in a comment-like line cannot swallow
-        // the rest of the file.
-        if (text[i] === "\n" && ch !== "`") break;
-        i++;
-      }
+    if (ch === '"' || ch === "'") {
+      i = skipQuoted(text, i);
+      lastCode = "x";
+      continue;
+    }
+    if (ch === "`") {
+      i = skipTemplate(text, i);
       lastCode = "x";
       continue;
     }
@@ -214,6 +213,94 @@ export function codeMask(text: string): boolean[] {
     i++;
   }
   return mask;
+}
+
+/**
+ * Skips a single or double quoted string, from its opening quote, and
+ * returns the index just past its closing quote. An unterminated string
+ * ends at the line end, so a stray apostrophe in a comment-like line cannot
+ * swallow the rest of the file.
+ */
+function skipQuoted(text: string, start: number): number {
+  const quote = text[start];
+  let i = start + 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === quote) return i + 1;
+    if (ch === "\n") return i;
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Skips a template literal, from its opening backtick, and returns the
+ * index just past the matching closing backtick. Every ${...} inside is
+ * skipped by skipInterpolation below, which is what keeps a template
+ * literal nested inside an interpolation from closing the outer one: that
+ * bug read the inner literal's opening backtick as the outer literal's
+ * close, and then mutated the code that followed.
+ */
+function skipTemplate(text: string, start: number): number {
+  let i = start + 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === "`") return i + 1;
+    if (ch === "$" && text[i + 1] === "{") {
+      i = skipInterpolation(text, i + 2);
+      continue;
+    }
+    i++;
+  }
+  return i;
+}
+
+/**
+ * Skips the body of a ${...} interpolation, from the index just past the
+ * opening brace, and returns the index just past its matching closing
+ * brace. Braces are counted, and a string, a template literal, or a
+ * backslash escape inside the body is skipped whole, so a brace written in
+ * one of those does not end the body early.
+ */
+function skipInterpolation(text: string, start: number): number {
+  let i = start;
+  let depth = 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === "`") {
+      i = skipTemplate(text, i);
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i = skipQuoted(text, i);
+      continue;
+    }
+    if (ch === "{") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === "}") {
+      depth--;
+      i++;
+      if (depth === 0) return i;
+      continue;
+    }
+    i++;
+  }
+  return i;
 }
 
 /**
@@ -401,15 +488,29 @@ export function summarize(results: MutationResult[]): RunSummary {
   return summary;
 }
 
+/** A mutation the run never judged: it hung until the timeout, or it was
+ * skipped before the command ever ran. Neither says anything about whether
+ * the suite would have caught that break. */
+function isUnmeasured(result: MutationResult): boolean {
+  return result.verdict === "timeout" || result.verdict === "skipped";
+}
+
 /**
- * Exit code for a finished run: 1 when anything survived, 0 otherwise. A
- * timeout is not a survivor and not a kill; it is reported in its own
- * category, because a mutation that hung says nothing about whether the
- * suite would have caught it. The CLI owns exit 2, which means the run
- * could not happen at all.
+ * Exit code for a finished run:
+ *   0  every attempted mutation got a verdict and none survived
+ *   1  at least one mutation survived
+ *   3  nothing survived, but at least one mutation never got a verdict
+ * A survivor wins over an unmeasured mutation, because a hole a test left
+ * open is the more useful thing to report. Exit 3 exists so a run that
+ * could not judge part of its work never reads the same as a run that
+ * judged all of it and found nothing: that is the whole point of this
+ * project, and folding a timeout into 0 broke it here. The CLI owns exit
+ * 2, which means the run could not happen at all.
  */
-export function exitCodeFor(results: MutationResult[]): 0 | 1 {
-  return results.some((result) => result.verdict === "survived") ? 1 : 0;
+export function exitCodeFor(results: MutationResult[]): 0 | 1 | 3 {
+  if (results.some((result) => result.verdict === "survived")) return 1;
+  if (results.some(isUnmeasured)) return 3;
+  return 0;
 }
 
 export interface ReportInput {
@@ -439,6 +540,19 @@ export function formatReportText(input: ReportInput): string {
     `killed ${summary.killed}, survived ${summary.survived}, timeout ${summary.timeout}, skipped ${summary.skipped}`,
   );
 
+  if (input.attempted < input.planned) {
+    const stopped = input.planned - input.attempted;
+    lines.push("");
+    lines.push(`Not every planned mutation was attempted: --max stopped the run at ${input.attempted} of ${input.planned}.`);
+    lines.push(
+      `Mutations run in path, then line, then column order, and the cap keeps the first ${input.attempted} of that order, so a`,
+    );
+    lines.push(
+      `file early in the order can use the whole budget and a file after it is never touched at all. That`,
+    );
+    lines.push(`leaves ${stopped} of the ${input.planned} planned mutations unmeasured, and nothing below says anything about them.`);
+  }
+
   const survivors = input.results.filter((result) => result.verdict === "survived");
   if (survivors.length > 0) {
     lines.push("");
@@ -450,20 +564,22 @@ export function formatReportText(input: ReportInput): string {
     }
   }
 
-  const timedOut = input.results.filter((result) => result.verdict === "timeout");
-  if (timedOut.length > 0) {
+  const unmeasured = input.results.filter(isUnmeasured);
+  if (unmeasured.length > 0) {
     lines.push("");
-    lines.push(`Timed out (${timedOut.length}), no verdict on these:`);
-    for (const result of timedOut) lines.push(`  ${describeMutation(result.mutation)}`);
+    lines.push(`No verdict on these (${unmeasured.length}):`);
+    for (const result of unmeasured) lines.push(`  ${result.verdict}  ${describeMutation(result.mutation)}`);
   }
 
   lines.push("");
   if (survivors.length > 0) {
     lines.push("A surviving mutation means no test noticed the code changed.");
-  } else if (timedOut.length > 0) {
+  } else if (unmeasured.length > 0) {
     lines.push(
-      `No mutation survived, but ${timedOut.length} never finished: those lines are still unmeasured.`,
+      `No mutation survived, but ${unmeasured.length} never got a verdict: those lines are still unmeasured (exit 3).`,
     );
+  } else if (input.attempted < input.planned) {
+    lines.push("No attempted mutation survived, but the run stopped at the cap, so part of the selection is unmeasured.");
   } else {
     lines.push("No mutation survived: every break this tool made was caught.");
   }

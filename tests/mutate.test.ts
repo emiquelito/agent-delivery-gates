@@ -98,6 +98,30 @@ test("a string literal is never mutated", () => {
   assert.deepEqual(mutationsFor("const s = `a + b`;"), []);
 });
 
+test("an expression inside a template literal's ${...} is never mutated", () => {
+  assert.deepEqual(mutationsFor("const s = `total ${a > b} end`;"), []);
+  assert.deepEqual(mutationsFor("const s = `${a && b}`;"), []);
+  assert.deepEqual(mutationsFor("const s = `${count + 1} left`;"), []);
+});
+
+test("a template literal nested inside an interpolation does not end the outer one", () => {
+  // The scanner used to close the outer literal on the inner literal's
+  // opening backtick, read the rest of the line as code, and plan a
+  // mutation inside a string. The documentation claimed that could never
+  // happen; this is the case that made the claim false.
+  assert.deepEqual(mutationsFor("const s = `outer ${`inner ${a > b}`} end`;"), []);
+  assert.deepEqual(mutationsFor("const s = `${`${a === b}`} ${c + d}`;"), []);
+});
+
+test("a brace inside a string inside an interpolation does not end the interpolation", () => {
+  assert.deepEqual(mutationsFor('const s = `${f("}") + 1}`;'), []);
+});
+
+test("code after a template literal on the same line is still mutated", () => {
+  assert.deepEqual(afterTexts("const s = `x ${a > b}` + label;"), ["const s = `x ${a > b}` - label;"]);
+  assert.deepEqual(afterTexts("const s = `${`in ${a}`}` + label;"), ["const s = `${`in ${a}`}` - label;"]);
+});
+
 test("code beside a string literal on the same line is still mutated", () => {
   assert.deepEqual(afterTexts("const s = 'a < b' + label;"), ["const s = 'a < b' - label;"]);
 });
@@ -240,10 +264,26 @@ test("exit code is 1 when anything survived and 0 otherwise", () => {
   assert.equal(exitCodeFor([]), 0);
 });
 
+test("exit code is 3 when nothing survived but something never got a verdict", () => {
+  // Exit 0 has to mean every attempted mutation was judged. A run that
+  // could not judge part of its own work reading the same as a run that
+  // judged all of it is the exact failure this project exists to catch.
+  assert.equal(exitCodeFor([resultWith("timeout")]), 3);
+  assert.equal(exitCodeFor([resultWith("skipped")]), 3);
+  assert.equal(exitCodeFor([resultWith("killed"), resultWith("timeout")]), 3);
+  assert.equal(exitCodeFor([resultWith("killed"), resultWith("skipped")]), 3);
+});
+
+test("a survivor wins over a mutation that never got a verdict", () => {
+  assert.equal(exitCodeFor([resultWith("survived"), resultWith("timeout")]), 1);
+  assert.equal(exitCodeFor([resultWith("timeout"), resultWith("survived")]), 1);
+  assert.equal(exitCodeFor([resultWith("survived"), resultWith("skipped"), resultWith("killed")]), 1);
+});
+
 test("a timeout is its own verdict, not a kill and not a survivor", () => {
   const results = [resultWith("timeout")];
   assert.deepEqual(summarize(results), { killed: 0, survived: 0, timeout: 1, skipped: 0 });
-  assert.equal(exitCodeFor(results), 0);
+  assert.equal(exitCodeFor(results), 3);
 });
 
 test("the text report names each survivor with its file, line and both texts", () => {
@@ -261,6 +301,51 @@ test("the text report names each survivor with its file, line and both texts", (
   assert.match(text, /src\/a\.ts:1:7\s+comparison-boundary\s+< to <=/);
   assert.match(text, /before: if \(a < b\) f\(\);/);
   assert.match(text, /after:\s+if \(a <= b\) f\(\);/);
+});
+
+test("the text report announces a run the --max cap cut short", () => {
+  const text = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts", "src/z.ts"],
+    planned: 12,
+    attempted: 3,
+    results: [resultWith("killed")],
+  });
+  assert.match(text, /Mutations: 12 planned, 3 attempted/);
+  assert.match(text, /Not every planned mutation was attempted: --max stopped the run at 3 of 12\./);
+  assert.match(text, /a file after it is never touched at all/);
+  assert.match(text, /leaves 9 of the 12 planned mutations unmeasured/);
+  assert.match(text, /the run stopped at the cap, so part of the selection is unmeasured/);
+});
+
+test("the text report says nothing about a cap when every planned mutation ran", () => {
+  const text = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts"],
+    planned: 1,
+    attempted: 1,
+    results: [resultWith("killed")],
+  });
+  assert.doesNotMatch(text, /--max stopped the run/);
+});
+
+test("the text report names a mutation that never got a verdict", () => {
+  const text = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts"],
+    planned: 1,
+    attempted: 1,
+    results: [resultWith("timeout")],
+  });
+  assert.match(text, /No verdict on these \(1\):/);
+  assert.match(text, /timeout\s+src\/a\.ts:1:7/);
+  assert.match(text, /never got a verdict: those lines are still unmeasured \(exit 3\)/);
 });
 
 test("the text report says plainly when nothing survived", () => {

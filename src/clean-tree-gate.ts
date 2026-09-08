@@ -318,6 +318,29 @@ function describeExecError(err: unknown): string {
   return String(err);
 }
 
+/**
+ * The porcelain lines that report a change git has not been told about: an
+ * unstaged modification or deletion, an unmerged path, or an untracked
+ * file. In `git status --porcelain` each line starts with two status
+ * letters, the index state then the working-tree state, so a line whose
+ * second letter is a space is staged and nothing more. An untracked line
+ * ("??") counts here as well: a restore has no committed copy of it to
+ * fall back on.
+ *
+ * `adg mutate --staged` is the one caller. Its job is to mutate the staged
+ * diff, so a staged change is what it was asked to work on, while an
+ * unstaged edit sitting under it is work no commit holds and work this
+ * tool would overwrite. Every other caller wants the whole tree clean and
+ * uses getGitStatus directly.
+ */
+export function unstagedDirtyLines(dirtyLines: string[]): string[] {
+  return dirtyLines.filter((line) => {
+    if (line.startsWith("??")) return true;
+    const worktreeState = line[1];
+    return worktreeState !== undefined && worktreeState !== " ";
+  });
+}
+
 const MAX_LISTED_DIRTY_PATHS = 20;
 
 /** Builds the stderr message for a dirty tree, capping the listed paths. */

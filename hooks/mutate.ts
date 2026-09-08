@@ -8,38 +8,50 @@
 // Contract:
 //   mutate [--rev REV] [--range A..B] [--staged] [--paths PATH...]
 //          [--command CMD] [--max N] [--timeout SECONDS] [--format text|json]
-// Exit 0: nothing survived. Exit 1: at least one mutation survived. Exit 2:
-// could not run as asked, which includes a dirty working tree, a baseline
-// run that was already failing, no command to run, and a tree left dirty
-// afterwards. A run that could not happen must never read the same as a run
-// that happened and found nothing.
+// Exit 0: every attempted mutation got a verdict and none survived. Exit 1:
+// at least one mutation survived. Exit 2: could not run as asked, which
+// includes a dirty working tree, a baseline run that was already failing,
+// no command to run, and a tree left dirty afterwards. Exit 3: nothing
+// survived, but at least one mutation never got a verdict. A run that could
+// not happen, and a run that could not judge part of its own work, must
+// never read the same as a run that judged all of it and found nothing.
 //
 // This tool writes to the caller's own source files, so the safety rules
 // come first and are not optional:
 //   - it refuses to start on a dirty working tree, using the same check
 //     hooks/pre-mutation-clean-tree.ts uses, so there is always a committed
-//     copy to compare against;
+//     copy to compare against. Under --staged, whose whole job is to mutate
+//     the staged diff, the requirement is narrower: staged changes are
+//     expected, and the unstaged tree has to be clean;
+//   - it refuses a --paths target that git ignores, because an ignored file
+//     has no committed copy to fall back on;
 //   - it holds every original in memory and restores it in a finally block,
 //     on SIGINT, and on SIGTERM;
 //   - it checks the tree is clean again at the end and fails loudly if not.
+// The one hole none of that closes: a SIGKILL or a hard crash cannot be
+// caught, and leaves the last mutated file mutated on disk. --help says so,
+// and says how to get a tracked file back.
 
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  applyMutation,
   exitCodeFor,
   formatReportJson,
   formatReportText,
   planMutations,
   selectMutablePaths,
-  type Mutation,
   type MutationResult,
   type SourceFile,
-  type Verdict,
 } from "../src/mutate.ts";
-import { formatDirtyTreeMessage, getGitStatus, resolveRepoRoot } from "../src/clean-tree-gate.ts";
+import { runOneMutation, type CommandRun } from "../src/mutate-runner.ts";
+import {
+  formatDirtyTreeMessage,
+  getGitStatus,
+  resolveRepoRoot,
+  unstagedDirtyLines,
+} from "../src/clean-tree-gate.ts";
 
 const DEFAULT_MAX = 25;
 
@@ -52,12 +64,18 @@ test read that line closely enough to fail.
 
   --rev REV       mutate the source files changed by that commit (default: HEAD)
   --range A..B    mutate the source files changed across that range
-  --staged        mutate the source files in the staged diff
-  --paths PATH... mutate exactly these files
+  --staged        mutate the source files in the staged diff. Staged changes
+                  are expected here; the unstaged tree has to be clean
+  --paths PATH... mutate exactly these files. A path git ignores is refused
   --command CMD   the command to run after each break (default: "npm test",
                   used only when package.json has a test script)
   --max N         attempt at most N mutations (default: ${DEFAULT_MAX}); each one
-                  runs the whole command
+                  runs the whole command. Mutations are ordered by path, then
+                  line, then column, and the cap keeps the first N of that
+                  order, so a file early in the order can use the whole
+                  budget and a file after it is never touched at all. The
+                  report says how many were planned and how many attempted,
+                  and says plainly when the two differ
   --timeout SECONDS  per-mutation timeout (default: three times the baseline
                   run plus ten seconds). The command is killed at the
                   timeout, but a process the command itself started can
@@ -77,13 +95,45 @@ Operators, applied one at a time:
 Test files are never mutated, and neither is a comment line, an import
 line, or text inside a string literal.
 
+Safety, and the one limit with no fix:
+  Every file this tool writes to is held in memory and put back in a finally
+  block, on SIGINT, and on SIGTERM. A SIGKILL, a power cut, or a hard crash
+  cannot be caught by any handler, and leaves the last mutated file mutated
+  on disk. Get a tracked file back with \`git checkout -- <path>\`. An
+  untracked or ignored path has no committed copy and no way back, which is
+  why a --paths target git ignores is refused before anything runs.
+
 Exit codes:
-  0  no mutation survived
+  0  every attempted mutation got a verdict and none survived
   1  at least one mutation survived
-  2  could not run as asked: a dirty working tree, a baseline run that was
-     already failing, no command to run, nothing to mutate, a bad argument,
-     or a tree left dirty afterwards
+  2  could not run as asked: a dirty working tree, an unstaged change under
+     --staged, a --paths target git ignores, a baseline run that was already
+     failing, no command to run, nothing to mutate, a bad argument, or a
+     tree left dirty afterwards
+  3  nothing survived, but at least one mutation never got a verdict: it
+     timed out or was skipped, so that part of the run is unmeasured
 `;
+
+/**
+ * The dirty lines that stop this run. Everything git reports, except under
+ * --staged, where a staged change is the run's own input and only an
+ * unstaged or untracked line blocks. The same filter runs before the
+ * mutations and again after them, so the after-check cannot pass on a rule
+ * the before-check never applied.
+ */
+function blockingDirtyLines(dirtyLines: string[], staged: boolean): string[] {
+  return staged ? unstagedDirtyLines(dirtyLines) : dirtyLines;
+}
+
+/** The stderr message for unstaged work found under --staged. */
+function formatUnstagedMessage(lines: string[]): string {
+  return [
+    "mutate: --staged mutates the staged diff, so a staged change is expected here.",
+    "These changes are not staged, and this tool writes to the files it mutates:",
+    ...lines.map((line) => `  ${line}`),
+    "Stage them, commit them, or put them away first.",
+  ].join("\n");
+}
 
 function fail(message: string): never {
   process.stderr.write(`mutate: ${message}\n`);
@@ -215,7 +265,9 @@ function runGit(cwd: string, args: string[]): string {
 /** The repository-relative paths the selector names. */
 function resolveCandidatePaths(args: ParsedArgs, repoRoot: string): string[] {
   if (args.paths !== undefined) {
-    return args.paths.map((path) => toRepoRelative(path, repoRoot));
+    const relative = args.paths.map((path) => toRepoRelative(path, repoRoot));
+    refuseIgnoredPaths(relative, repoRoot);
+    return relative;
   }
   if (args.range !== undefined) {
     return splitPaths(runGit(repoRoot, ["diff", "--name-only", "--find-renames", args.range]));
@@ -227,6 +279,43 @@ function resolveCandidatePaths(args: ParsedArgs, repoRoot: string): string[] {
   return splitPaths(
     runGit(repoRoot, ["diff-tree", "--no-commit-id", "--name-only", "--root", "-r", "--find-renames", rev]),
   );
+}
+
+/**
+ * Refuses any --paths target git ignores. The whole safety model here is
+ * that git holds a copy of every file this tool writes to: a restore that
+ * never runs, because the process was killed, is recoverable with
+ * `git checkout -- <path>` and nothing else. An ignored path has no
+ * committed copy, and `git status --porcelain` does not report it either,
+ * so the clean-tree check above never sees it. Mutating one would put a
+ * file at risk that nothing could put back.
+ */
+function refuseIgnoredPaths(paths: string[], repoRoot: string): void {
+  const ignored = gitIgnoredPaths(paths, repoRoot);
+  if (ignored.length === 0) return;
+  fail(
+    `git ignores ${ignored.join(", ")}, and an ignored file has no committed copy to restore from. ` +
+      "If this run were killed partway, that file would stay mutated with nothing to put back. " +
+      "Track the file in git, or point --paths somewhere else",
+  );
+}
+
+/** The subset of `paths` git ignores. `git check-ignore` exits 0 when it
+ * matched something, 1 when it matched nothing, and anything else is a real
+ * failure that has to stop the run: a check that could not run must never
+ * read as a check that passed. */
+function gitIgnoredPaths(paths: string[], repoRoot: string): string[] {
+  const result = spawnSync("git", ["check-ignore", "--", ...paths], {
+    cwd: repoRoot,
+    env: gitEnv(),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error !== undefined) fail(`git check-ignore failed: ${result.error.message}`);
+  if (result.status === 0) return splitPaths(result.stdout);
+  if (result.status === 1) return [];
+  const detail = (result.stderr ?? "").trim();
+  fail(`git check-ignore failed${detail === "" ? "" : `: ${detail}`}`);
 }
 
 function splitPaths(output: string): string[] {
@@ -293,12 +382,6 @@ function resolveCommand(args: ParsedArgs, repoRoot: string): string {
   fail("no command to run: pass --command CMD, or add a test script to package.json");
 }
 
-interface CommandRun {
-  status: number | null;
-  timedOut: boolean;
-  durationMs: number;
-}
-
 /** Runs the command through a shell in the repository root, with an
  * optional timeout in milliseconds. A timeout is reported as its own
  * outcome, never folded into a non-zero exit: a mutation that hung was
@@ -336,18 +419,25 @@ async function main(): Promise<void> {
     fail((err as Error).message);
   }
 
-  // Safety first: no mutation ever runs against work that is not committed.
-  // This is the same check hooks/pre-mutation-clean-tree.ts runs, from the
-  // same module, because a second copy of it would be a second chance to
-  // get it wrong.
+  // Safety first: no mutation ever runs against work no commit holds. This
+  // is the same check hooks/pre-mutation-clean-tree.ts runs, from the same
+  // module, because a second copy of it would be a second chance to get it
+  // wrong. --staged is the one narrowing: it was asked to mutate the staged
+  // diff, so a staged change is the input, not a reason to refuse, while an
+  // unstaged edit or an untracked file still stops the run.
   let status;
   try {
     status = getGitStatus(repoRoot);
   } catch (err) {
     fail((err as Error).message);
   }
-  if (!status.clean) {
-    process.stderr.write(`${formatDirtyTreeMessage(status.dirtyLines)}\n`);
+  const blocking = blockingDirtyLines(status.dirtyLines, args.staged);
+  if (blocking.length > 0) {
+    if (args.staged) {
+      process.stderr.write(`${formatUnstagedMessage(blocking)}\n`);
+      fail("refusing to mutate: --staged expects the unstaged tree to be clean");
+    }
+    process.stderr.write(`${formatDirtyTreeMessage(blocking)}\n`);
     fail("refusing to mutate a dirty working tree; commit or put the changes away first");
   }
 
@@ -420,7 +510,14 @@ async function main(): Promise<void> {
       // command was running would sit unhandled until the whole run had
       // finished, and the handler above would never restore anything.
       await new Promise((resolveTick) => setImmediate(resolveTick));
-      results.push(runOneMutation(mutation, originals, repoRoot, command, timeoutMs));
+      const original = originals.get(mutation.file);
+      if (original === undefined) fail(`internal: no original held for '${mutation.file}'`);
+      results.push(
+        runOneMutation(mutation, original, join(repoRoot, mutation.file), {
+          writeFile: (path, text) => writeFileSync(path, text),
+          runCommand: () => runCommand(command, repoRoot, timeoutMs),
+        }),
+      );
     }
     // One more pause, so a signal that arrived during the last command is
     // handled while the files are still this run's responsibility.
@@ -451,38 +548,13 @@ async function main(): Promise<void> {
   } catch (err) {
     fail(`could not confirm the tree is clean after the run (${(err as Error).message})`);
   }
-  if (!after.clean) {
-    process.stderr.write(`${formatDirtyTreeMessage(after.dirtyLines)}\n`);
+  const leftBehind = blockingDirtyLines(after.dirtyLines, args.staged);
+  if (leftBehind.length > 0) {
+    process.stderr.write(`${formatDirtyTreeMessage(leftBehind)}\n`);
     fail("the working tree is dirty after the run; check these paths before trusting anything above");
   }
 
   process.exit(exitCodeFor(results));
-}
-
-/** Applies one mutation, runs the command, and always puts the file back,
- * whatever the command did and whatever threw. */
-function runOneMutation(
-  mutation: Mutation,
-  originals: Map<string, string>,
-  repoRoot: string,
-  command: string,
-  timeoutMs: number,
-): MutationResult {
-  const original = originals.get(mutation.file);
-  if (original === undefined) fail(`internal: no original held for '${mutation.file}'`);
-  const absolute = join(repoRoot, mutation.file);
-  const mutated = applyMutation(original, mutation);
-  if (mutated === original) {
-    return { mutation, verdict: "skipped", durationMs: 0, exitCode: null };
-  }
-  try {
-    writeFileSync(absolute, mutated);
-    const run = runCommand(command, repoRoot, timeoutMs);
-    const verdict: Verdict = run.timedOut ? "timeout" : run.status === 0 ? "survived" : "killed";
-    return { mutation, verdict, durationMs: run.durationMs, exitCode: run.timedOut ? null : run.status };
-  } finally {
-    writeFileSync(absolute, original);
-  }
 }
 
 main().catch((err: unknown) => {

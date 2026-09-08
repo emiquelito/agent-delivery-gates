@@ -61,11 +61,28 @@ and addition against subtraction.
 It refuses to start on a dirty working tree, restores every file it
 writes to, and checks the tree is clean again before it finishes; test
 files are never mutated. A baseline run comes first, and a suite that is
-already red is exit 2, not a result.
+already red is exit 2, not a result. `--staged` is the one narrowing of
+the clean-tree rule: it mutates the staged diff, so a staged change is
+its input, while an unstaged edit or an untracked file still stops it.
 
-Exit codes: `0` no mutation survived; `1` at least one survived; `2`
-could not run as asked, including a dirty tree, a failing baseline, no
-command to run, or a selector that named nothing to mutate.
+The limit with no fix: a SIGKILL, a power cut, or a hard crash cannot be
+caught by any handler, and leaves the last mutated file mutated on disk.
+Get a tracked file back with `git checkout -- <path>`. An untracked or
+ignored path has no committed copy and no way back, which is why a
+`--paths` target git ignores is refused before anything runs.
+
+`--max N` attempts the first N mutations in path, then line, then column
+order. A file early in that order can use the whole budget and a file
+after it is never touched at all, so `0 survived` under a cap covers
+only what was attempted. The report prints how many were planned and how
+many attempted, and says plainly when the two differ.
+
+Exit codes: `0` every attempted mutation got a verdict and none
+survived; `1` at least one survived; `2` could not run as asked,
+including a dirty tree, an unstaged change under `--staged`, a `--paths`
+target git ignores, a failing baseline, no command to run, or a selector
+that named nothing to mutate; `3` nothing survived, but at least one
+mutation never got a verdict, so part of the run is unmeasured.
 
 ### scan-prose
 
