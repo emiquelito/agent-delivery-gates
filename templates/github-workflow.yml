@@ -28,11 +28,24 @@ jobs:
 
       - run: npm ci
 
-      # Only if you turned the prose rules on with a preset. Without a rules
-      # file this reports that nothing was checked, and --require-rules turns
-      # that into a failure so a missing file cannot read as a clean run.
+      # Off unless the project turned it on with `adg init --prose-preset
+      # NAME`. That command writes .adg/prose-rules.txt, and only its
+      # presence decides whether this step runs at all. Once it is there,
+      # --require-rules stays on so a rules file that goes missing later
+      # fails instead of reading as a clean run, and the baseline is only
+      # passed when it exists so a project that never records one is not
+      # sent looking for a file it never created.
       - name: prose scan
-        run: npx agent-delivery-gates scan-prose --require-rules --baseline .adg/prose-baseline.txt
+        run: |
+          if [ -f .adg/prose-rules.txt ]; then
+            if [ -f .adg/prose-baseline.txt ]; then
+              npx agent-delivery-gates scan-prose --require-rules --baseline .adg/prose-baseline.txt
+            else
+              npx agent-delivery-gates scan-prose --require-rules
+            fi
+          else
+            echo "prose scan -- skipped (no .adg/prose-rules.txt; run init --prose-preset to turn this on)"
+          fi
 
       # Fails when the tally names a rule that does not exist, repeats an
       # entry number, or points at a file that is not there.

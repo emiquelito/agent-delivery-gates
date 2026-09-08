@@ -5,9 +5,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OWN_WORKFLOW = join(ROOT, ".github", "workflows", "gates.yml");
@@ -16,6 +18,32 @@ const TEMPLATE = join(ROOT, "templates", "github-workflow.yml");
 function read(path: string): string {
   assert.ok(existsSync(path), `${path} does not exist`);
   return readFileSync(path, "utf8");
+}
+
+// Pulls the shell block out of the template's "prose scan" step's `run: |`
+// block, dedented, so it can be executed for real against a scratch
+// directory instead of only pattern-matched as YAML text.
+function extractProseScanShell(yml: string): string {
+  const lines = yml.split("\n");
+  const stepIndex = lines.findIndex((l) => l.trim() === "- name: prose scan");
+  assert.ok(stepIndex >= 0, "template has no 'prose scan' step");
+  const runIndex = lines.findIndex((l, i) => i > stepIndex && l.trim() === "run: |");
+  assert.ok(runIndex >= 0, "prose scan step has no 'run: |' block");
+  const runIndent = lines[runIndex].match(/^(\s*)/)![1].length;
+  const body: string[] = [];
+  for (let i = runIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") {
+      body.push("");
+      continue;
+    }
+    const indent = line.match(/^(\s*)/)![1].length;
+    if (indent <= runIndent) break;
+    body.push(line);
+  }
+  // Dedent to the first body line's own indent.
+  const bodyIndent = body.find((l) => l.trim() !== "")?.match(/^(\s*)/)?.[1].length ?? 0;
+  return body.map((l) => l.slice(bodyIndent)).join("\n");
 }
 
 test("this repository runs its own gates in CI", () => {
@@ -76,4 +104,106 @@ test("every template named by init exists on disk", () => {
   for (const m of initSource.matchAll(/templateName: "([\w.-]+)"/g)) {
     assert.ok(present.has(m[1]), `init names a template that is not there: ${m[1]}`);
   }
+});
+
+// The template's prose step is meant to be off for anyone who never asked for
+// it, on this repo's own finding: the un-guarded version fails CI outright
+// with no .adg/prose-rules.txt in the tree, which is the state of any project
+// straight out of `adg init` with no --prose-preset. These tests execute the
+// guard's real shell, not just its YAML text, against a scratch directory
+// standing in for that project, with a stub `npx` on PATH in place of the
+// real package so the test observes what the guard chooses to invoke.
+function withScratchDir(fn: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "adg-prose-guard-"));
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// A stub `npx` that records its arguments to a file and exits 0, so the
+// guard's shell can run to completion without the real package installed.
+function installStubNpx(dir: string): { binDir: string; callsFile: string } {
+  const binDir = join(dir, "bin");
+  const callsFile = join(dir, "npx-calls.txt");
+  execFileSync("mkdir", ["-p", binDir]);
+  writeFileSync(
+    join(binDir, "npx"),
+    `#!/usr/bin/env bash\necho "$@" >> "${callsFile}"\nexit 0\n`,
+    { mode: 0o755 },
+  );
+  return { binDir, callsFile };
+}
+
+function runProseScanShell(dir: string, binDir: string): { status: number; stdout: string } {
+  const shell = extractProseScanShell(read(TEMPLATE));
+  try {
+    const stdout = execFileSync("bash", ["-c", shell], {
+      cwd: dir,
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+      encoding: "utf8",
+    });
+    return { status: 0, stdout };
+  } catch (err) {
+    const e = err as { status: number; stdout: string };
+    return { status: e.status, stdout: e.stdout };
+  }
+}
+
+test("the CI template's prose step does not run the scan when rules are absent", () => {
+  withScratchDir((dir) => {
+    const { binDir, callsFile } = installStubNpx(dir);
+    const result = runProseScanShell(dir, binDir);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /skipped/);
+    assert.ok(!existsSync(callsFile), "the guard invoked npx with no rules file present");
+  });
+});
+
+test("the CI template's prose step still passes --require-rules when it does run", () => {
+  withScratchDir((dir) => {
+    execFileSync("mkdir", ["-p", join(dir, ".adg")]);
+    writeFileSync(join(dir, ".adg", "prose-rules.txt"), "\\bexample\\b\n");
+    const { binDir, callsFile } = installStubNpx(dir);
+    const result = runProseScanShell(dir, binDir);
+    assert.equal(result.status, 0);
+    const calls = readFileSync(callsFile, "utf8");
+    assert.match(calls, /scan-prose/);
+    assert.match(calls, /--require-rules/);
+  });
+});
+
+test("the CI template's prose step uses the baseline only when it exists", () => {
+  withScratchDir((dir) => {
+    execFileSync("mkdir", ["-p", join(dir, ".adg")]);
+    writeFileSync(join(dir, ".adg", "prose-rules.txt"), "\\bexample\\b\n");
+    const { binDir: binDirNoBaseline, callsFile: callsNoBaseline } = installStubNpx(dir);
+    const withoutBaseline = runProseScanShell(dir, binDirNoBaseline);
+    assert.equal(withoutBaseline.status, 0);
+    assert.doesNotMatch(readFileSync(callsNoBaseline, "utf8"), /--baseline/);
+
+    writeFileSync(join(dir, ".adg", "prose-baseline.txt"), "");
+    rmSync(callsNoBaseline);
+    const withBaseline = runProseScanShell(dir, binDirNoBaseline);
+    assert.equal(withBaseline.status, 0);
+    assert.match(readFileSync(callsNoBaseline, "utf8"), /--baseline \.adg\/prose-baseline\.txt/);
+  });
+});
+
+test("this repository's own workflow runs the prose scan unconditionally with --require-rules", () => {
+  const yml = read(OWN_WORKFLOW);
+  const lines = yml.split("\n");
+  const stepIndex = lines.findIndex((l) => l.trim() === "- name: prose scan");
+  assert.ok(stepIndex >= 0, "gates.yml has no 'prose scan' step");
+  const runLine = lines.slice(stepIndex).find((l) => l.trim().startsWith("run:"));
+  assert.ok(runLine, "the prose scan step has no run line");
+  // Unconditional: the run line names the command directly, with no shell
+  // `if` guarding whether it executes, unlike the template's guarded form.
+  assert.doesNotMatch(runLine!, /run:\s*\|/, "this repo's own prose step should not need a multi-line guard");
+  assert.match(runLine!, /scan-prose\.sh --require-rules/);
+});
+
+test(".adg/prose-rules.txt still exists in this repository", () => {
+  assert.ok(existsSync(join(ROOT, ".adg", "prose-rules.txt")), ".adg/prose-rules.txt is missing");
 });

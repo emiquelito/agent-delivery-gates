@@ -68,30 +68,33 @@ pre-commit hook with no agent at all.
 
 ## 🚀 Quickstart
 
-New project:
 ```
 npm install --save-dev agent-delivery-gates
 npx adg init
 git config core.hooksPath .githooks
 ```
 
-Existing project, so the rules apply only to what changes from here:
-```
-npm install --save-dev agent-delivery-gates
-npx adg init --prose-preset house-style --baseline
-git config core.hooksPath .githooks
-```
-
 `init` writes a git pre-commit hook, `AGENTS.md`, an empty gate tally log,
 a CI workflow, and the hook and MCP configs for the agents listed below,
-and only ever creates a file that does not already exist. `--prose-preset
-house-style` turns on the prose gate with this project's own banned-word
-list; without it the prose gate stays off. `--baseline` records every
-match the project already has to `.adg/prose-baseline.txt`, so turning the
-gate on does not fail on everything already there, only on what gets
-added after. `--dry-run` prints what would happen without writing
-anything, `--force` overwrites a file that already exists, and `--dir
-PATH` targets a directory other than the current one.
+and only ever creates a file that does not already exist. `--dry-run`
+prints what would happen without writing anything, `--force` overwrites
+a file that already exists, and `--dir PATH` targets a directory other
+than the current one.
+
+### Optional: this project's own banned-word list
+
+The prose scan is this project's own taste, not one of the gates, and it
+stays off unless asked for. Turn it on with:
+
+```
+npx adg init --prose-preset house-style --baseline
+```
+
+On an existing project, `--baseline` records every match already there
+to `.adg/prose-baseline.txt`, so the gate fails only on what gets added
+after, not on everything the project already has. Leave `--baseline` off
+on a new project, which has nothing to record; on its own, without
+`--prose-preset`, it is rejected.
 
 ## 🔌 Where it runs
 
