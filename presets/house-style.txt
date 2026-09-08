@@ -1,0 +1,65 @@
+# House style preset for agent-delivery-gates' own prose scan.
+#
+# This file is a rules file for scripts/scan-prose.sh. See the format at the
+# top of that script, or CLAUDE.md, for the syntax: blank lines and lines
+# starting with # are ignored, "include: PATH" pulls in another rules file,
+# "exclude: GLOB" removes a path from the default scan, "prose-only: FRAGMENT"
+# applies only to prose files, and any other line is an extended-regex
+# fragment applied to every scanned file.
+#
+# This is one project's house style, not a delivery gate. A project that
+# adopts agent-delivery-gates does not have to adopt this file; it can point
+# --rules / ADG_PROSE_RULES at its own list, or none at all.
+
+# This project's own banned vocabulary.
+\bgenuine(ly)?\b
+\bdisciplin\w*\b
+\bshap(e|es|ed|ing)\b
+\binstinct\w*\b
+\bsurfac(e|es|ed|ing)\b
+\bbolt(ed)?[- ]on\b
+\bcalls for\b
+\brather than\b
+—
+
+# The stock vocabulary that marks text as machine written.
+\bdelv(e|es|ed|ing)\b
+\bsubstrates?\b
+\bload[- ]bearing\b
+\btapestr(y|ies)\b
+\btestaments?\b
+\brealms?\b
+\bnuanc(e|es|ed|ing)\b
+\bplethora\b
+\bmyriads?\b
+\bmeticulous(ly)?\b
+\bseamless(ly)?\b
+\bintricate\b
+\bprofound(ly)?\b
+\bparadigms?\b
+\bholistic(ally)?\b
+\bcutting[- ]edge\b
+\bgame[- ]chang(er|ing)\b
+\bembark(s|ed|ing)?\b
+\belevat(e|es|ed|ing)\b
+\bunlock(s|ed|ing)?\b
+\bpivotal(ly)?\b
+\bcrucial\b
+\blandscape\b
+\bnavigat(e|es|ed|ing)\b
+\butiliz(e|es|ed|ing|ation)\b
+\bleverag(e|es|ed|ing)\b
+\bdeep dive\b
+\bdive into\b
+\bworth noting\b
+
+# A spaced hyphen standing in for an em dash. In source it would match
+# ordinary subtraction, so it applies to prose files only.
+prose-only: [[:alpha:]] - [[:alpha:]]
+
+# Paths never scanned: this file holds every banned word above as a literal,
+# the lockfile is generated, and the licence text is not ours to edit.
+exclude: scripts/scan-prose.sh
+exclude: package-lock.json
+exclude: LICENSE
+exclude: presets/house-style.txt

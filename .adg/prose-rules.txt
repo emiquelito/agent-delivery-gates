@@ -1,0 +1,8 @@
+# This repo's own prose rules for scripts/scan-prose.sh.
+#
+# What follows is one project's house style, not part of the
+# agent-delivery-gates product. A project that adopts this tool is not
+# adopting this file; point --rules / ADG_PROSE_RULES elsewhere, or drop this
+# file, to opt out.
+
+include: ../presets/house-style.txt
