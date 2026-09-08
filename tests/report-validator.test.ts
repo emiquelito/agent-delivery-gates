@@ -494,3 +494,137 @@ test("R3 still fires on a table carrying only high severities", () => {
   ].join("\n");
   assert.deepEqual(rulesFired(validateReport(report)), ["finding-list-incomplete"]);
 });
+
+// R2 decides whether a claim can be checked by someone who was not in the
+// conversation. Every phrase here used to pass.
+const FAKE_DURABLE = [
+  "`as shown earlier`",
+  "deadbeef confirms this in prose only.",
+  "the button uses color 1a2b3c4 now.",
+  "see above",
+  "per my previous message",
+];
+for (const evidence of FAKE_DURABLE) {
+  test(`R2 rejects evidence that only points at context: ${evidence}`, () => {
+    const report = [
+      "# R",
+      "",
+      "The retry was validated.",
+      `Evidence: ${evidence}`,
+      "",
+      "## Findings",
+      "",
+      "- Low: x",
+      "",
+      "Committed a1b2c3d, tree is clean.",
+    ].join("\n");
+    assert.ok(rulesFired(validateReport(report)).includes("evidence-not-durable"));
+  });
+}
+
+const REAL_DURABLE = [
+  "commit a1b2c3d4 and the suite went green.",
+  "tests/report-validator.test.ts covers it.",
+  "ran `npm test`, 80 passed.",
+  "sha 9f8e7d6c5b4a3210 in the mutation branch.",
+];
+for (const evidence of REAL_DURABLE) {
+  test(`R2 accepts evidence anyone can check: ${evidence}`, () => {
+    const report = [
+      "# R",
+      "",
+      "The retry was validated.",
+      `Evidence: ${evidence}`,
+      "",
+      "## Findings",
+      "",
+      "- Low: x",
+      "",
+      "Committed a1b2c3d, tree is clean.",
+    ].join("\n");
+    assert.deepEqual(rulesFired(validateReport(report)), []);
+  });
+}
+
+// A shorter id used to count as carried because a longer one contained it.
+test("R5 does not accept F10 as carrying F1", () => {
+  const report = [
+    "# R",
+    "",
+    "Discusses F10 in detail.",
+    "",
+    "## Findings",
+    "",
+    "- Low: x",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  const findings = validateReport(report, { priorFindingIds: ["F1"] });
+  assert.deepEqual(rulesFired(findings), ["open-finding-not-carried"]);
+});
+
+// An id mentioned only inside a code sample is not carried forward.
+test("R5 does not count an id that appears only inside a fence", () => {
+  const report = [
+    "# R",
+    "",
+    "```",
+    "F1",
+    "```",
+    "",
+    "## Findings",
+    "",
+    "- Low: x",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  const findings = validateReport(report, { priorFindingIds: ["F1"] });
+  assert.deepEqual(rulesFired(findings), ["open-finding-not-carried"]);
+});
+
+test("R5 accepts an id actually carried in the prose", () => {
+  const report = [
+    "# R",
+    "",
+    "Carrying F1 forward, still open.",
+    "",
+    "## Findings",
+    "",
+    "- Low: x",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  assert.deepEqual(rulesFired(validateReport(report, { priorFindingIds: ["F1"] })), []);
+});
+
+// Prose calling something a low priority is not a Low finding.
+test("R3 does not accept a parenthetical in prose as a Low entry", () => {
+  const report = [
+    "# R",
+    "",
+    "## Findings",
+    "",
+    "- Critical: fails open",
+    "",
+    "This was a (low priority) cleanup overall.",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  assert.deepEqual(rulesFired(validateReport(report)), ["finding-list-incomplete"]);
+});
+
+// A finding saying something is NOT handled reports a defect. Reading it as a
+// claim rejected correct reports, which is how a gate gets switched off.
+test("R1 does not fire on a finding stating that something is not handled", () => {
+  const report = [
+    "# R",
+    "",
+    "## Findings",
+    "",
+    "| F1 | High | eviction is not handled correctly under load |",
+    "| F2 | Low | wording |",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  assert.deepEqual(rulesFired(validateReport(report)), []);
+});

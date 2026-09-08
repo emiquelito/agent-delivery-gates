@@ -1,7 +1,7 @@
 // Pure core for the delivery-report-validator. Takes a delivery report's
 // text and returns findings. No file reading, no process exit, no stdin, no
-// knowledge of Claude Code, hooks, or any vendor. Every place in this repo
-// that needs report checking, a CLI, a Stop hook, a future CI step, calls
+// knowledge of any particular agent, hooks, or any vendor. Every place in this repo
+// that needs report checking, a CLI, a stop hook, a future CI step, calls
 // this same function so the rules live in exactly one place.
 //
 // A delivery report is a markdown document an AI coding agent writes to
@@ -152,11 +152,17 @@ const EVIDENCE_LINE_RE = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*evidence\s*
 // "Retry handled. Evidence: commit abc1234" is how people write it.
 const EVIDENCE_INLINE_RE = /(?:\*\*|__)?\s*\bevidence\s*:/i;
 
+const NEGATED_CLAIM_RE =
+  /\b(?:not|never|fails? to|failed to|isn't|is not|was not|wasn't|are not|aren't|were not|weren't|no longer)\s+(?:\w+\s+){0,2}(?:handles?|handled|handling|isolates?|isolated|isolating|recovers?|recovered|recovering|prevents?|prevented|preventing|rejects?|rejected|rejecting|validates?|validated|validating)\b/i;
+
 function findUnprovenRobustnessClaims(visible: string[]): Finding[] {
   const findings: Finding[] = [];
   for (let i = 0; i < visible.length; i++) {
     const text = visible[i];
     if (text.trim() === "" || !CLAIM_VERB_RE.test(text)) continue;
+    // "eviction is not handled correctly" reports a defect, so it is not a
+    // claim that anything works and needs no evidence of its own.
+    if (NEGATED_CLAIM_RE.test(text)) continue;
 
     // Same line: the claim's own line carries an evidence reference, whether
     // it opens the line or follows the claim in the same sentence.
@@ -190,14 +196,43 @@ function findUnprovenRobustnessClaims(visible: string[]): Finding[] {
 // --- R2: evidence-not-durable ------------------------------------------------
 
 const HASH_RE = /\b[0-9a-f]{7,40}\b/i;
+// As evidence, a hex token counts only when the line says it is a hash.
+// Plain hex letters spell ordinary words, "deadbeef" among them, and a colour
+// code is hex too, so alphabet membership on its own proves nothing. R4 uses
+// the looser pattern above, because a commit line states its own purpose.
+const HASH_EVIDENCE_RE =
+  /\b(?:commits?|committed|sha|hash|rev(?:ision)?)\b[^\n]{0,32}?\b[0-9a-f]{7,40}\b|\b[0-9a-f]{7,40}\b[^\n]{0,32}?\b(?:commits?|committed|sha|hash|rev(?:ision)?)\b/i;
 // A relative path with at least one directory segment and a file
 // extension, which is how a path into the repo is written. This is a text
 // heuristic, not a filesystem check: the core has no I/O.
 const FILE_PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z]{1,10}\b/;
-const BACKTICK_COMMAND_RE = /`[^`]+`/;
+// Phrases that point back at a conversation. A reference built on one of
+// these cannot be checked by anyone who was not in that conversation, so it
+// disqualifies the line whatever else sits on it.
+const CONTEXT_ONLY_RE =
+  /\bas (?:shown|described|noted|discussed|stated|explained)\s+(?:earlier|above|previously|before)\b|\bsee\s+above\b|\b(?:shown|noted|described|discussed|stated|explained)\s+(?:earlier|above|previously)\b|\bper my previous\b|\bin my (?:previous|earlier|last)\b|\bfrom the run above\b|\bearlier in (?:this|the) (?:session|conversation|thread)\b|\bas mentioned\b/i;
+
+// A backticked span counts only when it reads like something that was run:
+// two or more words, or a word carrying a flag, a path, or a call. Wrapping a
+// phrase in backticks used to be enough, so `as shown earlier` passed.
+const BACKTICK_COMMAND_RE = /`([^`\n]+)`/;
+const COMMAND_SHAPE_RE = /^[\w./-]+(?:\s+[-\w./=:]+)+$|^[\w.-]+\([^)]*\)$|^[\w.-]+\/[\w./-]+$/;
+
+function hasCommandInBackticks(line: string): boolean {
+  const re = new RegExp(BACKTICK_COMMAND_RE.source, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line)) !== null) {
+    if (COMMAND_SHAPE_RE.test(m[1].trim())) return true;
+  }
+  return false;
+}
 
 function isDurableEvidence(line: string): boolean {
-  return HASH_RE.test(line) || FILE_PATH_RE.test(line) || BACKTICK_COMMAND_RE.test(line);
+  // A context reference disqualifies the line whatever else it carries. The
+  // check used to run the other way round, so a context phrase wrapped in
+  // backticks was read as a command and the reference passed.
+  if (CONTEXT_ONLY_RE.test(line)) return false;
+  return HASH_EVIDENCE_RE.test(line) || FILE_PATH_RE.test(line) || hasCommandInBackticks(line);
 }
 
 function findNonDurableEvidence(visible: string[]): Finding[] {
@@ -265,8 +300,16 @@ function findIncompleteFindingList(visible: string[]): Finding[] {
     }
   }
 
-  const section = visible.slice(headingIndex + 1, sectionEnd).join("\n");
-  if (SEVERITY_ENTRY_RE.test(section) || NO_LOW_INFO_RE.test(section)) {
+  const sectionLines = visible.slice(headingIndex + 1, sectionEnd);
+  const section = sectionLines.join("\n");
+  // A severity counts only on a line written as an entry: a list item, a
+  // numbered item, or a table row. Otherwise prose calling something a
+  // "(low priority) cleanup" stood in for a Low finding that was never there.
+  const entryLineRe = /^\s*(?:[-*+]\s|\d+[.)]\s|\|)/;
+  const hasSeverityEntry = sectionLines.some(
+    (line) => entryLineRe.test(line) && SEVERITY_ENTRY_RE.test(line),
+  );
+  if (hasSeverityEntry || NO_LOW_INFO_RE.test(section)) {
     return [];
   }
 
@@ -308,7 +351,11 @@ function findMissingCommitLine(visible: string[]): Finding[] {
 function findDroppedPriorFindings(reportText: string, priorFindingIds: string[]): Finding[] {
   const findings: Finding[] = [];
   for (const id of priorFindingIds) {
-    if (!reportText.includes(id)) {
+    // Bounded, so F1 does not count as carried because F10 appears. The text
+    // passed in has code fences stripped, so an id mentioned only inside a
+    // sample does not count either.
+    const bounded = new RegExp(`(?<![\\w-])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+    if (!bounded.test(reportText)) {
       findings.push({
         rule: "open-finding-not-carried",
         severity: "medium",
@@ -344,7 +391,7 @@ export function validateReport(reportText: string, options: ValidateOptions = {}
     ...findNonDurableEvidence(visible),
     ...findIncompleteFindingList(visible),
     ...findMissingCommitLine(visible),
-    ...findDroppedPriorFindings(reportText, options.priorFindingIds ?? []),
+    ...findDroppedPriorFindings(visible.join("\n"), options.priorFindingIds ?? []),
   ];
 
   findings.sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule));
