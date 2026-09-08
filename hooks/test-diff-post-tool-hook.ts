@@ -68,6 +68,12 @@ function main(): void {
     return;
   }
 
+  // A payload of literal null parses fine and then throws on any property
+  // read, which exited 1 with a stack trace. A hook must never exit on a code
+  // it does not define.
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    block("hook input was not a JSON object");
+  }
   if (payload.tool_name !== "Bash") {
     process.exit(0);
   }

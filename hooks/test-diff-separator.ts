@@ -185,6 +185,14 @@ function formatText(result: SeparateResult): string {
 
   if (result.testFiles.length === 0) {
     lines.push("Test diff: no test files changed.");
+    // A signal can still exist with no test file in the diff: a test renamed
+    // out of the naming rules leaves nothing classified as a test, and that
+    // rename is the whole point. Returning early hid it.
+    if (result.signals.length > 0) {
+      lines.push("");
+      lines.push(`Signals (${result.signals.length}):`);
+      for (const signal of result.signals) lines.push(`  ${formatSignalText(signal)}`);
+    }
     return lines.join("\n");
   }
 

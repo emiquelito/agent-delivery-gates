@@ -351,3 +351,115 @@ test("the fixture: an agent 'fixes' a bug by deleting two assertions and adding 
   assert.equal(result.sourceFiles[0].removed, 1);
   assert.equal(result.sourceFiles[0].added, 1);
 });
+
+// The net rule works per file. Merging every test file into one before
+// counting would let an addition in one file cancel a deletion in another,
+// and that change used to pass the whole suite untouched.
+test("a deletion in one test file is not cancelled by an addition in another", () => {
+  const diff = [
+    "diff --git a/tests/a.test.js b/tests/a.test.js",
+    "--- a/tests/a.test.js",
+    "+++ b/tests/a.test.js",
+    "@@ -1,3 +1,2 @@",
+    "-  assert.equal(x, 1);",
+    "diff --git a/tests/b.test.js b/tests/b.test.js",
+    "--- a/tests/b.test.js",
+    "+++ b/tests/b.test.js",
+    "@@ -1,2 +1,3 @@",
+    "+  assert.equal(y, 2);",
+    "+  assert.equal(z, 3);",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+// An assertion swapped for a weaker one keeps the line count the same, so the
+// net rule cannot see it. These are the cheats the tool exists to catch.
+const WEAKENINGS: Array<[string, string]> = [
+  ["  assert.equal(x, 5);", "  assert.ok(x);"],
+  ["  self.assertEqual(x, 5)", "  self.assertTrue(x)"],
+  ["  assert.strictEqual(a, b);", "  assert.equal(a, b);"],
+  ["  expect(total).toBe(100);", "  expect(total).toBeTruthy();"],
+];
+for (const [before, after] of WEAKENINGS) {
+  test(`assertion-weakened fires when ${before.trim()} becomes ${after.trim()}`, () => {
+    const result = separateTestDiff(oneFileDiff("tests/q.test.js", [before], [after]));
+    assert.ok(signalIds(result.signals).includes("assertion-weakened"));
+  });
+}
+
+test("assertion-weakened fires when the expected value changes and the call does not", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  assert.equal(total, 100);"], ["  assert.equal(total, 0);"]),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-weakened"));
+});
+
+test("assertion-weakened stays quiet when an assertion is only reformatted", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  assert.equal(total, 100);"], ["  assert.equal(total, 100);"]),
+  );
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// A commented-out assertion is gone from the run. Counting the comment as an
+// addition made the deletion read as a rewrite.
+test("an assertion commented out fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  expect(x).toBe(1);"], ["  // expect(x).toBe(1);"]),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+test("a comment-only edit mentioning an assertion fires nothing", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  // TODO: assert this works"], ["  // done"]),
+  );
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("a comment naming it.only does not fire skip-added", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", [], ["  // avoid using it.only() in CI"]),
+  );
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// Go's stdlib assertions carry none of the words the pattern looked for.
+test("a removed Go t.Errorf fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("queue_test.go", ['\tif got != want { t.Errorf("got %d", got) }'], []),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+// Renaming a test out of the naming rules takes it out of the run, and it
+// stops being classified as a test at the same moment.
+test("a test renamed out of the naming rules fires test-file-declassified", () => {
+  const diff = [
+    "diff --git a/lib/queue.test.js b/lib/queue.js.bak",
+    "similarity index 90%",
+    "rename from lib/queue.test.js",
+    "rename to lib/queue.js.bak",
+    "--- a/lib/queue.test.js",
+    "+++ b/lib/queue.js.bak",
+    "@@ -1,3 +1,1 @@",
+    "-  expect(x).toBe(1);",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.ok(signalIds(result.signals).includes("test-file-declassified"));
+});
+
+test("a rename that stays a test does not fire test-file-declassified", () => {
+  const diff = [
+    "diff --git a/tests/queue.test.js b/tests/queue-drain.test.js",
+    "similarity index 98%",
+    "rename from tests/queue.test.js",
+    "rename to tests/queue-drain.test.js",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});

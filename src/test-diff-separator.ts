@@ -13,6 +13,8 @@
 
 export type SignalId =
   | "assertion-removed"
+  | "assertion-weakened"
+  | "test-file-declassified"
   | "test-case-removed"
   | "skip-added"
   | "tolerance-widened"
@@ -99,6 +101,7 @@ export function isTestPath(path: string, extraPatterns: RegExp[] = []): boolean 
 
 interface RawFileDiff {
   path: string;
+  oldPath: string | null;
   addedLines: string[];
   removedLines: string[];
 }
@@ -113,13 +116,14 @@ const GIT_HEADER_RE = /^diff --git a\/(.+?) b\/(.+)$/;
 interface FileSection {
   path: string | null;
   pathA: string | null;
+  oldPath: string | null;
   addedLines: string[];
   removedLines: string[];
   inHunk: boolean;
 }
 
 function newSection(): FileSection {
-  return { path: null, pathA: null, addedLines: [], removedLines: [], inHunk: false };
+  return { path: null, pathA: null, oldPath: null, addedLines: [], removedLines: [], inHunk: false };
 }
 
 /**
@@ -136,7 +140,12 @@ function parseDiff(text: string): RawFileDiff[] {
 
   const finalize = () => {
     if (current && current.path !== null) {
-      files.push({ path: current.path, addedLines: current.addedLines, removedLines: current.removedLines });
+      files.push({
+        path: current.path,
+        oldPath: current.oldPath,
+        addedLines: current.addedLines,
+        removedLines: current.removedLines,
+      });
     }
     current = null;
   };
@@ -169,6 +178,7 @@ function parseDiff(text: string): RawFileDiff[] {
         continue;
       }
       if (line.startsWith("rename from ")) {
+        section.oldPath = line.slice("rename from ".length).trim();
         continue;
       }
       if (line.startsWith("--- ") || line === "---") {
@@ -221,7 +231,8 @@ function parseDiff(text: string): RawFileDiff[] {
 
 // Word-prefixed so "assertEqual", "assert_equal", and "self.assertTrue" all
 // match through the "assert" prefix, not only a standalone "assert" call.
-const ASSERTION_RE = /\bassert|\bexpect\(|\bshould\b|\bverify\(|\brequire!/i;
+const ASSERTION_RE =
+  /\bassert|\bexpect\(|\bshould\b|\bverify\(|\brequire!|\bt\.(?:Errorf?|Fatalf?|Fail(?:Now)?)\b/i;
 const TEST_CASE_RE = /\btest\(|\bit\(|\bdescribe\(|\bdef test_|#\[test\]|\bfunc Test|@Test\b/i;
 const SKIP_RE =
   /\.skip\b|\.only\b|\bxit\(|\bxdescribe\(|\btest\.todo\b|\bit\.todo\b|@pytest\.mark\.skip|@unittest\.skip|#\[ignore\]|\bt\.Skip\(|@Disabled|@Ignore/i;
@@ -229,9 +240,109 @@ const TOLERANCE_RE =
   /\btolerance\b|\bepsilon\b|\batol\b|\brtol\b|\bdelta\b|\bcloseTo\b|\bapproximately\b|\balmostEqual\b|\bwithinDelta\b/i;
 const TIMEOUT_RE = /\btimeout\b|\bretr(?:y|ies)\b|\bmax_?retries\b/i;
 
-/** Counts and collects the lines in `lines` that match `re`. */
+const COMMENT_LINE_RE = /^\s*(?:\/\/|#(?!\[)|\*|\/\*|--)/;
+
+/**
+ * True when the line carries only a comment. Commenting an assertion out
+ * removes it from the run, so a commented copy must not count as the
+ * assertion being added back. A comment naming a skip is not a skip either.
+ */
+function isCommentLine(line: string): boolean {
+  return COMMENT_LINE_RE.test(line);
+}
+
+/** Counts and collects the code lines in `lines` that match `re`. */
 function matching(lines: string[], re: RegExp): string[] {
-  return lines.filter((line) => re.test(line));
+  return lines.filter((line) => !isCommentLine(line) && re.test(line));
+}
+
+// An assertion that stays in place but stops proving as much. The net-count
+// rules cannot see this, because one line goes and one line arrives, so it is
+// its own signal. Each pair is a strong check on the left and a weaker one on
+// the right.
+const WEAKENING_PAIRS: Array<[RegExp, RegExp]> = [
+  [/\bassert\w*\.?(?:strictEqual|deepStrictEqual)\b/i, /\bassert\w*\.?(?:equal|deepEqual)\b/i],
+  [/\b(?:assert\w*\.?equal|assertEqual|toBe|toEqual)\b/i, /\b(?:assert\w*\.?ok|assertTrue|assertIsNotNone|toBeTruthy|toBeDefined|toBeTruthy)\b/i],
+  [/===/, /(?<![=!<>])==(?!=)/],
+  [/\btoHaveBeenCalledTimes\b/i, /\btoHaveBeenCalled\b/i],
+];
+
+/** Everything a literal could be, blanked, so two lines can be compared. */
+function blankLiterals(line: string): string {
+  return line
+    .replace(/(["'`])(?:\\.|(?!\1)[^\\])*\1/g, "L")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "N")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Two ways an assertion gets quieter without disappearing. A strong check is
+ * swapped for a weaker one, or the same check keeps its form while the value
+ * it expects changes, which is how a test gets edited to match a bug.
+ */
+function assertionWeakenedSignals(file: RawFileDiff): Signal[] {
+  const removed = matching(file.removedLines, ASSERTION_RE);
+  const added = matching(file.addedLines, ASSERTION_RE);
+  if (removed.length === 0 || added.length === 0) return [];
+  const signals: Signal[] = [];
+
+  for (const gone of removed) {
+    for (const [strong, weak] of WEAKENING_PAIRS) {
+      if (!strong.test(gone) || weak.test(gone)) continue;
+      const swapped = added.find((line) => weak.test(line) && !strong.test(line));
+      if (swapped === undefined) continue;
+      signals.push({
+        id: "assertion-weakened",
+        severity: "high",
+        file: file.path,
+        line: `${gone.trim()}  ->  ${swapped.trim()}`,
+        message:
+          "an assertion was replaced by one that proves less; confirm the check was not loosened to reach green",
+      });
+      break;
+    }
+  }
+
+  for (const gone of removed) {
+    // A changed tolerance or timeout is a changed literal too, and both have
+    // their own signal. Reporting it twice for one edit adds nothing.
+    if (TOLERANCE_RE.test(gone) || TIMEOUT_RE.test(gone)) continue;
+    const blanked = blankLiterals(gone);
+    const edited = added.find((line) => blankLiterals(line) === blanked && line.trim() !== gone.trim());
+    if (edited === undefined) continue;
+    signals.push({
+      id: "assertion-weakened",
+      severity: "high",
+      file: file.path,
+      line: `${gone.trim()}  ->  ${edited.trim()}`,
+      message:
+        "an assertion kept its form while the value it expects changed; confirm the test was not edited to match the behavior",
+    });
+  }
+
+  return signals;
+}
+
+/**
+ * A file that was a test and is not one any more has left the run entirely,
+ * whatever its content diff says. Renaming a test out of the naming rules
+ * takes it out of scrutiny, so the rename itself is the signal.
+ */
+function declassifiedTestSignals(file: RawFileDiff, extraPatterns: RegExp[]): Signal[] {
+  if (file.oldPath === null) return [];
+  if (!isTestPath(file.oldPath, extraPatterns)) return [];
+  if (isTestPath(file.path, extraPatterns)) return [];
+  return [
+    {
+      id: "test-file-declassified",
+      severity: "high",
+      file: file.path,
+      line: `${file.oldPath} -> ${file.path}`,
+      message:
+        "a test file was renamed so it no longer reads as a test; confirm these tests were not taken out of the run",
+    },
+  ];
 }
 
 /**
@@ -286,6 +397,7 @@ function skipAddedSignal(file: RawFileDiff): Signal[] {
 
 function signalsForTestFile(file: RawFileDiff): Signal[] {
   return [
+    ...assertionWeakenedSignals(file),
     ...netRemovalSignal(
       file,
       "assertion-removed",
@@ -345,6 +457,7 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
       added: file.addedLines.length,
       removed: file.removedLines.length,
     };
+    signals.push(...declassifiedTestSignals(file, extraPatterns));
     if (isTestPath(file.path, extraPatterns)) {
       testFiles.push(stats);
       testAdded += stats.added;
