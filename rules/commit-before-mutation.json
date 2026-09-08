@@ -6,5 +6,8 @@
   "failure_mode": "A reviewer that mutation-tests the work, meaning it deliberately breaks code, runs tests, and restores, runs a git operation such as checkout, restore, or stash against a tree that still holds an uncommitted diff. That operation wipes the diff, and with nothing committed there is no ground truth left to reconstruct against; memory is not verification.",
   "origin_incident": "A reviewer ran `git checkout` on an uncommitted route file mid-review and wiped the diff. It was reconstructed from memory and only functionally re-verified through the test suite afterward, which was a real integrity gap that committing first structurally eliminates.",
   "severity": "critical",
-  "enforcement": "hook"
+  "enforcement": "hook",
+  "emits": [
+    "missing-commit-line"
+  ]
 }

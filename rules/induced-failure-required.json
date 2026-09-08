@@ -6,5 +6,9 @@
   "failure_mode": "A claim of the form \"X works\" gets reported as validated when no executed path actually exercised X. Because the happy-path run and the claim share the same code, a green run looks like proof, but the code running without an error is not the same thing as the property holding.",
   "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern seen across AI coding agent reports instead: an agent reports that an error path is handled based on a clean run that never triggers the error, so the report and the untested code both look fine from the outside.",
   "severity": "critical",
-  "enforcement": "hook"
+  "enforcement": "hook",
+  "emits": [
+    "unproven-robustness-claim",
+    "evidence-not-durable"
+  ]
 }

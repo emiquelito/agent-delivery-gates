@@ -31,13 +31,29 @@
     },
     "severity": {
       "type": "string",
-      "enum": ["critical", "high", "medium", "low"],
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ],
       "description": "How much damage this rule prevents when it fires, ranked from critical down to low."
     },
     "enforcement": {
       "type": "string",
-      "enum": ["hook", "prompt", "human_gate"],
+      "enum": [
+        "hook",
+        "prompt",
+        "human_gate"
+      ],
       "description": "The mechanism that enforces this rule: an automated hook, a prompt-level instruction, or a human review gate."
+    },
+    "emits": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Check ids the enforcing code emits for this rule. A record with an empty list is not checked mechanically. Every id a hook can emit belongs to exactly one record, so a finding can be traced back to the rule it came from."
     }
   },
   "required": [
