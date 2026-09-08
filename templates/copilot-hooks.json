@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "npx --no-install agent-delivery-gates copilot-hook clean-tree",
+        "type": "command"
+      },
+      {
+        "command": "npx --no-install agent-delivery-gates copilot-hook path-confinement",
+        "type": "command"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "npx --no-install agent-delivery-gates copilot-hook test-diff",
+        "type": "command"
+      }
+    ],
+    "agentStop": [
+      {
+        "command": "npx --no-install agent-delivery-gates copilot-hook report",
+        "type": "command"
+      }
+    ]
+  }
+}

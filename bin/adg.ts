@@ -60,6 +60,9 @@ Hook entry points, for a settings file or another agent's hook config:
   cursor-hook <gate>       the same gates, in Cursor's hook contract; gate
                            is one of clean-tree, path-confinement,
                            test-diff, report
+  copilot-hook <gate>      the same gates, in GitHub Copilot's hook
+                           contract; gate is one of clean-tree,
+                           path-confinement, test-diff, report
 
   --help, -h               print this message and exit 0
   --version, -v            print the installed version and exit 0
@@ -255,6 +258,9 @@ function main(): void {
       break;
     case "cursor-hook":
       nodeTool("hooks/cursor-hook.ts", rest);
+      break;
+    case "copilot-hook":
+      nodeTool("hooks/copilot-hook.ts", rest);
       break;
     default:
       process.stderr.write(`agent-delivery-gates: unknown command '${first}'\n\n`);

@@ -53,6 +53,7 @@ const PROSE_RULES_REL_PATH = join(".adg", "prose-rules.txt");
 const PROSE_BASELINE_REL_PATH = join(".adg", "prose-baseline.txt");
 const CURSOR_HOOKS_REL_PATH = join(".cursor", "hooks.json");
 const CODEX_HOOKS_REL_PATH = join(".codex", "hooks.json");
+const COPILOT_HOOKS_REL_PATH = join(".github", "hooks", "agent-delivery-gates.json");
 
 interface WriteCtx {
   dryRun: boolean;
@@ -254,6 +255,30 @@ export function runInit(options: InitOptions): InitOutcome {
     mkdirSync(dirname(codexHooksTarget), { recursive: true });
     writeFileSync(codexHooksTarget, codexHooksContent);
     lines.push(`created: ${CODEX_HOOKS_REL_PATH}`);
+  }
+
+  // .github/hooks/agent-delivery-gates.json gets the same treatment as
+  // .cursor/hooks.json and .codex/hooks.json above: it is Copilot's own
+  // hook config, an existing one may already wire up other tools, and
+  // overwriting it would drop those with no way back. Never touched once
+  // it exists, --force included; its content is printed for a person to
+  // merge by hand instead.
+  const copilotHooksTemplatePath = join(packageRoot, "templates", "copilot-hooks.json");
+  if (!existsSync(copilotHooksTemplatePath)) {
+    return fail(`template '${copilotHooksTemplatePath}' is missing from the installed package`);
+  }
+  const copilotHooksContent = readFileSync(copilotHooksTemplatePath, "utf8");
+  const copilotHooksTarget = resolve(targetDir, COPILOT_HOOKS_REL_PATH);
+  if (existsSync(copilotHooksTarget)) {
+    lines.push(`exists, not written: ${COPILOT_HOOKS_REL_PATH}`);
+    lines.push("init does not edit an existing .github/hooks/agent-delivery-gates.json. Merge these entries into it yourself:");
+    lines.push(copilotHooksContent.trimEnd());
+  } else if (dryRun) {
+    lines.push(`would create: ${COPILOT_HOOKS_REL_PATH}`);
+  } else {
+    mkdirSync(dirname(copilotHooksTarget), { recursive: true });
+    writeFileSync(copilotHooksTarget, copilotHooksContent);
+    lines.push(`created: ${COPILOT_HOOKS_REL_PATH}`);
   }
 
   let proseRulesCreatedThisRun = false;
