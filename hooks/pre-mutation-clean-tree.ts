@@ -49,10 +49,11 @@ function main(): void {
       `pre-mutation-clean-tree: ${phase.error} (accepted: ${[...ACCEPTED_PHASES].join(", ")}).`,
     );
   }
-  if (phase === null) {
-    allow();
-  }
-
+  // No phase set at all means guarded. A caller that says nothing gets the
+  // check, and turning it off takes an explicit "build". The other way round
+  // left the gate off in every context that had not been told to switch it
+  // on, which is the one context where it matters most: a reviewer session
+  // nobody briefed.
   if (phase === "build") {
     allow();
   }

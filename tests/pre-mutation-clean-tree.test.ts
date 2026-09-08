@@ -147,14 +147,40 @@ test("dirty tree, build phase: allowed", () => {
   });
 });
 
-// A dirty tree with no phase set at all: exit 0.
-test("dirty tree, no phase set: allowed", () => {
+// No phase set at all means guarded. A session nobody briefed is exactly the
+// one that needs the check, so switching the gate off takes an explicit
+// "build" and never silence.
+test("dirty tree, no phase set: blocked", () => {
   withTempRepo((dir) => {
     commitFile(dir, "a.txt", "hello\n");
     writeFileSync(join(dir, "a.txt"), "changed\n");
     const result = runHook({
       input: { tool_name: "Edit", tool_input: {}, cwd: dir },
       env: { ADG_PHASE: undefined },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});
+
+test("clean tree, no phase set: allowed", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    const result = runHook({
+      input: { tool_name: "Edit", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: undefined },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
+
+test("dirty tree, build phase: allowed, since build is the explicit opt out", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "Edit", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "build" },
     });
     assert.equal(result.status, 0, result.stderr);
   });
