@@ -21,7 +21,16 @@ Every check a project normally runs got better here, which is the point. A
 green run and a green run over checks that cannot fail look the same from
 outside, and only one of them means anything.
 
-Three worked examples, each a change that passes everything else:
+A rule system checks the code an agent wrote. Runtime guardrails check its
+inputs and tool calls while it works. Neither checks what the agent claims
+about its own work once the work is done, which is what this repository is
+for: [thirteen proof obligations](#the-thirteen-rules) for a delivery
+report, five of them checked by a hook on every commit, tooling that runs
+the same way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
+pre-commit hook with no agent at all, and [an MCP server](#the-mcp-server)
+for an agent that would rather ask than be stopped.
+
+Six worked examples, each run for real with the exact output it produced:
 
 - **[A feature that shipped with nothing holding it](docs/examples/06-a-feature-with-nothing-holding-it.md)**:
   the cart above. One assertion in eighteen added lines was swapped for one
@@ -33,20 +42,20 @@ Three worked examples, each a change that passes everything else:
   lines changed against that file and git is right, the suite goes green with
   nothing left to fail, and the only trace is a test count nobody reads on a
   passing build.
+- **[A test edited to match a bug](docs/examples/02-test-edited-to-match-a-bug.md)**:
+  a bulk discount that was never built, and a failing test made to pass by
+  changing what it expects from 108 to 120, so the assertion agrees with the
+  missing feature.
 - **[A report claiming more than it proved](docs/examples/03-report-claiming-more-than-it-proved.md)**:
   "failure handling verified", with nothing behind it anyone can open. A
-  robustness claim has to point at a commit, a path, or a command; pointing at
-  a conversation fails.
-
-## What this is
-
-A rule system checks the code an agent wrote. Runtime guardrails check its
-inputs and tool calls while it works. Neither checks what the agent claims
-about its own work once the work is done, which is what the rules in this
-repository are for: thirteen proof obligations for a delivery report, five
-of them checked by a hook on every commit, and tooling that runs the same
-way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
-pre-commit hook with no agent at all.
+  robustness claim has to point at a commit, a path, or a command; pointing
+  at a conversation fails.
+- **[An edit blocked mid-review](docs/examples/04-edit-blocked-mid-review.md)**:
+  the clean-tree hook stopping a review phase from writing over work that was
+  never committed, which is how this project lost three fixes once.
+- **[Adopting the gates on a repository that already exists](docs/examples/05-adopting-on-an-existing-repository.md)**:
+  `init` on a project with its own history, a baseline recording what is
+  already there, then a clean commit and a caught one.
 
 ## 🚀 Quickstart
 
@@ -93,6 +102,8 @@ on a new project, which has nothing to record; on its own, without
 Copilot; if one is already there it prints the template's content for a
 person to merge in by hand.
 
+<a id="the-mcp-server"></a>
+
 ## 🧩 The MCP server
 
 `agent-delivery-gates mcp` starts a server on stdio. It is a local
@@ -113,14 +124,6 @@ which uses `servers` as its top-level key instead of `mcpServers`. Codex
 keeps its MCP config in TOML in the user's home directory instead of a
 file in the project, so `init` prints the block to add to
 `~/.codex/config.toml` instead of writing it.
-
-## 📁 More examples
-
-The three above are worked through in full in
-[`docs/examples/`](docs/examples/README.md), each run for real with the
-exact output it produced, along with three more: a fix that reaches green
-by editing what the test expects, an edit blocked mid-review because the
-tree was dirty, and adopting the gates on a project that already exists.
 
 ## 🗂️ What happened
 
@@ -192,6 +195,8 @@ clean on that rule for the life of this build, or nothing looked closely
 enough to catch anything on it yet, and the count alone cannot tell you
 which. Every tally entry names where to see the result, so any row can be
 checked instead of taken on trust.
+
+<a id="the-thirteen-rules"></a>
 
 ## 📜 The thirteen rules
 
