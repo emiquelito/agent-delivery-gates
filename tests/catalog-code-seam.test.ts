@@ -84,3 +84,51 @@ test("every rule named in the tally is a real record", () => {
     assert.ok(ids.has(name), `the tally names '${name}', which is not a rule record`);
   }
 });
+
+// AGENTS.md is the cross-vendor rendering of the same twelve rules. It drifted
+// from the records the first time it was written, describing one rule as
+// having no mechanical check while its own record named seven. A document
+// describing behavior the code does not have is the defect this project
+// exists to catch, and it would be worst in the file that explains it.
+function agentsFile(): string {
+  return readFileSync(join(ROOT, "AGENTS.md"), "utf8");
+}
+
+test("AGENTS.md carries every rule id and invents none", () => {
+  const ids = new Set(readRecords().map((r) => r.id));
+  const text = agentsFile();
+  const headings = [...text.matchAll(/^#+\s+`?([a-z][a-z-]+)`?\s*$/gm)].map((m) => m[1]);
+  for (const id of ids) {
+    assert.ok(headings.includes(id), `AGENTS.md never covers the rule '${id}'`);
+  }
+  // A heading can also name one of the tools, so those are read off disk
+  // instead of being listed here, where the list would go stale.
+  const toolNames = new Set(
+    [...readdirSync(join(ROOT, "hooks")), ...readdirSync(join(ROOT, "scripts"))].map((f) =>
+      f.replace(/\.(ts|sh)$/, ""),
+    ),
+  );
+  for (const heading of headings) {
+    if (!/^[a-z]+-[a-z-]+$/.test(heading)) continue;
+    if (ids.has(heading) || toolNames.has(heading)) continue;
+    assert.fail(`AGENTS.md has a rule-looking heading '${heading}' with no record and no tool`);
+  }
+});
+
+test("AGENTS.md never states an enforcement a record contradicts", () => {
+  const text = agentsFile();
+  for (const record of readRecords()) {
+    const section = new RegExp(
+      `^#+\\s+\`?${record.id}\`?\\s*$([\\s\\S]*?)(?=^#+\\s|$)`,
+      "m",
+    ).exec(text);
+    if (section === null) continue;
+    for (const other of ["hook", "prompt", "human_gate"].filter((e) => e !== record.enforcement)) {
+      assert.doesNotMatch(
+        section[1],
+        new RegExp(`enforcement[:\`\\s]+${other}\\b`),
+        `AGENTS.md calls ${record.id} ${other}; its record says ${record.enforcement}`,
+      );
+    }
+  }
+});
