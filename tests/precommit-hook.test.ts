@@ -29,6 +29,7 @@ const HOOK = join(REPO_ROOT, ".githooks", "pre-commit");
 interface Run {
   status: number | null;
   stdout: string;
+  all: string;
   stderr: string;
 }
 
@@ -38,7 +39,9 @@ function runHook(cwd: string, env?: Record<string, string | undefined>): Run {
     encoding: "utf8",
     env: env ? { ...process.env, ...env } : process.env,
   });
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  // The failure banner goes to stderr, the progress lines to stdout, so a
+  // test that reads only one of them misses half the contract.
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, all: r.stdout + r.stderr };
 }
 
 function git(dir: string, args: string[]): void {
@@ -131,8 +134,8 @@ test("the hook exits non-zero when a check fails, and names it with the command 
     buildFixture(dir, { test: 1 });
     const r = runHook(dir);
     assert.notEqual(r.status, 0);
-    assert.match(r.stdout, /FAILED at: tests/);
-    assert.match(r.stdout, /npm test/);
+    assert.match(r.all, /FAILED at: tests/);
+    assert.match(r.all, /npm test/);
   });
 });
 
@@ -141,8 +144,10 @@ test("a failure at an earlier step stops before a later step runs", () => {
     buildFixture(dir, { test: 1, scanProse: 1 });
     const r = runHook(dir);
     assert.notEqual(r.status, 0);
-    assert.match(r.stdout, /stub tsc ran/);
-    assert.doesNotMatch(r.stdout, /stub scan-prose ran/);
+    // A step that passes prints nothing of its own, so the proof that a
+    // later step never ran is that its name never appears.
+    assert.match(r.all, /FAILED at: tests/);
+    assert.doesNotMatch(r.all, /prose scan/);
   });
 });
 
@@ -151,8 +156,8 @@ test("a failure at the prose scan step is named correctly", () => {
     buildFixture(dir, { scanProse: 1 });
     const r = runHook(dir);
     assert.notEqual(r.status, 0);
-    assert.match(r.stdout, /FAILED at: prose scan/);
-    assert.match(r.stdout, /scripts\/scan-prose\.sh/);
+    assert.match(r.all, /FAILED at: prose scan/);
+    assert.match(r.all, /scripts\/scan-prose\.sh/);
   });
 });
 
@@ -161,8 +166,8 @@ test("a failure at the tally step is named correctly", () => {
     buildFixture(dir, { tally: 1 });
     const r = runHook(dir);
     assert.notEqual(r.status, 0);
-    assert.match(r.stdout, /FAILED at: tally check/);
-    assert.match(r.stdout, /tally-report\.ts --check/);
+    assert.match(r.all, /FAILED at: tally check/);
+    assert.match(r.all, /tally-report\.ts --check/);
   });
 });
 

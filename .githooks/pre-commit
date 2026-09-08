@@ -38,34 +38,38 @@ if ! ROOT=$(git rev-parse --show-toplevel 2>&1); then
 fi
 cd "$ROOT"
 
+# Output is held back and printed only when a step fails. A hook that prints
+# tens of thousands of lines on a good commit is one people turn off, and a
+# gate nobody runs catches nothing.
+LOG=$(mktemp)
+trap 'rm -f "$LOG"' EXIT
+
 fail_step() {
-  echo "=============================================================="
-  echo " pre-commit: FAILED at: $1"
-  echo " Run it alone with:"
-  echo "   $2"
-  echo "=============================================================="
+  echo "==============================================================" >&2
+  echo " pre-commit: FAILED at: $1" >&2
+  echo " Run it alone with:" >&2
+  echo "   $2" >&2
+  echo "==============================================================" >&2
+  cat "$LOG" >&2
   exit 1
 }
 
-echo "pre-commit: running typecheck"
-if ! npx tsc --noEmit; then
-  fail_step "typecheck" "npx tsc --noEmit"
-fi
+run_step() {
+  local label=$1 command=$2
+  shift 2
+  printf 'pre-commit: %s\n' "$label"
+  if ! "$@" >"$LOG" 2>&1; then
+    fail_step "$label" "$command"
+  fi
+}
 
-echo "pre-commit: running tests"
-if ! npm test; then
-  fail_step "tests" "npm test"
-fi
+run_step "typecheck" "npx tsc --noEmit" npx tsc --noEmit
 
-echo "pre-commit: running the prose scan"
-if ! scripts/scan-prose.sh; then
-  fail_step "prose scan" "scripts/scan-prose.sh"
-fi
+run_step "tests" "npm test" npm test
 
-echo "pre-commit: running the tally check"
-if ! node scripts/tally-report.ts --check; then
-  fail_step "tally check" "node scripts/tally-report.ts --check"
-fi
+run_step "prose scan" "scripts/scan-prose.sh" scripts/scan-prose.sh
+
+run_step "tally check" "node scripts/tally-report.ts --check" node scripts/tally-report.ts --check
 
 echo "pre-commit: all checks passed"
 exit 0
