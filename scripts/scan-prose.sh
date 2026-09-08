@@ -4,7 +4,7 @@
 # See CLAUDE.md for the constraints themselves.
 #
 # Usage:
-#   scan-prose.sh              scan tracked markdown, rule records, and sources
+#   scan-prose.sh              scan every tracked text file, minus three
 #   scan-prose.sh FILE...      scan exactly these files
 #
 # Exit codes:
@@ -40,7 +40,7 @@ PATTERN_CODE="$PATTERN_REPO|$PATTERN_TELLS"
 pattern_for() {
   # Lowercased, so an uppercase extension is treated the same as a lower one.
   case "${1,,}" in
-    *.ts|*.tsx|*.js|*.mjs|*.cjs) printf '%s' "$PATTERN_CODE" ;;
+    *.ts|*.tsx|*.js|*.mjs|*.cjs|*.sh) printf '%s' "$PATTERN_CODE" ;;
     *) printf '%s' "$PATTERN_PROSE" ;;
   esac
 }
@@ -87,7 +87,14 @@ else
   # --others --exclude-standard adds files that are not tracked yet and not
   # ignored. Without them a new file was never checked until after its first
   # commit, which is exactly when checking it still helps.
-  if ! git -C "$root" ls-files -z --cached --others --exclude-standard -- '*.md' 'rules/*.json' '*.ts' >"$tmpd/list" 2>"$tmpd/err"; then
+  # Three exclusions, each for a reason. This script holds every banned word
+  # as a literal in its own pattern. The lockfile is generated. The licence
+  # text is not ours to edit.
+  if ! git -C "$root" ls-files -z --cached --others --exclude-standard -- \
+      '*.md' '*.json' '*.ts' '*.sh' '.gitignore' '.gitattributes' 'NOTICE' \
+      ':(exclude)scripts/scan-prose.sh' \
+      ':(exclude)package-lock.json' \
+      ':(exclude)LICENSE' >"$tmpd/list" 2>"$tmpd/err"; then
     die "git ls-files failed. git said: $(cat "$tmpd/err")"
   fi
   if [ -s "$tmpd/list" ]; then

@@ -193,3 +193,35 @@ test("default mode exits 0 on a repository whose tracked files are clean", () =>
     assert.equal(scan([], dir).status, 0);
   });
 });
+
+// The default set has to cover the tracked files that carry prose, not only
+// markdown. An audit found eight tracked files outside it, config comments
+// among them.
+test("default mode picks up a tracked shell script", () => {
+  withTempDir((dir) => {
+    initRepo(dir);
+    fileWith(dir, "run.sh", `#!/usr/bin/env bash\n# this ${BANNED_WORD} works\n`);
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+    const r = scan([], dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /run\.sh:2:/);
+  });
+});
+
+test("default mode picks up a tracked config file outside rules", () => {
+  withTempDir((dir) => {
+    initRepo(dir);
+    fileWith(dir, "package.json", `{ "description": "this works ${BANNED_WORD}" }\n`);
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+    const r = scan([], dir);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /package\.json:1:/);
+  });
+});
+
+test("a shell script is read as code, so subtraction passes", () => {
+  withTempDir((dir) => {
+    const p = fileWith(dir, "calc.sh", "n=$(( total - count ))\n");
+    assert.equal(scan([p]).status, 0);
+  });
+});

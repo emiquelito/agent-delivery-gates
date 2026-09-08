@@ -465,3 +465,24 @@ test("an empty cwd in the payload falls back to the process directory", () => {
     assert.match(result.stderr, /a\.txt/);
   });
 });
+
+// The phase file sits at the repository root. A session working in a
+// subdirectory used to look for it beside itself, find nothing, fall through
+// to the inherited variable, and allow the write. An audit found this live in
+// the wired command.
+test("a session in a subdirectory still reads the phase file at the root", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    mkdirSync(join(dir, "src"), { recursive: true });
+    commitFile(dir, "src/b.txt", "x\n");
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "adg-phase"), "review\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "Write", tool_input: {}, cwd: join(dir, "src") },
+      env: { ADG_PHASE: "build" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});

@@ -19,6 +19,7 @@ import {
   parseHookInput,
   readAllStdin,
   resolvePhase,
+  resolveRepoRoot,
 } from "../src/clean-tree-gate.ts";
 
 function block(message: string): never {
@@ -41,7 +42,19 @@ function main(): void {
     allow();
   }
 
-  const repoRoot = typeof parsed.cwd === "string" && parsed.cwd !== "" ? parsed.cwd : process.cwd();
+  const workingDir =
+    typeof parsed.cwd === "string" && parsed.cwd !== "" ? parsed.cwd : process.cwd();
+
+  // The phase file sits at the repository root, so the root has to be found
+  // before looking for it. Reading it from the working directory meant a
+  // session in a subdirectory never saw its own phase file, fell through to
+  // the inherited variable, and allowed a write on a dirty tree.
+  let repoRoot: string;
+  try {
+    repoRoot = resolveRepoRoot(workingDir);
+  } catch (err) {
+    block(`pre-mutation-clean-tree: ${(err as Error).message}`);
+  }
 
   const phase = resolvePhase(process.env, repoRoot);
   if (phase && typeof phase === "object" && "error" in phase) {

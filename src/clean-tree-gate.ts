@@ -147,6 +147,25 @@ function gitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * The repository root for a working directory. The phase file lives at the
+ * root, so a session running in a subdirectory has to resolve the root before
+ * looking for it. Reading it from the working directory meant a session in a
+ * subdirectory could not see its own phase file.
+ */
+export function resolveRepoRoot(cwd: string): string {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      env: gitEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err) {
+    throw new Error(`git rev-parse --show-toplevel failed: ${describeExecError(err)}`);
+  }
+}
+
 export function getGitStatus(cwd: string): GitStatusResult {
   let root: string;
   try {
