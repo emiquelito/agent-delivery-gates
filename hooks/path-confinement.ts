@@ -20,9 +20,21 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter } from "node:path";
 import { checkPathAllowed } from "../src/path-allowlist.ts";
-import { readAllStdin, parseHookInput } from "../src/clean-tree-gate.ts";
+import { readAllStdin, parseHookInput,
+  resolveMutatingTools,
+} from "../src/clean-tree-gate.ts";
 
-const CHECKED_TOOLS = new Set(["Read", "Write", "Edit", "MultiEdit", "NotebookEdit"]);
+// Reads as well as writes, because this gate is about where a tool is
+// looking, not only where it is writing. The mutating names come from the
+// shared set so this gate does not go stale on a platform the others already
+// handle: it was keyed to one agent's names while the other two gates had
+// moved on, and it silently allowed a path outside every root whenever the
+// tool was called something else.
+const READ_TOOLS = ["Read", "read_file", "ReadFile", "view", "cat_file", "open_file"];
+
+function checkedTools(env: Record<string, string | undefined>): Set<string> {
+  return new Set([...READ_TOOLS, ...resolveMutatingTools(env)]);
+}
 
 function block(message: string): never {
   process.stderr.write(message.endsWith("\n") ? message : `${message}\n`);
@@ -75,7 +87,7 @@ function main(): void {
     block(`path-confinement: could not read hook input (${parsed.error}).`);
   }
 
-  if (!CHECKED_TOOLS.has(parsed.tool_name)) {
+  if (!checkedTools(process.env).has(parsed.tool_name)) {
     // Bash included: its filesystem effects live inside a command string,
     // not a structured path field, so there is nothing here to check.
     allow();

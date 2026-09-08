@@ -7,7 +7,72 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-export const MUTATING_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+// The tool names this gate treats as a mutation. "Edit", "Write",
+// "MultiEdit", "NotebookEdit" are verified: they are the exact names Claude
+// Code's own PreToolUse payload carries. Every other entry below is a guess
+// at the name another coding agent gives its own file-writing tool. No
+// research was available while writing this list, so none of the guesses
+// are checked against a real payload from those tools; they are included
+// because a name this set fails to recognise is a silent hole, and an
+// extra name checked needlessly costs nothing but one comparison. Override
+// with ADG_MUTATING_TOOLS (a comma separated list) when a project knows its
+// agent's real tool names, see resolveMutatingTools below.
+export const MUTATING_TOOLS = new Set([
+  // Verified: Claude Code's own PreToolUse tool names.
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+  // Guesses below, grouped loosely by what they are guesses for. None of
+  // these have been checked against a real agent payload.
+  // Codex CLI / OpenAI-style patch and file tools:
+  "apply_patch",
+  "ApplyPatch",
+  "patch",
+  "shell_apply_patch",
+  // Generic "editor" tool names seen across various agent frameworks:
+  "str_replace_editor",
+  "str_replace_based_edit_tool",
+  "text_editor",
+  "editor",
+  // Plain-English CRUD-style names some agents use for file tools:
+  "create_file",
+  "edit_file",
+  "write_file",
+  "update_file",
+  "delete_file",
+  "patch_file",
+  "CreateFile",
+  "EditFile",
+  "WriteFile",
+  "UpdateFile",
+  "DeleteFile",
+  "PatchFile",
+  "FileEdit",
+  "FileWrite",
+  "FileCreate",
+]);
+
+/**
+ * The mutating-tool set this gate actually checks against, for one run.
+ * ADG_MUTATING_TOOLS, a comma separated list, replaces MUTATING_TOOLS
+ * entirely when set and non-empty, for a project whose agent's tool names
+ * are known and differ from every guess above. An empty entry between two
+ * commas is dropped instead of kept as an empty string nothing could ever
+ * match.
+ */
+export function resolveMutatingTools(env: Record<string, string | undefined>): Set<string> {
+  const override = env.ADG_MUTATING_TOOLS;
+  if (typeof override === "string" && override.trim() !== "") {
+    return new Set(
+      override
+        .split(",")
+        .map((name) => name.trim())
+        .filter((name) => name !== ""),
+    );
+  }
+  return MUTATING_TOOLS;
+}
 
 export const ACCEPTED_PHASES = new Set(["review", "mutation-testing", "build"]);
 
@@ -67,6 +132,44 @@ export function parseHookInput(raw: string): HookInput | { error: string } {
     return { error: "stdin JSON was missing a string 'tool_name' field" };
   }
   return obj as unknown as HookInput;
+}
+
+export interface MutationHookInput {
+  tool_name?: string;
+  tool_input?: unknown;
+  cwd?: string;
+  hook_event_name?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Parses stdin for the mutation gate specifically. Unlike parseHookInput
+ * above, tool_name is optional here on purpose: this gate has to run under
+ * more than one agent, whose exact payload fields past the JSON envelope
+ * are not guaranteed, and a payload with no tool_name at all still needs a
+ * verdict instead of an early exit. Still errors on empty stdin, invalid
+ * JSON, or a payload that is not an object; those aren't "unknown tool",
+ * they're "no usable payload".
+ */
+export function parseMutationHookInput(raw: string): MutationHookInput | { error: string } {
+  if (raw.trim() === "") {
+    return { error: "stdin was empty" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { error: `stdin was not valid JSON: ${message}` };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { error: "stdin JSON was not an object" };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.tool_name !== undefined && typeof obj.tool_name !== "string") {
+    return { error: "stdin JSON had a non-string 'tool_name' field" };
+  }
+  return obj as MutationHookInput;
 }
 
 /**

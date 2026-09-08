@@ -72,6 +72,61 @@ test("with an existing .claude/settings.json: leaves it unchanged", () => {
   });
 });
 
+// --- .codex/hooks.json: created when absent, left alone when present --------
+//
+// Same rule as .cursor/hooks.json: init never edits a hooks file that
+// already exists, --force included, since an existing one may already wire
+// up other tools and overwriting it would drop them with no way back.
+
+test("in an empty directory: creates .codex/hooks.json", () => {
+  withTempDir((dir) => {
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    const target = join(dir, ".codex", "hooks.json");
+    assert.ok(existsSync(target), "expected .codex/hooks.json to exist");
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    for (const event of ["PreToolUse", "PostToolUse", "Stop"]) {
+      assert.ok(Array.isArray(parsed.hooks[event]), `expected hooks.${event} to be an array`);
+    }
+    assert.match(result.stdout, /created: \.codex[\\/]hooks\.json/);
+  });
+});
+
+test("with an existing .codex/hooks.json: leaves it unchanged and prints the template", () => {
+  withTempDir((dir) => {
+    mkdirSync(join(dir, ".codex"), { recursive: true });
+    const target = join(dir, ".codex", "hooks.json");
+    const original = '{"hooks": {"already": "here"}}';
+    writeFileSync(target, original);
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(target, "utf8"), original);
+    assert.match(result.stdout, /exists, not written: \.codex[\\/]hooks\.json/);
+    assert.match(result.stdout, /hook-clean-tree/);
+  });
+});
+
+test("--force: still leaves an existing .codex/hooks.json unchanged", () => {
+  withTempDir((dir) => {
+    mkdirSync(join(dir, ".codex"), { recursive: true });
+    const target = join(dir, ".codex", "hooks.json");
+    const original = '{"hooks": {"already": "here"}}';
+    writeFileSync(target, original);
+    const result = runInitCli(["--dir", dir, "--force"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(target, "utf8"), original);
+  });
+});
+
+test("--dry-run: reports it would create .codex/hooks.json, writes nothing", () => {
+  withTempDir((dir) => {
+    const result = runInitCli(["--dir", dir, "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /would create: \.codex[\\/]hooks\.json/);
+    assert.equal(existsSync(join(dir, ".codex", "hooks.json")), false);
+  });
+});
+
 // --- running twice is safe ---------------------------------------------------
 
 test("run twice with no flags: the second run reports everything present, creates nothing, exits 0", () => {

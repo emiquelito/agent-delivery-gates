@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-// Claude Code PostToolUse hook wrapper around the vendor-neutral test diff
-// separator. Only acts on a Bash tool call that ran `git commit`; anything
-// else exits 0 silently. When it acts, it separates HEAD's diff and, if
-// there are weakening signals, exits 2 with the report on stderr so the
-// agent sees it right after the commit it just made.
+// PostToolUse hook wrapper around the vendor-neutral test diff separator.
+// What identifies a commit is that tool_input.command runs `git commit`,
+// whichever tool ran it: this file does not require tool_name to be
+// "Bash", or to be present at all, so it keys on the command text alone
+// and still ignores a call that carries no command. When it acts, it
+// separates HEAD's diff and, if there are weakening signals, exits 2 with
+// the report on stderr so the agent sees it right after the commit it just
+// made.
 //
 // Contract: exit 0 lets the agent continue. Exit 2 reports signals, or any
 // operational failure, on stderr. This file knows only how a PostToolUse
@@ -57,9 +60,6 @@ function main(): void {
   // it does not define.
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     block("hook input was not a JSON object");
-  }
-  if (payload.tool_name !== "Bash") {
-    process.exit(0);
   }
   const toolInput = payload.tool_input as Record<string, unknown> | undefined;
   const command = typeof toolInput?.command === "string" ? toolInput.command : "";

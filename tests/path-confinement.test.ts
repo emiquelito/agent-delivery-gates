@@ -202,3 +202,51 @@ test("a directory that is not a repository exits 2", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// This gate was keyed to one agent's tool names while the other two gates had
+// already been widened. A tool called anything else read straight past it and
+// the hook exited 0, which is the silent pass this project exists to catch.
+// The names come from the shared set now, so the three gates go stale or stay
+// current together.
+const OTHER_AGENT_WRITE_TOOLS = ["apply_patch", "edit_file", "write_file", "str_replace_editor"];
+
+for (const tool of OTHER_AGENT_WRITE_TOOLS) {
+  test(`a path outside every root is blocked for the tool '${tool}'`, () => {
+    const result = runHook({
+      input: {
+        hook_event_name: "PreToolUse",
+        tool_name: tool,
+        tool_input: { file_path: "/etc/shadow" },
+        cwd: process.cwd(),
+      },
+    });
+    assert.equal(result.status, 2, `${tool} was waved through`);
+  });
+}
+
+test("a read tool named by another agent is checked too", () => {
+  const result = runHook({
+    input: {
+      hook_event_name: "PreToolUse",
+      tool_name: "read_file",
+      tool_input: { file_path: "/etc/shadow" },
+      cwd: process.cwd(),
+    },
+  });
+  assert.equal(result.status, 2);
+});
+
+test("the tool set can be overridden for an agent whose names are known", () => {
+  const payload = {
+    hook_event_name: "PreToolUse",
+    tool_name: "my_writer",
+    tool_input: { file_path: "/etc/shadow" },
+    cwd: process.cwd(),
+  };
+  assert.equal(runHook({ input: payload }).status, 0, "an unknown name is not guarded by default");
+  assert.equal(
+    runHook({ input: payload, env: { ADG_MUTATING_TOOLS: "my_writer" } }).status,
+    2,
+    "naming it in the override guards it",
+  );
+});

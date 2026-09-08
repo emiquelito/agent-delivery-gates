@@ -8,16 +8,21 @@
 // every deliberate refusal in this file uses exit 2, never a bare throw.
 //
 // This hook never fails open: any input it cannot make sense of is treated
-// as a reason to block, not a reason to allow.
+// as a reason to block, not a reason to allow. That includes a payload with
+// no tool_name at all: this hook is wired to more than one agent's
+// PreToolUse event now (see templates/codex-hooks.json alongside
+// hooks/hooks.json), and a payload whose fields past the JSON envelope are
+// not known gets checked instead of skipped, the same choice
+// src/cursor-adapter.ts makes for its own unknown preToolUse payload.
 
 import process from "node:process";
 import {
   ACCEPTED_PHASES,
-  MUTATING_TOOLS,
   formatDirtyTreeMessage,
   getGitStatus,
-  parseHookInput,
+  parseMutationHookInput,
   readAllStdin,
+  resolveMutatingTools,
   resolvePhase,
   resolveRepoRoot,
 } from "../src/clean-tree-gate.ts";
@@ -33,12 +38,17 @@ function allow(): never {
 
 function main(): void {
   const raw = readAllStdin();
-  const parsed = parseHookInput(raw);
+  const parsed = parseMutationHookInput(raw);
   if ("error" in parsed) {
     block(`pre-mutation-clean-tree: could not read hook input (${parsed.error}).`);
   }
 
-  if (!MUTATING_TOOLS.has(parsed.tool_name)) {
+  const mutatingTools = resolveMutatingTools(process.env);
+  const toolName = parsed.tool_name;
+  // A named tool this gate does not recognise as mutating is skipped, same
+  // as before. A payload naming no tool at all is not skipped: see the
+  // header comment for why.
+  if (toolName !== undefined && toolName !== "" && !mutatingTools.has(toolName)) {
     allow();
   }
 

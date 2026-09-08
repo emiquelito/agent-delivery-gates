@@ -52,6 +52,7 @@ const TEMPLATE_ACTIONS: TemplateAction[] = [
 const PROSE_RULES_REL_PATH = join(".adg", "prose-rules.txt");
 const PROSE_BASELINE_REL_PATH = join(".adg", "prose-baseline.txt");
 const CURSOR_HOOKS_REL_PATH = join(".cursor", "hooks.json");
+const CODEX_HOOKS_REL_PATH = join(".codex", "hooks.json");
 
 interface WriteCtx {
   dryRun: boolean;
@@ -230,6 +231,29 @@ export function runInit(options: InitOptions): InitOutcome {
     mkdirSync(dirname(cursorHooksTarget), { recursive: true });
     writeFileSync(cursorHooksTarget, cursorHooksContent);
     lines.push(`created: ${CURSOR_HOOKS_REL_PATH}`);
+  }
+
+  // .codex/hooks.json gets the same treatment as .cursor/hooks.json above,
+  // for the same reason: it is Codex's own hook config, an existing one may
+  // already wire up other tools, and overwriting it would drop those with
+  // no way back. Never touched once it exists, --force included; its
+  // content is printed for a person to merge by hand instead.
+  const codexHooksTemplatePath = join(packageRoot, "templates", "codex-hooks.json");
+  if (!existsSync(codexHooksTemplatePath)) {
+    return fail(`template '${codexHooksTemplatePath}' is missing from the installed package`);
+  }
+  const codexHooksContent = readFileSync(codexHooksTemplatePath, "utf8");
+  const codexHooksTarget = resolve(targetDir, CODEX_HOOKS_REL_PATH);
+  if (existsSync(codexHooksTarget)) {
+    lines.push(`exists, not written: ${CODEX_HOOKS_REL_PATH}`);
+    lines.push("init does not edit an existing .codex/hooks.json. Merge these entries into it yourself:");
+    lines.push(codexHooksContent.trimEnd());
+  } else if (dryRun) {
+    lines.push(`would create: ${CODEX_HOOKS_REL_PATH}`);
+  } else {
+    mkdirSync(dirname(codexHooksTarget), { recursive: true });
+    writeFileSync(codexHooksTarget, codexHooksContent);
+    lines.push(`created: ${CODEX_HOOKS_REL_PATH}`);
   }
 
   let proseRulesCreatedThisRun = false;

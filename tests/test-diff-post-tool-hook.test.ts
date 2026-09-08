@@ -61,8 +61,44 @@ function commitFile(dir: string, name: string, content: string): void {
   runGit(dir, ["commit", "-q", "-m", `write ${name}`]);
 }
 
-test("a non-Bash tool call: exits 0", () => {
+test("a non-Bash tool call with no command at all: exits 0", () => {
   const result = runHook({ tool_name: "Write", tool_input: { file_path: "x" }, cwd: process.cwd() });
+  assert.equal(result.status, 0);
+});
+
+// The contract this file exists to prove: a gate keyed on Claude Code's own
+// tool name protects nothing under an agent whose commit tool is called
+// something else. This hook keys on the command text instead, so it must
+// still fire on a commit run through a non-"Bash" tool name, and even on a
+// payload naming no tool at all.
+test("a commit run through a non-Bash tool name: still fires", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/widget.test.ts", "expect(sum(1, 2)).toBe(3);\n");
+    writeFileSync(join(dir, "tests/widget.test.ts"), "\n");
+    runGit(dir, ["add", "tests/widget.test.ts"]);
+    runGit(dir, ["commit", "-q", "-m", "remove the assertion"]);
+    const result = runHook({ tool_name: "shell", tool_input: { command: "git commit -m 'x'" }, cwd: dir });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /assertion-removed/);
+  });
+});
+
+test("a commit with no tool_name at all: still fires", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/widget.test.ts", "expect(sum(1, 2)).toBe(3);\n");
+    writeFileSync(join(dir, "tests/widget.test.ts"), "\n");
+    runGit(dir, ["add", "tests/widget.test.ts"]);
+    runGit(dir, ["commit", "-q", "-m", "remove the assertion"]);
+    const result = runHook({ tool_input: { command: "git commit -m 'x'" }, cwd: dir });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /assertion-removed/);
+  });
+});
+
+// A non-Bash tool name whose command is not a commit still exits 0: the
+// widened matching is on the command text, not on accepting every tool.
+test("a non-Bash tool call whose command is not a commit: exits 0", () => {
+  const result = runHook({ tool_name: "shell", tool_input: { command: "npm test" }, cwd: process.cwd() });
   assert.equal(result.status, 0);
 });
 

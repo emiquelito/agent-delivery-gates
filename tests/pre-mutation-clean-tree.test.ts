@@ -212,10 +212,36 @@ test("malformed JSON stdin: blocked", () => {
   assert.equal(result.status, 2);
 });
 
-// Valid JSON missing tool_name: exit 2.
-test("JSON missing tool_name: blocked", () => {
-  const result = runHook({ input: { tool_input: {} }, env: { ADG_PHASE: "review" } });
-  assert.equal(result.status, 2);
+// A payload naming no tool at all is treated as relevant, not skipped: this
+// hook is wired to more than one agent's PreToolUse event now (see
+// templates/codex-hooks.json), and a payload whose fields past the JSON
+// envelope are not known is checked against the tree instead of waved through.
+// Changed from a prior version of this test that expected an unconditional
+// exit 2 on any missing tool_name, which was the old "no tool_name is
+// always an error" behaviour this task replaces; the pair below proves the
+// new contract actually checks the tree instead of always blocking.
+test("no tool_name at all, dirty tree, review phase: blocked", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "review" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});
+
+test("no tool_name at all, clean tree, review phase: allowed", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    const result = runHook({
+      input: { tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "review" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
 });
 
 // An unrecognised ADG_PHASE value: exit 2, stderr names the bad value.
@@ -484,5 +510,69 @@ test("a session in a subdirectory still reads the phase file at the root", () =>
     });
     assert.equal(result.status, 2);
     assert.match(result.stderr, /a\.txt/);
+  });
+});
+
+// --- non-Claude tool names, the point of this task ---------------------------
+//
+// The contract that matters: a gate wired only to Claude Code's tool names
+// protects nothing under another agent. Every name below is one of the
+// guesses added to MUTATING_TOOLS for a coding agent whose own tool name is
+// not "Edit", "Write", "MultiEdit", or "NotebookEdit"; each must still block
+// a mutation on a dirty tree.
+for (const tool of ["apply_patch", "str_replace_editor", "write_file", "PatchFile"]) {
+  test(`a payload built like Codex's, tool ${tool}, dirty tree, review phase: blocked`, () => {
+    withTempRepo((dir) => {
+      commitFile(dir, "a.txt", "hello\n");
+      writeFileSync(join(dir, "a.txt"), "changed\n");
+      const result = runHook({
+        input: { tool_name: tool, tool_input: {}, cwd: dir },
+        env: { ADG_PHASE: "review" },
+      });
+      assert.equal(result.status, 2, `tool ${tool} was not guarded`);
+      assert.match(result.stderr, /a\.txt/);
+    });
+  });
+}
+
+// A tool name that is plainly a read, under any vendor's likely spelling,
+// stays unguarded: the widened set is not "block everything unrecognised",
+// it is a wider allowlist of tools known to write.
+test("a plainly-read tool name outside every guessed set: allowed on a dirty tree", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "read_file", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "review" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
+
+// --- ADG_MUTATING_TOOLS override ---------------------------------------------
+
+test("ADG_MUTATING_TOOLS overrides the guessed set: a listed name is guarded", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "my_custom_writer", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "review", ADG_MUTATING_TOOLS: "my_custom_writer,another_tool" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});
+
+test("ADG_MUTATING_TOOLS overrides the guessed set: a name outside it is not guarded, even Edit", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "Edit", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "review", ADG_MUTATING_TOOLS: "my_custom_writer" },
+    });
+    assert.equal(result.status, 0, result.stderr);
   });
 });

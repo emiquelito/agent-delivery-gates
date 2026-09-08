@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx --no-install agent-delivery-gates hook-clean-tree || exit 2",
+            "timeout": 600
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx --no-install agent-delivery-gates hook-path-confinement || exit 2",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx --no-install agent-delivery-gates hook-test-diff || exit 2",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx --no-install agent-delivery-gates hook-report || exit 2",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
