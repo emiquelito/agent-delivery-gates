@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -512,6 +512,87 @@ test("a git failure on the wide re-run degrades quietly to the narrow result, no
   } finally {
     rmSync(binDir, { recursive: true, force: true });
   }
+});
+
+test("the wide re-run only ever fires for a diff touching a .rs file: observed through a fake git that logs its argv", () => {
+  // A fake `git` on PATH that appends its argv to a log file and then
+  // execs the real git, so the CLI behaves normally but every invocation
+  // it makes is on record. -U30 only ever belongs to the wide re-run (see
+  // widenContext), so its presence or absence in the log is direct proof
+  // of whether that re-run fired, not an inference from reading the code.
+  const realGit = spawnSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
+    .stdout.trim()
+    .split("\n")[0];
+  const binDir = mkdtempSync(join(tmpdir(), "adg-test-diff-fake-git-log-"));
+  const fakeGitPath = join(binDir, "git");
+  const logPath = join(binDir, "argv.log");
+  writeFileSync(
+    fakeGitPath,
+    `#!/bin/sh\necho "$@" >> "${logPath}"\nexec "${realGit}" "$@"\n`,
+  );
+  chmodSync(fakeGitPath, 0o755);
+  const env = { PATH: `${binDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}` };
+
+  try {
+    withTempRepo((dir) => {
+      commitFile(dir, "src/util.js", "function add(a, b) {\n  return a + b;\n}\n");
+      writeFileSync(join(dir, "src/util.js"), "function add(a, b) {\n  return a - b;\n}\n");
+      runGit(dir, ["add", "src/util.js"]);
+      runGit(dir, ["commit", "-q", "-m", "change add"]);
+
+      writeFileSync(logPath, "");
+      const result = runCli({ args: ["--rev", "HEAD"], cwd: dir, env });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const log = readFileSync(logPath, "utf8");
+      assert.doesNotMatch(log, /-U30/, `a non-Rust diff must never trigger the wide re-run; git log was:\n${log}`);
+    });
+
+    withTempRepo((dir) => {
+      commitFile(dir, "src/pricing.rs", "fn discount(cents: i64) -> i64 {\n    cents - 10\n}\n");
+      writeFileSync(join(dir, "src/pricing.rs"), "fn discount(cents: i64) -> i64 {\n    cents - 20\n}\n");
+      runGit(dir, ["add", "src/pricing.rs"]);
+      runGit(dir, ["commit", "-q", "-m", "change the discount"]);
+
+      writeFileSync(logPath, "");
+      const result = runCli({ args: ["--rev", "HEAD"], cwd: dir, env });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      const log = readFileSync(logPath, "utf8");
+      assert.match(log, /-U30/, `a .rs diff must trigger the wide re-run; git log was:\n${log}`);
+    });
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test("a signal derivable from both the narrow and the wide diff is reported once, not twice", () => {
+  withTempRepo((dir) => {
+    // Small enough that the default -U3 context already shows the whole
+    // file, so the wide -U30 re-run sees the identical hunk and would
+    // derive the identical assertion-weakened signal a second time if
+    // dedup were a no-op.
+    const before = [
+      "#[cfg(test)]",
+      "mod tests {",
+      "    #[test]",
+      "    fn applies_discount() {",
+      "        let result = discount(120);",
+      "        assert_eq!(result, 100);",
+      "    }",
+      "}",
+      "",
+    ].join("\n");
+    const after = before.replace("assert_eq!(result, 100);", "assert_eq!(result, 110);");
+    commitFile(dir, "src/pricing.rs", before);
+    writeFileSync(join(dir, "src/pricing.rs"), after);
+    runGit(dir, ["add", "src/pricing.rs"]);
+    runGit(dir, ["commit", "-q", "-m", "weaken the assertion"]);
+
+    const result = runCli({ args: ["--rev", "HEAD", "--format", "json"], cwd: dir });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    const parsed = JSON.parse(result.stdout) as { signals: unknown[]; signalCount: number };
+    assert.equal(parsed.signalCount, 1, `expected the signal deduplicated to 1, got:\n${result.stdout}`);
+    assert.equal(parsed.signals.length, 1);
+  });
 });
 
 test("a real git rename out of the test naming convention is reported", () => {

@@ -796,12 +796,15 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
 // What this still cannot catch, plainly:
 //
 // - Brace counting is an approximation, not a Rust parser. It strips `//`
-//   line comments and ordinary `"..."`/`'x'` literals (including a
-//   same-line raw string, r"...", r#"..."#, ...) before counting braces,
-//   but it does NOT handle a `/* ... */` block comment, and a raw string
-//   or block comment that spans more than one line is only handled up to
-//   the end of the line it starts on. A `{` or `}` sitting inside one of
-//   those can still throw off the count.
+//   line comments, a single-line `/* ... */` block comment, and ordinary
+//   `"..."`/`'x'` literals (including a same-line raw string, r"...",
+//   r#"..."#, ...) before counting braces. It does NOT handle a block
+//   comment or a raw string that spans more than one line: each of those
+//   is only recognised up to the end of the line it starts on, so a `{`
+//   or `}` sitting inside one of those two multi-line forms is still
+//   counted as a real brace. That defeats the fail-open direction stated
+//   below: instead of erring toward "this is a test", a region can close
+//   too early or never open, and the miss goes unreported.
 // - Brace matching can only see what is in the diff. If a #[cfg(test)]
 //   opener sits above the hunk's context window, it is invisible, and the
 //   region it would have opened is never found from this file's diff text
@@ -814,6 +817,14 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
 //   this for a .rs diff; see hooks/test-diff-separator.ts) narrows this
 //   bound but cannot erase it. A change far enough from both the opener
 //   and the closer, in a file wide enough, is still outside any diff.
+// - `#[cfg(any(test, feature = "x"))]` opens no region and matches no
+//   marker: CFG_TEST_ATTR_RE only recognises `cfg(test)` and a `cfg(all(
+//   ...))` naming test among its conditions, both forms where test is
+//   required for the item to compile at all. `any(...)` means the item
+//   also compiles outside test builds, so it is not test-only code, and
+//   treating it as a test region would misclassify code that ships in
+//   the normal build. This is not new: the marker-only check this file
+//   had before cfgTestRegionMask never caught it either.
 const RUST_PATH_RE = /\.rs$/;
 const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_eq!|\bassert_ne!|\bassert!/;
 
@@ -833,14 +844,15 @@ const MOD_OPEN_OR_DECL_RE = /\bmod\s+\w+\s*([{;])/;
 /**
  * Best-effort removal of the Rust syntax that can hide a brace from the
  * counter below: a `//` line comment (everything after it on the line is
- * dropped), an ordinary double-quoted string (backslash escapes
+ * dropped), a `/* ... *\/` block comment that both opens and closes on
+ * this same line, an ordinary double-quoted string (backslash escapes
  * respected), a char literal (`'x'`, `'\n'`), and a raw string opener
  * (`r"..."`, `r#"..."#`, `r##"..."##`, ...) closed later on the same line.
- * Explicitly NOT handled: a `/* ... *\/` block comment, and a raw string
- * or block comment that continues onto another line. If the matching
- * closer is not found on this same line, the rest of the line is dropped
- * instead of guessed at. See the comment banner above this section for
- * what that means for brace counting.
+ * Explicitly NOT handled: a block comment or a raw string that continues
+ * onto another line. If the matching closer is not found on this same
+ * line, the rest of the line is dropped instead of guessed at. See the
+ * comment banner above this section for what that means for brace
+ * counting.
  */
 function stripRustNoiseForBraceCounting(line: string): string {
   let out = "";
@@ -849,6 +861,12 @@ function stripRustNoiseForBraceCounting(line: string): string {
   while (i < n) {
     const ch = line[i];
     if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === "/" && line[i + 1] === "*") {
+      const end = line.indexOf("*/", i + 2);
+      if (end === -1) break; // spans past this line: best-effort, stop here
+      i = end + 2;
+      continue;
+    }
     if (ch === "r") {
       const rawOpen = /^r(#*)"/.exec(line.slice(i));
       if (rawOpen) {

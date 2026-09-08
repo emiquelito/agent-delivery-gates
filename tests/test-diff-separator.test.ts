@@ -963,6 +963,45 @@ test("a removed assert_eq! in a .rs file under tests/ still behaves as before: r
   assert.deepEqual(result.sourceFiles, []);
 });
 
+test("hasRustTestMarker reads a marker reachable only via a context line, not just an added or removed one", () => {
+  // "#[test]" sits on a context line (never added or removed); the only
+  // changed line is "#[ignore]", which carries no marker word of its own.
+  // There is no #[cfg(test)] attribute anywhere, so cfgTestRegionMask
+  // finds no region either: only reading context lines in
+  // hasRustTestMarker can explain the signal below.
+  const diff = diffWithHunk("src/widget.rs", [
+    " #[test]",
+    " fn applies_discount() {",
+    "+    #[ignore]",
+    "     let result = discount(120);",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("hasRustTestMarker reads a marker reachable only via a hunk's @@ ... @@ heading", () => {
+  // Git fills a hunk heading with the enclosing scope above it; here that
+  // text is "#[cfg(test)]", never a line in the diff body itself. As
+  // above, no #[cfg(test)] attribute line exists for cfgTestRegionMask to
+  // find, so only reading hunkHeadings in hasRustTestMarker explains the
+  // signal.
+  const diff = [
+    "diff --git a/src/widget.rs b/src/widget.rs",
+    "index 1111111..2222222 100644",
+    "--- a/src/widget.rs",
+    "+++ b/src/widget.rs",
+    "@@ -1,3 +1,4 @@ #[cfg(test)]",
+    " fn applies_discount() {",
+    "+    #[ignore]",
+    "     let result = discount(120);",
+    " }",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
 // --- Rust: #[cfg(test)] module regions found by brace matching ---------------
 //
 // These build a single-file diff hunk line by line, each already carrying
@@ -1164,6 +1203,72 @@ test("cfg(test) region detection never changes the file's added/removed counts, 
     result.sourceFiles.map((f) => ({ path: f.path, added: f.added, removed: f.removed })),
     [{ path: "src/pricing.rs", added: 1, removed: 1 }],
   );
+});
+
+test("a single-line block comment holding a stray '}' no longer closes the region early", () => {
+  // Reproduction: with the comment line present, the region used to close
+  // at the '}' inside "/* a comment with a } inside */", so the change to
+  // verify(n, 100) below sat outside the mask and reported nothing.
+  // stripRustNoiseForBraceCounting now removes a same-line /* ... */
+  // block comment before brace counting runs, so the region should still
+  // extend to the module's real closing brace.
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(all(test, feature = "x"))]',
+    " mod tests {",
+    "     /* a comment with a } inside */",
+    "     fn check(n: i64) {",
+    "-        verify(n, 100);",
+    "+        verify(n, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("assertion-weakened"),
+    `expected assertion-weakened past the one-line block comment, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+});
+
+test("known miss: a multi-line block comment holding a stray '}' still closes the region early", () => {
+  // stripRustNoiseForBraceCounting only recognises a /* ... */ block
+  // comment that opens and closes on the same line; one that spans lines
+  // is line-local stripping's stated limit, pinned here as a fact instead
+  // of stated only in prose. The '}' on the comment's own line still
+  // closes the region before the real change is reached, so this reports
+  // nothing.
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(all(test, feature = "x"))]',
+    " mod tests {",
+    "     /* a comment",
+    "        with a } inside",
+    "        that spans lines */",
+    "     fn check(n: i64) {",
+    "-        verify(n, 100);",
+    "+        verify(n, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("known limit: #[cfg(any(test, feature = \"x\"))] opens no region and matches no marker", () => {
+  // any(...) means the module also compiles outside test builds, so it is
+  // not test-only code; CFG_TEST_ATTR_RE only recognises cfg(test) and a
+  // cfg(all(...)) naming test among its conditions, both forms where test
+  // is required for the item to compile at all. Pinned here as the
+  // unstated limit the banner above now names.
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(any(test, feature = "x"))]',
+    " mod tests {",
+    "     fn check(n: i64) {",
+    "-        verify(n, 100);",
+    "+        verify(n, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
 });
 
 test("the region closes at its own closing brace: a later, unrelated source change past it reports nothing", () => {

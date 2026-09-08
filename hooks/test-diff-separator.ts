@@ -271,7 +271,10 @@ function runGitAllowFail(args: string[]): string | undefined {
 }
 
 /** The same git invocation, widened to -U30. Flag order does not matter to
- * git here, so -U30 is simply inserted right after the subcommand. */
+ * git here, so -U30 is simply inserted right after the subcommand. No size
+ * check guards this: for a single file with a very large diff, -U30 can
+ * pull in most of that file's lines, which roughly doubles git's work for
+ * that one invocation. This is deliberate; see widerClassificationSignals. */
 function widenContext(gitArgs: string[]): string[] {
   return [gitArgs[0], "-U30", ...gitArgs.slice(1)];
 }
