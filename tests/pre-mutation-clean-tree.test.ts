@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -280,5 +280,96 @@ test("ADG_PHASE overrides .claude/adg-phase file", () => {
       env: { ADG_PHASE: "build" },
     });
     assert.equal(result.status, 0, result.stderr);
+  });
+});
+
+// The four mutating tools must all be guarded. Dropping two of them from the
+// guarded set used to pass every test, so each one is named here.
+for (const tool of ["MultiEdit", "NotebookEdit"]) {
+  test(`dirty tree, tool ${tool}, review phase: blocked`, () => {
+    withTempRepo((dir) => {
+      commitFile(dir, "a.txt", "hello\n");
+      writeFileSync(join(dir, "a.txt"), "changed\n");
+      const result = runHook({
+        input: { tool_name: tool, tool_input: {}, cwd: dir },
+        env: { ADG_PHASE: "review" },
+      });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /a\.txt/);
+    });
+  });
+}
+
+// Both guarded phases need the allow case as well as the block case, or a
+// hook that blocks unconditionally in one of them passes every test.
+test("clean tree, mutation-testing phase: allowed", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    const result = runHook({
+      input: { tool_name: "Write", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "mutation-testing" },
+    });
+    assert.equal(result.status, 0);
+  });
+});
+
+// A phase file that exists but cannot be read must block. Reading it used to
+// throw, which exited 1, and a non-zero code that is not 2 lets the tool run.
+test("unreadable phase file: blocked, not a crash", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    const phaseFile = join(dir, ".claude", "adg-phase");
+    writeFileSync(phaseFile, "review\n");
+    chmodSync(phaseFile, 0o000);
+    try {
+      const result = runHook({
+        input: { tool_name: "Write", tool_input: {}, cwd: dir },
+        env: { ADG_PHASE: undefined },
+      });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /adg-phase/);
+    } finally {
+      chmodSync(phaseFile, 0o644);
+    }
+  });
+});
+
+// An inherited GIT_WORK_TREE used to point git at a different tree, so a
+// dirty repository came back clean and the mutation was allowed.
+test("inherited GIT_WORK_TREE does not hide a dirty tree", () => {
+  withTempRepo((dirty) => {
+    withTempRepo((clean) => {
+      commitFile(clean, "a.txt", "hello\n");
+      commitFile(dirty, "a.txt", "hello\n");
+      writeFileSync(join(dirty, "a.txt"), "changed\n");
+      for (const varName of ["GIT_WORK_TREE", "GIT_DIR"]) {
+        const value = varName === "GIT_WORK_TREE" ? clean : join(clean, ".git");
+        const result = runHook({
+          input: { tool_name: "Write", tool_input: {}, cwd: dirty },
+          env: { ADG_PHASE: "review", [varName]: value },
+        });
+        assert.equal(result.status, 2, `${varName} bypassed the gate`);
+        assert.match(result.stderr, /a\.txt/);
+      }
+    });
+  });
+});
+
+// A hook payload carries the whole file being written, which goes past the
+// pipe buffer. Reading stdin in one call used to come back empty, which
+// blocked every mutation including a clean tree in an unguarded phase.
+test("payload larger than the pipe buffer is read in full", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    const big = { tool_name: "Write", tool_input: { content: "x".repeat(300000) }, cwd: dir };
+    const allowed = runHook({ input: big, env: { ADG_PHASE: "build" } });
+    assert.equal(allowed.status, 0, "a large payload must not block on a clean tree");
+
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const blocked = runHook({ input: big, env: { ADG_PHASE: "review" } });
+    assert.equal(blocked.status, 2);
+    assert.match(blocked.stderr, /a\.txt/);
   });
 });

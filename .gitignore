@@ -156,6 +156,9 @@ out/
 # Claude Code: hooks and settings are committed on purpose, they are the
 # deliverable, not local config. Only local/machine state is ignored here.
 .claude/settings.local.json
+# Local session state. A committed phase file would silently reconfigure the
+# clean-tree gate for everyone who checks out that commit.
+.claude/adg-phase
 .claude/state/
 .claude/cache/
 .claude/logs/

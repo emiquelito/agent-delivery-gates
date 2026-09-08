@@ -38,7 +38,8 @@ PATTERN_PROSE="$PATTERN_REPO|$PATTERN_TELLS|$PATTERN_HYPHEN"
 PATTERN_CODE="$PATTERN_REPO|$PATTERN_TELLS"
 
 pattern_for() {
-  case "$1" in
+  # Lowercased, so an uppercase extension is treated the same as a lower one.
+  case "${1,,}" in
     *.ts|*.tsx|*.js|*.mjs|*.cjs) printf '%s' "$PATTERN_CODE" ;;
     *) printf '%s' "$PATTERN_PROSE" ;;
   esac

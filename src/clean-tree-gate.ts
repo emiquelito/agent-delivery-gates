@@ -4,7 +4,7 @@
 // stdin/stdout/exit-code contract an agent actually sees.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, readSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 export const MUTATING_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -23,11 +23,25 @@ export interface HookInput {
 
 /** Reads all of a stream's data and returns it as a string. */
 export function readAllStdin(fd: number = 0): string {
-  try {
-    return readFileSync(fd, "utf8");
-  } catch {
-    return "";
+  // A single readFileSync on fd 0 stops at the pipe buffer, about 64KB, and
+  // returns what it got. A hook payload carries the whole file being written,
+  // so it goes past that often. Read in a loop until EOF instead.
+  const chunks: Buffer[] = [];
+  const buf = Buffer.alloc(65536);
+  for (;;) {
+    let read: number;
+    try {
+      read = readSync(fd, buf, 0, buf.length, null);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN") continue;
+      if (code === "EOF") break;
+      return chunks.length > 0 ? Buffer.concat(chunks).toString("utf8") : "";
+    }
+    if (read === 0) break;
+    chunks.push(Buffer.from(buf.subarray(0, read)));
   }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /**
@@ -71,7 +85,16 @@ export function resolvePhase(
   if (raw === undefined || raw.trim() === "") {
     const phaseFile = join(repoRoot, ".claude", "adg-phase");
     if (existsSync(phaseFile)) {
-      raw = readFileSync(phaseFile, "utf8").split("\n")[0]?.trim();
+      // A file that exists but cannot be read is an error, never a reason to
+      // treat the phase as unset. Failing open here would let a mutation run
+      // against a dirty tree.
+      try {
+        raw = readFileSync(phaseFile, "utf8").split("\n")[0]?.trim();
+      } catch (err) {
+        return {
+          error: `could not read .claude/adg-phase: ${(err as Error).message}`,
+        };
+      }
       source = ".claude/adg-phase";
     } else {
       raw = undefined;
@@ -108,11 +131,26 @@ export interface GitStatusResult {
  *
  * Throws when either git call fails, carrying the git error text.
  */
+/**
+ * Builds the environment for a git call with every GIT_* override removed.
+ * GIT_WORK_TREE or GIT_DIR left over from an earlier command would point git
+ * at a different tree, so a dirty repository would come back clean and the
+ * gate would allow the mutation it exists to block.
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("GIT_")) env[key] = value;
+  }
+  return env;
+}
+
 export function getGitStatus(cwd: string): GitStatusResult {
   let root: string;
   try {
     root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
+      env: gitEnv(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
@@ -124,6 +162,7 @@ export function getGitStatus(cwd: string): GitStatusResult {
   try {
     output = execFileSync("git", ["status", "--porcelain"], {
       cwd: root,
+      env: gitEnv(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
