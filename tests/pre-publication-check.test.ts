@@ -285,3 +285,25 @@ test("a names file that cannot be read exits 2", () => {
     assert.match(r.stderr, /cannot read/);
   });
 });
+
+// The first real use of this script ran it against the placeholder names from
+// its own instructions. It printed a pass having looked for nothing, which is
+// the failure this whole repo is about, in the last gate before publication.
+test("placeholder names make the run incomplete instead of passing", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: "your-codename,a-client-name,an-employer-name" });
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /read as placeholders/);
+    assert.doesNotMatch(r.stdout, /pre-publication-check: PASSED/);
+  });
+});
+
+test("a name that does not read as a placeholder still runs the check", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: "qwxvzrandomname" });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /checked 1 name/);
+  });
+});

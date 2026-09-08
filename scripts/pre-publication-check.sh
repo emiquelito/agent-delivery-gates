@@ -273,6 +273,21 @@ check_forbidden_names() {
     done <"$ADG_FORBIDDEN_NAMES_FILE"
   fi
 
+  # A name that reads as a placeholder means this check ran against an
+  # example and proved nothing. That is worse than not running it, because it
+  # prints PASS. It happened on the first real use of this script.
+  local placeholders=""
+  for n in "${names[@]}"; do
+    case "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" in
+      your-*|your_*|my-*|my_*|a-client*|an-employer*|a-codename*|*example*|*placeholder*|*changeme*|*todo*|foo|bar|baz|name1|name2)
+        placeholders="${placeholders:+$placeholders, }$n" ;;
+    esac
+  done
+  if [ -n "$placeholders" ]; then
+    skip "$id" "$name: these read as placeholders, not real names: $placeholders. This check would print a pass having looked for nothing. Put the real names in and run it again. If a real name truly looks like this, rename the entry in your list."
+    return
+  fi
+
   if [ "${#names[@]}" -eq 0 ]; then
     skip "$id" "$name: no names configured. Set ADG_FORBIDDEN_NAMES (comma separated) or ADG_FORBIDDEN_NAMES_FILE (one per line, blank lines and lines starting with # ignored) to run this check. A skipped check makes the run incomplete, not clean."
     return
