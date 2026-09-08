@@ -53,6 +53,25 @@ function pathsInitWouldCreate(): Set<string> {
 // src/clean-tree-gate.ts, that can never exist as a tracked file.
 const KNOWN_LOCAL_ONLY_PATHS = new Set([".claude/adg-phase"]);
 
+/**
+ * Paths belonging to the small projects the worked examples describe, which
+ * are other repositories and not this one. They are listed one by one, and
+ * not skipped by pattern, so a path invented for an instruction still fails:
+ * the point of the check is that nobody is told to run something that is not
+ * there, and an example project is the one place a path is meant to be
+ * imaginary.
+ */
+const EXAMPLE_PROJECT_PATHS = new Set([
+  "src/refund.js",
+  "tests/refund.test.js",
+  "tests/refund.spec.helper.js",
+  "src/cart.js",
+  "tests/cart.test.js",
+  "src/queue.js",
+  "tests/queue.test.js",
+  "docs/design.md",
+]);
+
 function read(path: string): string {
   assert.ok(existsSync(path), `${path} does not exist`);
   return readFileSync(path, "utf8");
@@ -123,11 +142,15 @@ test("every command in the README names a real subcommand", () => {
 });
 
 function assertPathIsReal(p: string, generated: Set<string>, source: string): void {
-  const ok = existsSync(join(ROOT, p)) || generated.has(p) || KNOWN_LOCAL_ONLY_PATHS.has(p);
+  const ok =
+      existsSync(join(ROOT, p)) ||
+      generated.has(p) ||
+      KNOWN_LOCAL_ONLY_PATHS.has(p) ||
+      EXAMPLE_PROJECT_PATHS.has(p);
   assert.ok(
     ok,
     `${source} names '${p}', which does not exist in the repository, is not written by 'init', ` +
-      "and is not a known local-only path",
+      "is not a known local-only path, and is not a declared example project path",
   );
 }
 

@@ -2,54 +2,59 @@
 
 Rules that check what an AI coding agent claims about its own work, not just the code it wrote.
 
-A cart is supposed to apply a bulk discount and never got the feature. The
-test that checks it is red, correctly:
+A refund module with four passing tests. An agent is asked to record a
+timestamp on each refund, does that, and tidies the test layout in the same
+commit.
 
 ```
 $ node --test tests/*.test.js
-# tests 2
-# pass 1
-# fail 1
-# skipped 0
-```
-
-An agent asked to fix the failing test makes it pass by editing what the
-test expects, from 108 to 120, so the assertion now agrees with the
-missing feature instead of the feature agreeing with the assertion.
-
-```
-$ node --test tests/*.test.js
-# tests 2
-# pass 2
+# tests 0
+# pass 0
 # fail 0
-# skipped 0
 ```
 
-Fully green, nothing skipped. What a reviewer sees in the diff:
+Nothing failed, because nothing ran. `tests/refund.test.js` was renamed to
+`tests/refund.spec.helper.js`, the runner collects `tests/*.test.js`, and four
+tests stopped being executed while staying in the repository.
+
+Here is everything a reviewer sees:
 
 ```
 $ git show --stat --format='' HEAD
- tests/cart.test.js | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
+ src/refund.js                                   | 2 +-
+ tests/{refund.test.js => refund.spec.helper.js} | 0
+ 2 files changed, 1 insertion(+), 1 deletion(-)
 ```
 
-One file, one line. What the tool says:
+Zero lines against the test file, and git is right: not one character of it
+changed. The source file did change, so this is not a commit that only touches
+tests either.
 
 ```
 $ npx agent-delivery-gates test-diff --rev HEAD
 Source diff:
-  (no source files changed)
+  src/refund.js  +1 -1
 
 Test diff:
-  tests/cart.test.js  +1 -1
+  tests/refund.spec.helper.js  +0 -0
 
 Signals (1):
-  assertion-weakened high tests/cart.test.js: an assertion kept its form while the value it expects changed; confirm the test was not edited to match the behavior
-    assert.equal(total([{ price: 60, qty: 2 }]), 108);  ->  assert.equal(total([{ price: 60, qty: 2 }]), 120);
+  test-file-declassified high tests/refund.spec.helper.js: a test file was renamed so its basename no longer matches a test naming convention; the file may no longer be collected by the test runner, so its tests stop running while the suite still reports success
+    tests/refund.test.js -> tests/refund.spec.helper.js
 ```
 
-Exit code 1. No source file changed at all, which is the part a one-line
-diff hides.
+Exit code 1.
+
+Every other check a project runs says this commit is fine. The tests pass,
+because there are none left to fail. The lines that remain keep their
+coverage. A linter sees valid code. Continuous integration goes green. The
+only sign is the test count dropping, and nobody reads that on a passing
+build.
+
+A [second example](docs/examples/02-test-edited-to-match-a-bug.md) is quieter
+and more common: a bulk discount that was never built, and an agent that makes
+the failing test pass by editing what it expects, from 108 to 120, so the
+assertion agrees with the missing feature.
 
 ## What this is
 
