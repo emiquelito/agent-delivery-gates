@@ -767,3 +767,142 @@ test("an empty rules bucket, from replace: [], never matches anything", () => {
   const result = separateTestDiff(diff, { rules });
   assert.deepEqual(result.signals, []);
 });
+
+// --- Defect 1: an import line is not an assertion, a test case, or a skip ---
+
+test("a removed ES import of an assertion library does not fire assertion-removed", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", ['import assert from "node:assert/strict";'], []);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a removed require( line does not fire assertion-removed", () => {
+  const diff = oneFileDiff("tests/widget.test.js", ['const assert = require("assert");'], []);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a removed Python from x import y line does not fire assertion-removed", () => {
+  const diff = oneFileDiff("tests/test_widget.py", ["from unittest import mock"], []);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a real removed assertion in the same file as a removed import still fires assertion-removed", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    ['import assert from "node:assert/strict";', "assert.equal(x, 1);"],
+    [],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["assertion-removed"]);
+  assert.equal(result.signals.length, 1);
+  assert.equal(result.signals[0].line, "assert.equal(x, 1);");
+});
+
+test("an import line added or removed does not fire test-case-removed or skip-added", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    ['import { test } from "node:test";'],
+    ['import { skip } from "node:test";'],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+// The import filter has to apply to every signal, not only assertions. These
+// two lines are import lines by IMPORT_LINE_RE (a require( call) that also
+// happen to contain the literal token a testCases/skips fragment looks for,
+// so a filter scoped to assertions alone would still let them through.
+test("a require( line containing a test-case-opener token does not fire test-case-removed", () => {
+  const diff = oneFileDiff("tests/widget.test.js", ['const { test } = require("node:test"); test('], []);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a require( line containing a skip token does not fire skip-added", () => {
+  const diff = oneFileDiff("tests/widget.test.js", [], ['const { skip } = require("node:test"); skip(']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+// --- Defect 2: a rename that keeps a file classified as a test can still --
+// --- lose the basename convention a runner globs on -------------------------
+
+test("a rename inside a test directory from a matching basename to a non-matching one fires test-file-declassified, saying the runner may not collect it", () => {
+  const diff = [
+    "diff --git a/tests/refund.test.js b/tests/refund.spec.helper.js",
+    "similarity index 90%",
+    "rename from tests/refund.test.js",
+    "rename to tests/refund.spec.helper.js",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["test-file-declassified"]);
+  const signal = result.signals[0];
+  assert.match(signal.message, /may no longer be collected by the test runner/);
+  assert.match(signal.message, /tests stop running while the suite still reports success/);
+});
+
+test("a rename from a non-matching basename to a matching one does not fire test-file-declassified", () => {
+  const diff = [
+    "diff --git a/tests/helper.js b/tests/helper.test.js",
+    "similarity index 90%",
+    "rename from tests/helper.js",
+    "rename to tests/helper.test.js",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a rename between two matching basenames does not fire test-file-declassified", () => {
+  const diff = [
+    "diff --git a/tests/refund.test.js b/tests/refund.spec.js",
+    "similarity index 90%",
+    "rename from tests/refund.test.js",
+    "rename to tests/refund.spec.js",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a rename out of the test paths entirely still fires test-file-declassified, as before", () => {
+  const diff = [
+    "diff --git a/tests/refund.test.js b/lib/refund.js.bak",
+    "similarity index 90%",
+    "rename from tests/refund.test.js",
+    "rename to lib/refund.js.bak",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["test-file-declassified"]);
+});
+
+// The realistic scenario this defect exists for: a source change plus a
+// rename that quietly drops a test file out of what the runner collects,
+// all in one commit, and no noise from the import line the rename drags in.
+test("the fixture: a source change plus a rename out of the runner's naming convention, with an import line in the diff", () => {
+  const diff = [
+    "diff --git a/src/refund.ts b/src/refund.ts",
+    "index 1111111..2222222 100644",
+    "--- a/src/refund.ts",
+    "+++ b/src/refund.ts",
+    "@@ -1,1 +1,1 @@",
+    "-export function refund() {}",
+    "+export function refund() { return true; }",
+    "diff --git a/tests/refund.test.js b/tests/refund.spec.helper.js",
+    "similarity index 90%",
+    "rename from tests/refund.test.js",
+    "rename to tests/refund.spec.helper.js",
+    "--- a/tests/refund.test.js",
+    "+++ b/tests/refund.spec.helper.js",
+    "@@ -1,2 +1,2 @@",
+    '-import assert from "node:assert/strict";',
+    '+import assert from "node:assert/strict";',
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["test-file-declassified"]);
+});

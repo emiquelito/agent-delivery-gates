@@ -220,16 +220,19 @@ function resolveDiffText(args: ParsedArgs): string {
     return text;
   }
   if (args.range !== undefined) {
-    return runGit(["diff", "--no-color", args.range]);
+    return runGit(["diff", "--no-color", "--find-renames", args.range]);
   }
   if (args.staged) {
-    return runGit(["diff", "--no-color", "--staged"]);
+    return runGit(["diff", "--no-color", "--find-renames", "--staged"]);
   }
   // Default and --rev: the diff introduced by that one commit. --root
   // makes this work for a commit with no parent by diffing against an
   // empty tree instead of failing.
   const rev = args.rev ?? "HEAD";
-  return runGit(["diff-tree", "-p", "--no-color", "--root", "-r", rev]);
+  // Rename detection is asked for on purpose. Without it git reports a rename
+  // as a whole file added and a whole file deleted, and the check that a test
+  // file left the naming convention never sees a rename to report.
+  return runGit(["diff-tree", "-p", "--no-color", "--root", "-r", "--find-renames", rev]);
 }
 
 function readFileOrFail(path: string): string {

@@ -263,7 +263,7 @@ export function runTestDiffGate(payload: CanonicalPayload): AdapterDecision {
 
   let diffText: string;
   try {
-    diffText = execFileSync("git", ["diff-tree", "-p", "--no-color", "--root", "-r", "HEAD"], {
+    diffText = execFileSync("git", ["diff-tree", "-p", "--no-color", "--root", "-r", "--find-renames", "HEAD"], {
       cwd,
       env: gitEnv(),
       encoding: "utf8",

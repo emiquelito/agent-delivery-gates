@@ -400,3 +400,24 @@ test("a config broadens what the diff separator itself sees, not only --classify
     });
   });
 });
+
+// Git reports a rename as a whole file added and a whole file deleted unless
+// it is asked to detect renames. Without that, the check that a test file
+// left the naming convention never sees a rename at all, and the one case it
+// exists for reads as an ordinary pair of file changes. The unit tests pass
+// on a diff written with rename headers, so only a real repository catches
+// this.
+test("a real git rename out of the test naming convention is reported", () => {
+  withTempRepo((dir) => {
+    writeFileSync(join(dir, "widget.test.js"), 'test("a", () => { assert.ok(1); });\n');
+    runGit(dir, ["add", "-A"]);
+    runGit(dir, ["commit", "-q", "-m", "initial"]);
+    runGit(dir, ["mv", "widget.test.js", "widget.helper.js"]);
+    runGit(dir, ["commit", "-q", "-am", "tidy the test layout"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /test-file-declassified/);
+    assert.match(result.stdout, /widget\.test\.js -> widget\.helper\.js/);
+  });
+});

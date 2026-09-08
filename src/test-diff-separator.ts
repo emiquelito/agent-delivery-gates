@@ -451,9 +451,27 @@ function isCommentLine(line: string): boolean {
   return COMMENT_LINE_RE.test(line);
 }
 
+// An import or a require, across the languages this file already covers: an
+// ES import, a require(...) call, Python's "import x" and "from x import
+// y", a Go "import" line, a Java or Kotlin import, and Rust's "use". The
+// word "assert" shows up in plenty of import lines ("import assert from
+// 'node:assert/strict'"), and a deleted or renamed test file drags its own
+// import lines into the diff as removed lines, so without this exclusion
+// they get read as removed assertions.
+const IMPORT_LINE_RE = /^\s*(?:import\b|from\s+\S+\s+import\b|use\s+[A-Za-z_])|\brequire\(/;
+
+/**
+ * True when the line is only an import or a require, in any of the forms
+ * IMPORT_LINE_RE covers. Never itself an assertion, a test case opener, or
+ * a skip, whatever word it happens to contain.
+ */
+function isImportLine(line: string): boolean {
+  return IMPORT_LINE_RE.test(line);
+}
+
 /** Counts and collects the code lines in `lines` that match `re`. */
 function matching(lines: string[], re: RegExp): string[] {
-  return lines.filter((line) => !isCommentLine(line) && re.test(line));
+  return lines.filter((line) => !isCommentLine(line) && !isImportLine(line) && re.test(line));
 }
 
 // An assertion that stays in place but stops proving as much. The net-count
@@ -524,25 +542,75 @@ function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules): Sign
   return signals;
 }
 
+/** The final path segment: what a runner globs on, not the directory it sits in. */
+function basenameOf(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
+// The basename-only testPaths conventions, tightened for a bare basename
+// with no directory to anchor against. testPaths itself matches
+// "\.spec\.[^/]*$" against a whole path, so "helper.js" after ".spec." is
+// fine there: it still has to sit under a test directory to count, and
+// there this fragment only ever fires alongside the directory check. Tested
+// against a basename alone that guard is gone, so a marker followed by more
+// than one extension segment ("refund.spec.helper.js") would otherwise read
+// as conventional when no runner globs that way. Every dotted suffix marker
+// below requires exactly one extension after it; the prefix and exact-name
+// forms are unaffected since a runner already treats anything after them as
+// free-form.
+function matchesBasenameConvention(basename: string): boolean {
+  return (
+    /\.test\.[^./]+$/.test(basename) ||
+    /\.spec\.[^./]+$/.test(basename) ||
+    /_test\.[^./]+$/.test(basename) ||
+    /^test_[^/]*$/.test(basename) ||
+    /_spec\.rb$/.test(basename) ||
+    basename === "conftest.py" ||
+    /[A-Za-z0-9]+Tests?\.(java|cs|php|swift|kt)$/.test(basename)
+  );
+}
+
 /**
  * A file that was a test and is not one any more has left the run entirely,
  * whatever its content diff says. Renaming a test out of the naming rules
  * takes it out of scrutiny, so the rename itself is the signal.
+ *
+ * A file can also stay classified as a test by path (still under a test
+ * directory) while its basename stops matching any naming convention a
+ * runner globs on. That rename is invisible to the path-level check alone,
+ * so it gets its own branch here.
  */
 function declassifiedTestSignals(file: RawFileDiff, testPathsRe: RegExp): Signal[] {
   if (file.oldPath === null) return [];
   if (!testPathsRe.test(file.oldPath)) return [];
-  if (testPathsRe.test(file.path)) return [];
-  return [
-    {
-      id: "test-file-declassified",
-      severity: "high",
-      file: file.path,
-      line: `${file.oldPath} -> ${file.path}`,
-      message:
-        "a test file was renamed so it no longer reads as a test; confirm these tests were not taken out of the run",
-    },
-  ];
+  if (!testPathsRe.test(file.path)) {
+    return [
+      {
+        id: "test-file-declassified",
+        severity: "high",
+        file: file.path,
+        line: `${file.oldPath} -> ${file.path}`,
+        message:
+          "a test file was renamed so it no longer reads as a test; confirm these tests were not taken out of the run",
+      },
+    ];
+  }
+  const oldBase = basenameOf(file.oldPath);
+  const newBase = basenameOf(file.path);
+  if (matchesBasenameConvention(oldBase) && !matchesBasenameConvention(newBase)) {
+    return [
+      {
+        id: "test-file-declassified",
+        severity: "high",
+        file: file.path,
+        line: `${file.oldPath} -> ${file.path}`,
+        message:
+          "a test file was renamed so its basename no longer matches a test naming convention; the file may no longer be collected by the test runner, so its tests stop running while the suite still reports success",
+      },
+    ];
+  }
+  return [];
 }
 
 /**
