@@ -1,0 +1,11 @@
+{
+  "name": "agent-delivery-gates",
+  "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Evandro Miquelito"
+  },
+  "homepage": "https://github.com/emiquelito/agent-delivery-gates",
+  "repository": "https://github.com/emiquelito/agent-delivery-gates",
+  "license": "Apache-2.0"
+}

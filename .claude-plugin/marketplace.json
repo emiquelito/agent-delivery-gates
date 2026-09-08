@@ -1,0 +1,14 @@
+{
+  "name": "agent-delivery-gates",
+  "owner": {
+    "name": "Evandro Miquelito",
+    "url": "https://github.com/emiquelito"
+  },
+  "plugins": [
+    {
+      "name": "agent-delivery-gates",
+      "source": "./",
+      "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote."
+    }
+  ]
+}
