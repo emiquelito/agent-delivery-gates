@@ -15,9 +15,11 @@
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readSync } from "node:fs";
-import { formatSignalText, separateTestDiff, type SeparateResult } from "../src/test-diff-separator.ts";
+import { classifyTestPath, formatSignalText, separateTestDiff, type RuleSet, type SeparateResult } from "../src/test-diff-separator.ts";
+import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
 
-const USAGE = `Usage: test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
+const USAGE = `Usage: test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json] [--config PATH]
+       test-diff-separator --classify PATH... [--config PATH]
 
 Separates the source diff from the test diff and reports weakening signals
 found in the test files alone: a removed assertion, a removed test case, an
@@ -28,14 +30,25 @@ added skip, a widened tolerance, a raised timeout.
   --staged       the staged diff
   --diff PATH    read diff text from this file, or "-" for stdin
   --format FORMAT "text" (default) or "json"
+  --config PATH  use this rules config instead of the usual lookup
+  --classify PATH...  for each path, say whether it counts as a test file or
+                 as source, and which rule decided; prints nothing else and
+                 always exits 0
   --help         print this message and exit 0
 
-Exactly one of --rev, --range, --staged, --diff may be given.
+Exactly one of --rev, --range, --staged, --diff, --classify may be given.
+
+Rules config, first match wins:
+  1. --config PATH
+  2. ADG_TEST_DIFF_CONFIG in the environment
+  3. .adg/test-diff.json in the repository root, if it exists
+  4. the built-in defaults
 
 Exit codes:
   0  no test file changed, or none of the changed test files carry a signal
+     (or, with --classify, the classification was printed)
   1  at least one weakening signal was found
-  2  could not run as asked
+  2  could not run as asked, including a config that failed to load
 `;
 
 function fail(message: string): never {
@@ -69,6 +82,8 @@ interface ParsedArgs {
   staged: boolean;
   diffPath?: string;
   format: "text" | "json";
+  configPath?: string;
+  classifyPaths?: string[];
   help: boolean;
 }
 
@@ -105,19 +120,70 @@ function parseArgs(argv: string[]): ParsedArgs {
           result.format = value;
         }
         break;
+      case "--config":
+        result.configPath = argv[++i];
+        if (result.configPath === undefined) fail("--config needs a path argument");
+        break;
+      case "--classify":
+        {
+          const paths: string[] = [];
+          let j = i + 1;
+          while (j < argv.length && !argv[j].startsWith("-")) {
+            paths.push(argv[j]);
+            j++;
+          }
+          if (paths.length === 0) fail("--classify needs at least one path argument");
+          result.classifyPaths = paths;
+          i = j - 1; // the for loop's i++ resumes right after the last path consumed
+        }
+        break;
       default:
         fail(`unknown argument '${arg}'`);
     }
   }
 
-  const sourceCount = [result.rev !== undefined, result.range !== undefined, result.staged, result.diffPath !== undefined].filter(
-    Boolean,
-  ).length;
+  const sourceCount = [
+    result.rev !== undefined,
+    result.range !== undefined,
+    result.staged,
+    result.diffPath !== undefined,
+    result.classifyPaths !== undefined,
+  ].filter(Boolean).length;
   if (sourceCount > 1) {
-    fail("specify only one of --rev, --range, --staged, --diff");
+    fail("specify only one of --rev, --range, --staged, --diff, --classify");
   }
 
   return result;
+}
+
+/**
+ * The repository root, used only to find .adg/test-diff.json. Returns
+ * undefined instead of failing when there is no git repository here: a
+ * missing default config file is not an error, and --classify in
+ * particular has no other reason to need git at all.
+ */
+function tryResolveRepoRoot(cwd: string): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      env: gitEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveRules(args: ParsedArgs): RuleSet {
+  const repoRoot = tryResolveRepoRoot(process.cwd());
+  const configPath = resolveConfigPath({ explicitPath: args.configPath, env: process.env, repoRoot });
+  try {
+    return loadRuleSet(configPath);
+  } catch (err) {
+    if (err instanceof ConfigError) fail(`config: ${err.message}`);
+    throw err;
+  }
 }
 
 /**
@@ -209,6 +275,27 @@ function formatText(result: SeparateResult): string {
   return lines.join("\n");
 }
 
+function runClassify(paths: string[], rules: RuleSet, format: "text" | "json"): void {
+  const rows = paths.map((path) => {
+    const { isTest, matchedRule } = classifyTestPath(path, rules);
+    return { path, classification: isTest ? ("test" as const) : ("source" as const), matchedRule };
+  });
+
+  if (format === "json") {
+    process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+  } else {
+    const lines = rows.map((row) => {
+      const decided =
+        row.matchedRule !== null
+          ? `matched testPaths rule: ${row.matchedRule}`
+          : "no testPaths rule matched";
+      return `${row.path}: ${row.classification}  (${decided})`;
+    });
+    process.stdout.write(`${lines.join("\n")}\n`);
+  }
+  process.exit(0);
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -216,8 +303,15 @@ function main(): void {
     process.exit(0);
   }
 
+  const rules = resolveRules(args);
+
+  if (args.classifyPaths !== undefined) {
+    runClassify(args.classifyPaths, rules, args.format);
+    return;
+  }
+
   const diffText = resolveDiffText(args);
-  const result = separateTestDiff(diffText);
+  const result = separateTestDiff(diffText, { rules });
 
   if (args.format === "json") {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

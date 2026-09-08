@@ -14,7 +14,8 @@ import process from "node:process";
 import { readAllStdin } from "../src/hook-io.ts";
 import { execFileSync } from "node:child_process";
 import { readSync } from "node:fs";
-import { formatSignalText, separateTestDiff } from "../src/test-diff-separator.ts";
+import { formatSignalText, separateTestDiff, type RuleSet } from "../src/test-diff-separator.ts";
+import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
 
 function block(message: string): never {
   process.stderr.write(message.endsWith("\n") ? message : `${message}\n`);
@@ -68,6 +69,30 @@ function main(): void {
 
   const cwd = typeof payload.cwd === "string" && payload.cwd !== "" ? payload.cwd : process.cwd();
 
+  // The same rules config a person configures for the standalone CLI, so
+  // this hook, the one that actually gates a commit, sees what they
+  // configured instead of only ever running on the built-in defaults.
+  let repoRoot: string | undefined;
+  try {
+    repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      env: gitEnv(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    repoRoot = undefined;
+  }
+  let rules: RuleSet;
+  try {
+    rules = loadRuleSet(resolveConfigPath({ env: process.env, repoRoot }));
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      block(`test-diff-post-tool-hook: config: ${err.message}`);
+    }
+    throw err;
+  }
+
   let diffText: string;
   try {
     diffText = execFileSync("git", ["diff-tree", "-p", "--no-color", "--root", "-r", "HEAD"], {
@@ -83,7 +108,7 @@ function main(): void {
     return;
   }
 
-  const result = separateTestDiff(diffText);
+  const result = separateTestDiff(diffText, { rules });
   if (result.signals.length === 0) {
     process.exit(0);
   }

@@ -4,7 +4,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isTestPath, separateTestDiff, type Signal } from "../src/test-diff-separator.ts";
+import {
+  classifyTestPath,
+  compileRuleSet,
+  DEFAULT_RULES,
+  isTestPath,
+  separateTestDiff,
+  type RuleSet,
+  type Signal,
+} from "../src/test-diff-separator.ts";
 
 function signalIds(signals: Signal[]): string[] {
   return signals.map((s) => s.id).sort();
@@ -39,7 +47,38 @@ test("a basename matching *.test.*, *.spec.*, *_test.*, or test_* classifies a f
   assert.equal(isTestPath("src/foo.spec.ts"), true);
   assert.equal(isTestPath("src/foo_test.py"), true);
   assert.equal(isTestPath("src/test_foo.py"), true);
-  assert.equal(isTestPath("SRC/Foo.TEST.TS"), true);
+  // Path rules are matched case sensitively on purpose. Matching without
+  // case turned Contest.java and Latest.java into test files, and case is the
+  // only thing that separates those from WidgetTest.java.
+  assert.equal(isTestPath("SRC/Foo.TEST.TS"), false);
+});
+
+test("a capital T is what separates a test class from an ordinary word", () => {
+  for (const p of ["WidgetTest.java", "FooTests.cs", "WidgetTest.php", "FooTests.swift"]) {
+    assert.equal(isTestPath(p), true, `${p} should be a test`);
+  }
+  for (const p of ["Contest.java", "Latest.java", "contest.php", "latest.ts", "protest.rb"]) {
+    assert.equal(isTestPath(p), false, `${p} should be source`);
+  }
+});
+
+test("capitalised test folders are recognised, as Swift and C# name them", () => {
+  assert.equal(isTestPath("Tests/WidgetTests.swift"), true);
+  assert.equal(isTestPath("Spec/FooSpec.cs"), true);
+});
+
+// classifyTestPath compiled its own regex separately from the matcher the
+// separator runs, so the two disagreed the moment one of them changed: the
+// classifier called Contest.java a test while the separator called it source.
+test("classifyTestPath and isTestPath never disagree", () => {
+  const paths = [
+    "WidgetTest.java", "Contest.java", "latest.ts", "tests/a.test.ts",
+    "widget_test.go", "spec/widget_spec.rb", "src/widget.ts",
+    "Tests/WidgetTests.swift", "conftest.py", "src/test/java/a/WidgetTest.java",
+  ];
+  for (const p of paths) {
+    assert.equal(classifyTestPath(p).isTest, isTestPath(p), `disagreement on ${p}`);
+  }
 });
 
 test("an ordinary source path classifies as source", () => {
@@ -434,6 +473,33 @@ test("a removed Go t.Errorf fires assertion-removed", () => {
   assert.ok(signalIds(result.signals).includes("assertion-removed"));
 });
 
+// Go testify's require. package-call assertions carry none of the standard
+// library's words either, and "require." alone (without the "!" the older
+// rule expected) would not have matched before this rule was added.
+test("a removed Go testify require.NoError fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("queue_test.go", ["\trequire.NoError(t, err)"], []),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+// RSpec and Elixir's string-form opener has no parentheses at all, so the
+// existing test(/it( rules do not reach it.
+test("a deleted RSpec-style it \"...\" do case, with nothing added, fires test-case-removed", () => {
+  const diff = oneFileDiff("spec/widget_spec.rb", ['it "adds numbers" do'], []);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["test-case-removed"]);
+});
+
+// Node's require.resolve/.cache write "require." the same way but with a
+// function name the testify rule's whitelist does not include.
+test("Node's require.resolve is not read as a testify assertion", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/widget.test.js", ["const p = require.resolve('./widget');"], []),
+  );
+  assert.deepEqual(result.signals, []);
+});
+
 // Renaming a test out of the naming rules takes it out of the run, and it
 // stops being classified as a test at the same moment.
 test("a test renamed out of the naming rules fires test-file-declassified", () => {
@@ -514,4 +580,190 @@ test("a file is reported under the path it has after the diff, not before", () =
     result.testFiles.map((f) => f.path),
     ["tests/new.test.js"],
   );
+});
+
+// --- The ecosystem matrix: every default rule this file claims to cover ------
+//
+// One realistic snippet per language, checked against all four things a
+// project adopting this tool with no config at all needs to be true: its
+// test path is recognised, its plain source path is not, deleting its
+// assertion fires assertion-removed, and adding its skip fires skip-added.
+
+interface LangCase {
+  name: string;
+  testPath: string;
+  sourcePath: string;
+  assertionLine: string;
+  skipLine: string;
+}
+
+const LANGUAGE_MATRIX: LangCase[] = [
+  {
+    name: "Python",
+    testPath: "tests/test_widget.py",
+    sourcePath: "src/widget.py",
+    assertionLine: "assert add(2, 3) == 5",
+    skipLine: "@pytest.mark.skip",
+  },
+  {
+    name: "JavaScript",
+    testPath: "tests/widget.test.js",
+    sourcePath: "src/widget.js",
+    assertionLine: "expect(add(2, 3)).toBe(5);",
+    skipLine: "it.skip('adds numbers', () => {});",
+  },
+  {
+    name: "TypeScript",
+    testPath: "tests/widget.test.ts",
+    sourcePath: "src/widget.ts",
+    assertionLine: "expect(add(2, 3)).toBe(5);",
+    skipLine: "it.skip('adds numbers', () => {});",
+  },
+  {
+    name: "PHP",
+    testPath: "tests/WidgetTest.php",
+    sourcePath: "src/Widget.php",
+    assertionLine: "$this->assertEquals(5, add(2, 3));",
+    skipLine: "$this->markTestSkipped('not ready');",
+  },
+  {
+    name: "Ruby",
+    testPath: "spec/widget_spec.rb",
+    sourcePath: "lib/widget.rb",
+    assertionLine: "expect(add(2, 3)).to eq(5)",
+    skipLine: 'skip "not ready"',
+  },
+  {
+    name: "Rust",
+    testPath: "tests/widget_test.rs",
+    sourcePath: "src/widget.rs",
+    assertionLine: "assert_eq!(add(2, 3), 5);",
+    skipLine: "#[ignore]",
+  },
+  {
+    name: "Go",
+    testPath: "widget_test.go",
+    sourcePath: "widget.go",
+    assertionLine: 'if got != want { t.Errorf("got %d want %d", got, want) }',
+    skipLine: 't.SkipNow()',
+  },
+  {
+    name: "Java",
+    testPath: "src/test/java/com/example/WidgetTest.java",
+    sourcePath: "src/main/java/com/example/Widget.java",
+    assertionLine: "assertEquals(5, add(2, 3));",
+    skipLine: '@Disabled("not ready")',
+  },
+  {
+    // Deliberately not under a "test"/"tests" directory segment, so this
+    // case exercises the PascalCase-suffix rule on its own, not the segment
+    // rule: "Widget.Tests" is not the segment "tests".
+    name: "C#",
+    testPath: "src/Widget.Tests/WidgetTests.cs",
+    sourcePath: "src/Widget/Widget.cs",
+    assertionLine: "Assert.AreEqual(5, Add(2, 3));",
+    skipLine: '[Fact(Skip = "not ready")]',
+  },
+  {
+    name: "Kotlin",
+    testPath: "src/test/kotlin/com/example/WidgetTest.kt",
+    sourcePath: "src/main/kotlin/com/example/Widget.kt",
+    assertionLine: "assertEquals(5, add(2, 3))",
+    skipLine: '@Ignore("not ready")',
+  },
+];
+
+for (const lang of LANGUAGE_MATRIX) {
+  test(`${lang.name}: its usual test path classifies as a test`, () => {
+    assert.equal(isTestPath(lang.testPath), true, lang.testPath);
+  });
+
+  test(`${lang.name}: a plain source file classifies as source`, () => {
+    assert.equal(isTestPath(lang.sourcePath), false, lang.sourcePath);
+  });
+
+  test(`${lang.name}: deleting its assertion fires assertion-removed`, () => {
+    const diff = oneFileDiff(lang.testPath, [lang.assertionLine], []);
+    const result = separateTestDiff(diff);
+    assert.ok(
+      signalIds(result.signals).includes("assertion-removed"),
+      `expected assertion-removed, got ${JSON.stringify(signalIds(result.signals))}`,
+    );
+  });
+
+  test(`${lang.name}: adding its skip fires skip-added`, () => {
+    const diff = oneFileDiff(lang.testPath, [], [lang.skipLine]);
+    const result = separateTestDiff(diff);
+    assert.ok(
+      signalIds(result.signals).includes("skip-added"),
+      `expected skip-added, got ${JSON.stringify(signalIds(result.signals))}`,
+    );
+  });
+}
+
+// A file sitting in a directory literally named "spec" is a test by the
+// segment rule alone, whatever it contains. This is deliberate, the same
+// way "spec/foo.rb" already was before this file broadened anything, and it
+// does not depend on the file itself looking like a test.
+test("a plain file in a folder named spec is still classified as a test", () => {
+  assert.equal(isTestPath("spec/README.md"), true);
+});
+
+// --- classifyTestPath: names which rule decided, for --classify -------------
+
+test("classifyTestPath names the matching testPaths fragment for a recognised test path", () => {
+  const { isTest, matchedRule } = classifyTestPath("tests/widget.test.ts");
+  assert.equal(isTest, true);
+  assert.match(matchedRule ?? "", /test/);
+});
+
+test("classifyTestPath reports no matched rule for a source path", () => {
+  const { isTest, matchedRule } = classifyTestPath("src/widget.ts");
+  assert.equal(isTest, false);
+  assert.equal(matchedRule, null);
+});
+
+// --- RuleSet: add extends, replace discards, everything is configurable -----
+
+test("a rules.testPaths add extends the defaults: both the extra and the built-in rules apply", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, testPaths: [...DEFAULT_RULES.testPaths, "\\.flow\\.ts$"] };
+  const diff = oneFileDiff("e2e/checkout.flow.ts", ["expect(x).toBe(1);"], []);
+  const result = separateTestDiff(diff, { rules });
+  assert.deepEqual(
+    result.testFiles.map((f) => f.path),
+    ["e2e/checkout.flow.ts"],
+  );
+  // The built-in "tests/" segment rule still applies alongside the extra one.
+  assert.equal(separateTestDiff(oneFileDiff("tests/widget.test.ts", [], [])).testFiles[0]?.path, "tests/widget.test.ts");
+});
+
+test("a rules.testPaths replace discards the defaults: an ordinary tests/ path stops counting", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, testPaths: ["\\.flow\\.ts$"] };
+  const diff = oneFileDiff("tests/widget.test.ts", ["expect(x).toBe(1);"], []);
+  const result = separateTestDiff(diff, { rules });
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["tests/widget.test.ts"],
+  );
+  assert.deepEqual(result.testFiles, []);
+});
+
+test("a rules.assertions replace narrows what counts as an assertion", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, assertions: ["\\bcheckThat\\("] };
+  // The default \bexpect( no longer applies under replace.
+  const diff = oneFileDiff("tests/widget.test.ts", ["expect(x).toBe(1);"], []);
+  const result = separateTestDiff(diff, { rules });
+  assert.deepEqual(result.signals, []);
+});
+
+test("compileRuleSet throws on a malformed regex fragment, naming the bucket", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, skips: ["(unclosed"] };
+  assert.throws(() => compileRuleSet(rules), /skips/);
+});
+
+test("an empty rules bucket, from replace: [], never matches anything", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, skips: [] };
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["it.skip('x', () => {});"]);
+  const result = separateTestDiff(diff, { rules });
+  assert.deepEqual(result.signals, []);
 });

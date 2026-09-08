@@ -257,3 +257,146 @@ test("--help prints usage and exits 0", () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /Usage: test-diff-separator/);
 });
+
+// --- --classify ---------------------------------------------------------------
+
+test("--classify prints test or source for each path, and exits 0 even with no matches", () => {
+  const result = runCli({ args: ["--classify", "tests/widget.test.ts", "src/widget.ts"] });
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.stdout.trim().split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^tests\/widget\.test\.ts: test\b/);
+  assert.match(lines[1], /^src\/widget\.ts: source\b/);
+});
+
+test("--classify names the testPaths rule that decided a test path", () => {
+  const result = runCli({ args: ["--classify", "tests/widget.test.ts"] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /matched testPaths rule:/);
+});
+
+test("--classify says no rule matched for a source path", () => {
+  const result = runCli({ args: ["--classify", "src/widget.ts"] });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /no testPaths rule matched/);
+});
+
+test("--classify with no path argument: exit 2", () => {
+  const result = runCli({ args: ["--classify"] });
+  assert.equal(result.status, 2);
+});
+
+test("--classify combined with --staged: exit 2, only one mode at a time", () => {
+  const result = runCli({ args: ["--classify", "src/widget.ts", "--staged"] });
+  assert.equal(result.status, 2);
+});
+
+test("--classify --format json prints a parseable array naming the matched rule", () => {
+  const result = runCli({ args: ["--classify", "tests/widget.test.ts", "--format", "json"] });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed[0].path, "tests/widget.test.ts");
+  assert.equal(parsed[0].classification, "test");
+  assert.ok(typeof parsed[0].matchedRule === "string");
+});
+
+// --- --config, ADG_TEST_DIFF_CONFIG, and .adg/test-diff.json ------------------
+
+function withConfigFile(content: string, fn: (path: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "adg-test-diff-cli-config-test-"));
+  const path = join(dir, "test-diff.json");
+  try {
+    writeFileSync(path, content);
+    fn(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("--config add extends the defaults: a custom test path classifies as a test", () => {
+  withConfigFile('{"testPaths": {"add": ["\\\\.flow\\\\.ts$"]}}', (configPath) => {
+    const result = runCli({ args: ["--classify", "e2e/checkout.flow.ts", "--config", configPath] });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /: test\b/);
+  });
+});
+
+test("--config replace discards the defaults: an ordinary tests/ path stops classifying as a test", () => {
+  withConfigFile('{"testPaths": {"replace": ["\\\\.flow\\\\.ts$"]}}', (configPath) => {
+    const result = runCli({ args: ["--classify", "tests/widget.test.ts", "--config", configPath] });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /: source\b/);
+  });
+});
+
+test("an unknown top-level key in the config: exit 2", () => {
+  withConfigFile('{"bogus": {"add": []}}', (configPath) => {
+    const result = runCli({ args: ["--classify", "src/widget.ts", "--config", configPath] });
+    assert.equal(result.status, 2);
+    assert.notEqual(result.stderr.trim(), "");
+  });
+});
+
+test("malformed JSON in the config: exit 2", () => {
+  withConfigFile("{not json", (configPath) => {
+    const result = runCli({ args: ["--classify", "src/widget.ts", "--config", configPath] });
+    assert.equal(result.status, 2);
+  });
+});
+
+test("a bad regex fragment in the config: exit 2", () => {
+  withConfigFile('{"skips": {"add": ["(unclosed"]}}', (configPath) => {
+    const result = runCli({ args: ["--classify", "src/widget.ts", "--config", configPath] });
+    assert.equal(result.status, 2);
+  });
+});
+
+test("a nonexistent --config path: exit 2, never a silent fall back to the defaults", () => {
+  const result = runCli({ args: ["--classify", "src/widget.ts", "--config", "/nonexistent/does-not-exist-adg.json"] });
+  assert.equal(result.status, 2);
+});
+
+test("--config beats ADG_TEST_DIFF_CONFIG when both are given", () => {
+  withConfigFile('{"testPaths": {"add": ["\\\\.flow\\\\.ts$"]}}', (configPath) => {
+    withConfigFile('{"bogus": {"add": []}}', (badEnvPath) => {
+      // The env var alone points at a config that would fail to load; the
+      // explicit --config path must win instead of that failure showing up.
+      const result = runCli({
+        args: ["--classify", "e2e/checkout.flow.ts", "--config", configPath],
+        env: { ADG_TEST_DIFF_CONFIG: badEnvPath },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /: test\b/);
+    });
+  });
+});
+
+test("ADG_TEST_DIFF_CONFIG applies when no --config is given", () => {
+  withConfigFile('{"testPaths": {"add": ["\\\\.flow\\\\.ts$"]}}', (configPath) => {
+    const result = runCli({
+      args: ["--classify", "e2e/checkout.flow.ts"],
+      env: { ADG_TEST_DIFF_CONFIG: configPath },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /: test\b/);
+  });
+});
+
+test("a config broadens what the diff separator itself sees, not only --classify", () => {
+  withConfigFile('{"skips": {"add": ["\\\\bpaused\\\\("]}}', (configPath) => {
+    const diff = [
+      "diff --git a/tests/widget.test.ts b/tests/widget.test.ts",
+      "index 1111111..2222222 100644",
+      "--- a/tests/widget.test.ts",
+      "+++ b/tests/widget.test.ts",
+      "@@ -1,1 +1,1 @@",
+      "+  paused(reason);",
+      "",
+    ].join("\n");
+    withTempFile(diff, (diffPath) => {
+      const result = runCli({ args: ["--diff", diffPath, "--config", configPath] });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stdout, /skip-added/);
+    });
+  });
+});

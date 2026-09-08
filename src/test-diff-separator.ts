@@ -40,14 +40,234 @@ export interface Signal {
   message: string;
 }
 
+// --- Configurable rule fragments ----------------------------------------------
+//
+// Every pattern group below is a list of extended-regex fragments, joined
+// with "|" and compiled case-insensitively. A project can add to or replace
+// any group through a JSON config; see src/test-diff-config.ts for how a
+// config file becomes a RuleSet. This file itself does no file reading: it
+// only knows how to turn a RuleSet into working regexes and how to apply
+// them. The defaults here are broad on purpose, since test naming is
+// convention, not one project's taste, and the tool must work with no
+// configuration at all.
+
+export type RuleBucket = "testPaths" | "assertions" | "testCases" | "skips" | "tolerance" | "timeout";
+
+export const RULE_BUCKETS: readonly RuleBucket[] = [
+  "testPaths",
+  "assertions",
+  "testCases",
+  "skips",
+  "tolerance",
+  "timeout",
+];
+
+/** Buckets a config file may fully replace instead of only adding to. */
+export const REPLACEABLE_BUCKETS: ReadonlySet<RuleBucket> = new Set([
+  "testPaths",
+  "assertions",
+  "testCases",
+  "skips",
+]);
+
+export interface RuleSet {
+  testPaths: string[];
+  assertions: string[];
+  testCases: string[];
+  skips: string[];
+  tolerance: string[];
+  timeout: string[];
+}
+
+export interface CompiledRules {
+  testPaths: RegExp;
+  assertions: RegExp;
+  testCases: RegExp;
+  skips: RegExp;
+  tolerance: RegExp;
+  timeout: RegExp;
+}
+
+// Written case-insensitively at compile time (see compileFragments), so a
+// fragment does not itself need to spell out every casing.
+export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
+  testPaths: [
+    // A directory segment naming a conventional test folder. This already
+    // covers Java and Kotlin's src/test/... layout, since "test" is its own
+    // path segment there.
+    // Capitalised spellings are listed because this bucket is compiled case
+      // sensitively. Swift and C# name these folders Tests and Specs.
+      "(^|/)(test|tests|Test|Tests|__tests__|spec|specs|Spec|Specs)(/|$)",
+    "\\.test\\.[^/]*$",
+    "\\.spec\\.[^/]*$",
+    "_test\\.[^/]*$",
+    "(^|/)test_[^/]*$",
+    // Ruby's *_spec.rb: an underscore, not the dotted form above.
+    "_spec\\.rb$",
+    // Python's pytest fixture file, wherever it sits.
+    "(^|/)conftest\\.py$",
+    // A PascalCase Test/Tests suffix: FooTest.java, FooTests.cs,
+    // FooTest.php, FooTests.swift, FooTest.kt. Scoped to these extensions
+    // on purpose: opened up to every extension, this would also catch an
+    // ordinary class named Contest or Latest.
+    "[A-Za-z0-9]+Tests?\\.(java|cs|php|swift|kt)$",
+  ],
+  assertions: [
+    // Word-prefixed so assertEqual, assert_equal, self.assertTrue,
+    // PHPUnit's $this->assert..., C#'s Assert., and Java's assertThat and
+    // Assertions. all match through this one prefix.
+    "\\bassert",
+    "\\bexpect\\(",
+    "\\bshould\\b",
+    "\\bverify\\(",
+    "\\brequire!",
+    // Go testify's require.NoError(...), require.Equal(...), and so on.
+    // Named explicitly, not just "require." followed by a call, because
+    // this whole rule set is matched case-insensitively (see
+    // compileFragments below), so an uppercase-only check would not tell
+    // this apart from Node's own require.resolve(...) or require.cache.
+    "\\brequire\\.(?:NoErrorf?|Errorf?|EqualError|Equal|NotEqual|True|False|Nil|NotNil|Empty|NotEmpty|Len|Contains|NotContains|ElementsMatch|Panics|NotPanics|Greater|GreaterOrEqual|Less|LessOrEqual|WithinDuration|InDelta|InEpsilon|Zero|NotZero|Same|NotSame|IsType|Implements|FailNow|Fail)\\b",
+    // Ruby minitest's refute / refute_equal / refute_nil.
+    "\\brefute",
+    "\\bpytest\\.raises\\b",
+    "\\bt\\.(?:Errorf?|Fatalf?|Fail(?:Now)?)\\b",
+  ],
+  testCases: [
+    "\\btest\\(",
+    "\\bit\\(",
+    "\\bdescribe\\(",
+    "\\bdef test_",
+    "#\\[test\\]",
+    "\\bfunc Test",
+    "@Test\\b",
+    // RSpec and Elixir's string-form opener: it "does x" do, test "does x".
+    "\\bit\\s+[\"']",
+    "\\btest\\s+[\"']",
+    "\\bpublic function test\\w*\\(",
+    "\\bclass\\s+\\w*Tests?\\b",
+    "\\[Fact\\]",
+    "\\[Test\\]",
+    "\\[TestMethod\\]",
+    // Rust's #[tokio::test], #[async_std::test], and similar.
+    "#\\[\\w+::test\\]",
+    "@ParameterizedTest\\b",
+  ],
+  skips: [
+    "\\.skip\\b",
+    "\\.only\\b",
+    "\\bxit\\(",
+    "\\bxdescribe\\(",
+    "\\btest\\.todo\\b",
+    "\\bit\\.todo\\b",
+    "@pytest\\.mark\\.skip",
+    "@unittest\\.skip",
+    "#\\[ignore\\]",
+    "\\bt\\.Skip\\(",
+    "\\bt\\.SkipNow\\b",
+    "@Disabled",
+    "@Ignore",
+    "\\[Ignore\\]",
+    "\\bmarkTestSkipped\\b",
+    "\\bmarkTestIncomplete\\b",
+    // Anchored to a call or a string argument, never a bare word: "skip" and
+    // "pending" alone are ordinary English and would fire on prose and on
+    // unrelated code.
+    "\\bskip\\(",
+    "\\bskip\\s+[\"']",
+    "\\bpending\\(",
+    "\\bpending\\s+[\"']",
+    "\\bxcontext\\b",
+    // xUnit's [Fact(Skip = "reason")].
+    "\\bSkip\\s*=",
+  ],
+  tolerance: [
+    "\\btolerance\\b",
+    "\\bepsilon\\b",
+    "\\batol\\b",
+    "\\brtol\\b",
+    "\\bdelta\\b",
+    "\\bcloseTo\\b",
+    "\\bapproximately\\b",
+    "\\balmostEqual\\b",
+    "\\bwithinDelta\\b",
+  ],
+  timeout: ["\\btimeout\\b", "\\bretr(?:y|ies)\\b", "\\bmax_?retries\\b"],
+});
+
+/** Joins a bucket's fragments into one case-insensitive RegExp. An empty
+ * bucket compiles to a pattern that never matches anything, not one that
+ * matches everything. Throws when a fragment is not valid regex,
+ * naming the bucket so the error points somewhere useful. */
+/**
+ * testPaths is the one bucket that has to respect case. Case is the only
+ * thing telling WidgetTest.java apart from Contest.java, and matching without
+ * it turned ordinary source files into test files. Every other bucket stays
+ * case insensitive. This lives in one place because it was decided in two,
+ * and the two disagreed as soon as one of them changed.
+ */
+function bucketFlags(bucket: RuleBucket): string {
+  return bucket === "testPaths" ? "" : "i";
+}
+
+function compileFragments(bucket: RuleBucket, fragments: string[]): RegExp {
+  if (fragments.length === 0) return /(?!)/;
+  const source = fragments.map((fragment) => `(?:${fragment})`).join("|");
+  // testPaths is the one bucket that has to respect case. Case is the only
+  // thing telling WidgetTest.java apart from Contest.java, and matching
+  // without it turned ordinary source files into test files. Every other
+  // bucket stays case insensitive.
+  const flags = bucketFlags(bucket);
+  try {
+    return new RegExp(source, flags);
+  } catch (err) {
+    throw new Error(`invalid regex fragment in "${bucket}": ${(err as Error).message}`);
+  }
+}
+
+/** Compiles a resolved RuleSet (defaults already merged with any config, by
+ * the caller) into the regexes separateTestDiff actually runs. */
+export function compileRuleSet(rules: RuleSet): CompiledRules {
+  return {
+    testPaths: compileFragments("testPaths", rules.testPaths),
+    assertions: compileFragments("assertions", rules.assertions),
+    testCases: compileFragments("testCases", rules.testCases),
+    skips: compileFragments("skips", rules.skips),
+    tolerance: compileFragments("tolerance", rules.tolerance),
+    timeout: compileFragments("timeout", rules.timeout),
+  };
+}
+
+const DEFAULT_COMPILED = compileRuleSet(DEFAULT_RULES);
+
+/**
+ * Classifies one path against a resolved rule set and names which testPaths
+ * fragment decided it, trying the fragments in the order they are listed.
+ * Pure and synchronous, so it backs both --classify and its own tests
+ * directly, with no subprocess needed.
+ */
+export function classifyTestPath(
+  path: string,
+  rules: RuleSet = DEFAULT_RULES,
+): { isTest: boolean; matchedRule: string | null } {
+  for (const fragment of rules.testPaths) {
+    let re: RegExp;
+    try {
+      re = new RegExp(fragment, bucketFlags("testPaths"));
+    } catch (err) {
+      throw new Error(`invalid regex fragment in "testPaths": '${fragment}' (${(err as Error).message})`);
+    }
+    if (re.test(path)) return { isTest: true, matchedRule: fragment };
+  }
+  return { isTest: false, matchedRule: null };
+}
+
 export interface SeparateOptions {
   /**
-   * Extra patterns, tested against the full file path, that mark a file as
-   * a test in addition to the built-in rules. The built-in rules already
-   * work with no configuration; this is for a project with its own
-   * convention.
+   * A fully resolved rule set: defaults already merged with any config's
+   * add/replace, done by the caller. This file does no file reading, so it
+   * never resolves a config path itself. Defaults to DEFAULT_RULES.
    */
-  extraTestPatterns?: RegExp[];
+  rules?: RuleSet;
 }
 
 export interface SeparateResult {
@@ -75,28 +295,16 @@ function splitLines(text: string): string[] {
 
 // --- File-path classification ------------------------------------------------
 
-const TEST_PATH_SEGMENTS = new Set(["test", "tests", "__tests__", "spec"]);
-
 /**
- * A path is a test when a directory segment names a test convention, or the
- * basename matches one of the common test-file naming patterns. Case
+ * A path is a test when it matches one of the built-in testPaths rules (see
+ * DEFAULT_RULES above), or one of the caller's own extra patterns. Case
  * insensitive throughout, since a project's convention on one platform is
- * often cased differently on another.
+ * often cased differently on another. Kept as a standalone helper, separate
+ * from a full RuleSet, for a caller that wants the defaults plus one or two
+ * of its own patterns without building a whole config.
  */
 export function isTestPath(path: string, extraPatterns: RegExp[] = []): boolean {
-  const segments = path.split("/");
-  if (segments.some((segment) => TEST_PATH_SEGMENTS.has(segment.toLowerCase()))) {
-    return true;
-  }
-  const basename = (segments[segments.length - 1] ?? "").toLowerCase();
-  if (
-    /\.test\./.test(basename) ||
-    /\.spec\./.test(basename) ||
-    /_test\./.test(basename) ||
-    /^test_/.test(basename)
-  ) {
-    return true;
-  }
+  if (DEFAULT_COMPILED.testPaths.test(path)) return true;
   return extraPatterns.some((pattern) => pattern.test(path));
 }
 
@@ -232,17 +440,6 @@ function parseDiff(text: string): RawFileDiff[] {
 
 // --- Weakening signals, run against test files only --------------------------
 
-// Word-prefixed so "assertEqual", "assert_equal", and "self.assertTrue" all
-// match through the "assert" prefix, not only a standalone "assert" call.
-const ASSERTION_RE =
-  /\bassert|\bexpect\(|\bshould\b|\bverify\(|\brequire!|\bt\.(?:Errorf?|Fatalf?|Fail(?:Now)?)\b/i;
-const TEST_CASE_RE = /\btest\(|\bit\(|\bdescribe\(|\bdef test_|#\[test\]|\bfunc Test|@Test\b/i;
-const SKIP_RE =
-  /\.skip\b|\.only\b|\bxit\(|\bxdescribe\(|\btest\.todo\b|\bit\.todo\b|@pytest\.mark\.skip|@unittest\.skip|#\[ignore\]|\bt\.Skip\(|@Disabled|@Ignore/i;
-const TOLERANCE_RE =
-  /\btolerance\b|\bepsilon\b|\batol\b|\brtol\b|\bdelta\b|\bcloseTo\b|\bapproximately\b|\balmostEqual\b|\bwithinDelta\b/i;
-const TIMEOUT_RE = /\btimeout\b|\bretr(?:y|ies)\b|\bmax_?retries\b/i;
-
 const COMMENT_LINE_RE = /^\s*(?:\/\/|#(?!\[)|\*|\/\*|--)/;
 
 /**
@@ -284,9 +481,9 @@ function blankLiterals(line: string): string {
  * swapped for a weaker one, or the same check keeps its form while the value
  * it expects changes, which is how a test gets edited to match a bug.
  */
-function assertionWeakenedSignals(file: RawFileDiff): Signal[] {
-  const removed = matching(file.removedLines, ASSERTION_RE);
-  const added = matching(file.addedLines, ASSERTION_RE);
+function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules): Signal[] {
+  const removed = matching(file.removedLines, rules.assertions);
+  const added = matching(file.addedLines, rules.assertions);
   if (removed.length === 0 || added.length === 0) return [];
   const signals: Signal[] = [];
 
@@ -310,7 +507,7 @@ function assertionWeakenedSignals(file: RawFileDiff): Signal[] {
   for (const gone of removed) {
     // A changed tolerance or timeout is a changed literal too, and both have
     // their own signal. Reporting it twice for one edit adds nothing.
-    if (TOLERANCE_RE.test(gone) || TIMEOUT_RE.test(gone)) continue;
+    if (rules.tolerance.test(gone) || rules.timeout.test(gone)) continue;
     const blanked = blankLiterals(gone);
     const edited = added.find((line) => blankLiterals(line) === blanked && line.trim() !== gone.trim());
     if (edited === undefined) continue;
@@ -332,10 +529,10 @@ function assertionWeakenedSignals(file: RawFileDiff): Signal[] {
  * whatever its content diff says. Renaming a test out of the naming rules
  * takes it out of scrutiny, so the rename itself is the signal.
  */
-function declassifiedTestSignals(file: RawFileDiff, extraPatterns: RegExp[]): Signal[] {
+function declassifiedTestSignals(file: RawFileDiff, testPathsRe: RegExp): Signal[] {
   if (file.oldPath === null) return [];
-  if (!isTestPath(file.oldPath, extraPatterns)) return [];
-  if (isTestPath(file.path, extraPatterns)) return [];
+  if (!testPathsRe.test(file.oldPath)) return [];
+  if (testPathsRe.test(file.path)) return [];
   return [
     {
       id: "test-file-declassified",
@@ -388,8 +585,8 @@ function changedValueSignal(
 }
 
 /** skip-added fires on any added line naming a skip or exclusion, unconditionally. */
-function skipAddedSignal(file: RawFileDiff): Signal[] {
-  return matching(file.addedLines, SKIP_RE).map((line) => ({
+function skipAddedSignal(file: RawFileDiff, rules: CompiledRules): Signal[] {
+  return matching(file.addedLines, rules.skips).map((line) => ({
     id: "skip-added" as const,
     severity: "high" as const,
     file: file.path,
@@ -398,36 +595,36 @@ function skipAddedSignal(file: RawFileDiff): Signal[] {
   }));
 }
 
-function signalsForTestFile(file: RawFileDiff): Signal[] {
+function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
   return [
-    ...assertionWeakenedSignals(file),
+    ...assertionWeakenedSignals(file, rules),
     ...netRemovalSignal(
       file,
       "assertion-removed",
       "high",
-      ASSERTION_RE,
+      rules.assertions,
       "an assertion was removed with no equivalent added in this file; confirm this check was not deleted to reach green",
     ),
     ...netRemovalSignal(
       file,
       "test-case-removed",
       "high",
-      TEST_CASE_RE,
+      rules.testCases,
       "a test case was removed with no equivalent added in this file; confirm this test was not deleted to reach green",
     ),
-    ...skipAddedSignal(file),
+    ...skipAddedSignal(file, rules),
     ...changedValueSignal(
       file,
       "tolerance-widened",
       "medium",
-      TOLERANCE_RE,
+      rules.tolerance,
       "a tolerance-related line changed; a human must read the before and after values to confirm this was not loosened to reach green",
     ),
     ...changedValueSignal(
       file,
       "timeout-raised",
       "low",
-      TIMEOUT_RE,
+      rules.timeout,
       "a timeout or retry count changed; a human must read the before and after values to confirm this was not raised to reach green",
     ),
   ];
@@ -442,7 +639,8 @@ function signalsForTestFile(file: RawFileDiff): Signal[] {
  * files only.
  */
 export function separateTestDiff(diffText: string, options: SeparateOptions = {}): SeparateResult {
-  const extraPatterns = options.extraTestPatterns ?? [];
+  const ruleSet = options.rules ?? DEFAULT_RULES;
+  const rules = ruleSet === DEFAULT_RULES ? DEFAULT_COMPILED : compileRuleSet(ruleSet);
   const files = parseDiff(diffText);
 
   const sourceFiles: FileStats[] = [];
@@ -460,12 +658,12 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
       added: file.addedLines.length,
       removed: file.removedLines.length,
     };
-    signals.push(...declassifiedTestSignals(file, extraPatterns));
-    if (isTestPath(file.path, extraPatterns)) {
+    signals.push(...declassifiedTestSignals(file, rules.testPaths));
+    if (rules.testPaths.test(file.path)) {
       testFiles.push(stats);
       testAdded += stats.added;
       testRemoved += stats.removed;
-      signals.push(...signalsForTestFile(file));
+      signals.push(...signalsForTestFile(file, rules));
     } else {
       sourceFiles.push(stats);
       sourceAdded += stats.added;
