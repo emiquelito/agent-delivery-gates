@@ -398,8 +398,13 @@ for f in "${files[@]}"; do
     continue
   fi
 
+  # -a makes grep read every file as text. Without it a file holding a NUL
+  # byte is classed as binary: grep still exits 0 on a match but prints
+  # "binary file matches" to stderr and nothing to stdout, so the loop below
+  # sees no lines and the file passes with its banned words in place. A
+  # scanner that reads prose has no business skipping a file over one byte.
   set +e
-  output=$(grep -inHE "$pat" -- "$f")
+  output=$(grep -ainHE "$pat" -- "$f")
   status=$?
   set -e
 
@@ -408,6 +413,14 @@ for f in "${files[@]}"; do
     1) continue ;;
     *) die "error reading '$f'" ;;
   esac
+
+  # grep said it matched and gave nothing to show. That should be
+  # unreachable, and if it ever happens again it must stop the run instead
+  # of counting as a clean file, the same as any other gate here that
+  # cannot do its job.
+  if [ -z "$output" ]; then
+    die "grep reported a match in '$f' but printed no line"
+  fi
 
   file_had_new=0
   while IFS= read -r matchline; do

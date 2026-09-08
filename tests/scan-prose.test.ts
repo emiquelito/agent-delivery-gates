@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -510,4 +510,31 @@ test("an empty baseline file behaves as no forgiveness at all", () => {
     assert.equal(r.status, 1);
     assert.match(r.stdout, /p\.md/);
   });
+});
+
+// --- a file grep would call binary --------------------------------------------
+//
+// One NUL byte anywhere in a file makes grep treat the whole file as binary.
+// It still exits 0 on a match, but prints "binary file matches" to stderr and
+// nothing to stdout, so the loop that counts matches saw none and the file
+// passed with its banned words in place. This repository shipped exactly that
+// state: hooks/test-diff-separator.ts held a literal NUL as a field separator
+// and was never really scanned.
+
+test("a banned word in a file holding a NUL byte is caught, not skipped", () => {
+  withTempDir((dir) => {
+    const rules = fileWith(dir, "rules.txt", `\\b${BANNED_WORD}\\b\n`);
+    const doc = fileWith(dir, "doc.md", `a \u0000 byte, then ${BANNED_WORD} after it\n`);
+    const r = scan(["--rules", rules, "--require-rules", doc]);
+    assert.equal(r.status, 1, "a file grep calls binary passed the scan");
+    assert.match(r.stdout, /1 contained matches/);
+  });
+});
+
+test("no tracked file in this repository holds a NUL byte", () => {
+  const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: REPO_ROOT, encoding: "utf8" })
+    .split("\u0000")
+    .filter((p) => p.length > 0);
+  const binary = tracked.filter((p) => readFileSync(join(REPO_ROOT, p)).includes(0));
+  assert.deepEqual(binary, [], "these files are invisible to the prose scan");
 });

@@ -308,7 +308,7 @@ function widerClassificationSignals(args: ParsedArgs, narrowDiffText: string, ru
 
 /** A signal's identity for deduplication: same finding, reported once. */
 function signalKey(signal: Signal): string {
-  return `${signal.id} ${signal.file} ${signal.line} ${signal.message}`;
+  return `${signal.id}\u0000${signal.file}\u0000${signal.line}\u0000${signal.message}`;
 }
 
 function readFileOrFail(path: string): string {
