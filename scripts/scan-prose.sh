@@ -422,11 +422,42 @@ for f in "${files[@]}"; do
     die "grep reported a match in '$f' but printed no line"
   fi
 
+  # A fenced code block in a prose file holds quoted evidence: a command and
+  # what it printed. The word bans still apply there, but the typographic
+  # prose-only fragments do not, because rewriting a line of real output to
+  # please a style rule would falsify the evidence the file exists to show.
+  # So a match inside a fence is kept only when it also matches the pattern a
+  # source file would get, which is every fragment except the prose-only ones.
+  declare -A in_fence=()
+  case "${f,,}" in
+    *.ts|*.tsx|*.js|*.mjs|*.cjs|*.sh) ;;
+    *)
+      while IFS= read -r n; do
+        [ -n "$n" ] && in_fence["$n"]=1
+      done < <(awk 'BEGIN { f = 0 }
+                    /^[[:space:]]*```/ { f = !f; print NR; next }
+                    { if (f) print NR }' "$f")
+      ;;
+  esac
+
   file_had_new=0
   while IFS= read -r matchline; do
     [ -z "$matchline" ] && continue
     rest=${matchline#*:}
+    lineno=${rest%%:*}
     content=${rest#*:}
+    if [ -n "${in_fence[$lineno]:-}" ]; then
+      # An empty pattern_code means every configured fragment is prose-only,
+      # so nothing applies inside a fence. It must not be handed to grep: an
+      # empty extended regex matches every line, which would keep the match
+      # instead of dropping it.
+      if [ -z "$pattern_code" ]; then
+        continue
+      fi
+      if ! printf '%s' "$content" | grep -qaE "$pattern_code"; then
+        continue
+      fi
+    fi
     text=$(trim "$content")
     key="$f$BASELINE_SEP$text"
 

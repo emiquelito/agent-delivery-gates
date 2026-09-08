@@ -538,3 +538,39 @@ test("no tracked file in this repository holds a NUL byte", () => {
   const binary = tracked.filter((p) => readFileSync(join(REPO_ROOT, p)).includes(0));
   assert.deepEqual(binary, [], "these files are invisible to the prose scan");
 });
+
+// --- fenced code blocks in prose files ---------------------------------------
+//
+// A fenced block in a markdown file holds quoted evidence: a command and what
+// it printed. A typographic prose-only rule firing in there would ask for real
+// output to be edited to please a style rule, which would falsify the evidence
+// the file exists to show. Word bans still apply everywhere.
+
+test("a prose-only rule does not fire inside a fenced code block", () => {
+  withTempDir((dir) => {
+    const rules = fileWith(dir, "rules.txt", "prose-only: [[:alpha:]] - [[:alpha:]]\n");
+    const doc = fileWith(dir, "doc.md", ["```", "total: a - b", "```", ""].join("\n"));
+    const r = scan(["--rules", rules, "--require-rules", doc]);
+    assert.equal(r.status, 0, "quoted output was flagged for a typographic rule");
+  });
+});
+
+test("a prose-only rule still fires outside a fenced code block", () => {
+  withTempDir((dir) => {
+    const rules = fileWith(dir, "rules.txt", "prose-only: [[:alpha:]] - [[:alpha:]]\n");
+    const doc = fileWith(dir, "doc.md", ["```", "code a - b", "```", "", "prose a - b", ""].join("\n"));
+    const r = scan(["--rules", rules, "--require-rules", doc]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /prose a - b/);
+    assert.doesNotMatch(r.stdout, /code a - b/);
+  });
+});
+
+test("a banned word is still caught inside a fenced code block", () => {
+  withTempDir((dir) => {
+    const rules = fileWith(dir, "rules.txt", `\\b${BANNED_WORD}\\b\n`);
+    const doc = fileWith(dir, "doc.md", ["```", `${BANNED_WORD} in a fence`, "```", ""].join("\n"));
+    const r = scan(["--rules", rules, "--require-rules", doc]);
+    assert.equal(r.status, 1, "a word ban stopped applying inside a fence");
+  });
+});

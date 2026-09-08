@@ -2,41 +2,41 @@
 
 Rules that check what an AI coding agent claims about its own work, not just the code it wrote.
 
-A refund module with four passing tests. An agent is asked to record a
-timestamp on each refund, does that, and tidies the test layout in the same
-commit.
+A shopping cart with four passing tests. An agent is asked to add promo
+codes. It does, and it adds three tests for the new behaviour.
 
 ```
 $ node --test tests/*.test.js
-# tests 0
-# pass 0
+# tests 7
+# pass 7
 # fail 0
 ```
 
-Nothing failed, because nothing ran. A green run and a green run over nothing
-look the same from outside, and only one of them means anything. That gap is
-what this repository is about.
+Four tests became seven. Nothing failed. The feature works. Coverage went up.
+A customer whose cart comes to exactly 50 has just started paying for
+shipping, and the test that would have said so was edited, in the same
+commit, until it could no longer fail.
 
-Three worked examples, each one a change that passes every other check a
-project runs:
+Every check a project normally runs got better here, which is the point. A
+green run and a green run over checks that cannot fail look the same from
+outside, and only one of them means anything.
 
+Three worked examples, each a change that passes everything else:
+
+- **[A feature that shipped with nothing holding it](docs/examples/06-a-feature-with-nothing-holding-it.md)**:
+  the cart above. One assertion in eighteen added lines was swapped for one
+  that is true whatever the code does, and the three new tests check a flag
+  and a type but never the money. Breaking the total three different ways
+  leaves all seven tests green.
 - **[Tests that stopped running](docs/examples/01-tests-that-stopped-running.md)**:
   a test file renamed so the runner stops collecting it. Git reports zero
   lines changed against that file and git is right, the suite goes green with
   nothing left to fail, and the only trace is a test count nobody reads on a
   passing build.
-- **[A test edited to match the bug](docs/examples/02-test-edited-to-match-a-bug.md)**:
-  a bulk discount that was never built, and a failing test made to pass by
-  changing what it expects from 108 to 120, so the assertion agrees with the
-  missing feature.
 - **[A report claiming more than it proved](docs/examples/03-report-claiming-more-than-it-proved.md)**:
   "failure handling verified", with nothing behind it anyone can open. A
   robustness claim has to point at a commit, a path, or a command; pointing at
   a conversation fails.
-
-There is also `adg mutate`, which breaks your code in known ways and reports
-the breaks no test noticed. A suite that passes is not the same as a suite
-that would have caught this.
 
 ## What this is
 
@@ -118,9 +118,9 @@ file in the project, so `init` prints the block to add to
 
 The three above are worked through in full in
 [`docs/examples/`](docs/examples/README.md), each run for real with the
-exact output it produced, along with two more: an edit blocked mid-review
-because the tree was dirty, and adopting the gates on a project that
-already exists.
+exact output it produced, along with three more: a fix that reaches green
+by editing what the test expects, an edit blocked mid-review because the
+tree was dirty, and adopting the gates on a project that already exists.
 
 ## 🗂️ What happened
 

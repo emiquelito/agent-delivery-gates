@@ -17,6 +17,10 @@ the exact output they produced. Nothing here is paraphrased.
 5. [Adopting the gates on a repository that already exists](05-adopting-on-an-existing-repository.md).
    `agent-delivery-gates init` with a baseline, then a clean commit and a
    caught one.
+6. [A feature that shipped with nothing holding it](06-a-feature-with-nothing-holding-it.md).
+   Four tests become seven, all passing, and a customer starts paying for
+   shipping. `test-diff` finds the weakened assertion, `mutate` finds that
+   the new tests never held the feature.
 
 See the [README](../../README.md) for what these tools are and how they get
 wired into a project.
