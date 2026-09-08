@@ -463,3 +463,55 @@ test("a rename that stays a test does not fire test-file-declassified", () => {
   const result = separateTestDiff(diff);
   assert.deepEqual(signalIds(result.signals), []);
 });
+
+// Severity is part of what a signal reports. Nothing asserted it, so a signal
+// could be quietly downgraded and every test would still pass.
+test("skip-added reports high severity", () => {
+  const result = separateTestDiff(oneFileDiff("tests/q.test.js", [], ["  it.only('a', () => {"]));
+  const skip = result.signals.find((s) => s.id === "skip-added");
+  assert.equal(skip?.severity, "high");
+});
+
+test("tolerance-widened reports medium severity", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  assert.closeTo(x, 3, 0.001);"], ["  assert.closeTo(x, 3, 0.5);"]),
+  );
+  const tol = result.signals.find((s) => s.id === "tolerance-widened");
+  assert.equal(tol?.severity, "medium");
+});
+
+// One dropped alternative in a pattern is a whole family of assertions the
+// tool stops seeing, and every other test keeps passing.
+test("a removed should-style assertion fires assertion-removed", () => {
+  const result = separateTestDiff(oneFileDiff("tests/q.test.js", ["  result.should.equal(42);"], []));
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+test("a changed epsilon fires tolerance-widened", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  compare(a, b, epsilon = 0.001)"], ["  compare(a, b, epsilon = 0.5)"]),
+  );
+  assert.ok(signalIds(result.signals).includes("tolerance-widened"));
+});
+
+// The findings section ends at the next heading of the same level. Letting it
+// run on would fold an unrelated section's rows in as if they were findings.
+test("a file is reported under the path it has after the diff, not before", () => {
+  const diff = [
+    "diff --git a/tests/old.test.js b/tests/new.test.js",
+    "similarity index 90%",
+    "rename from tests/old.test.js",
+    "rename to tests/new.test.js",
+    "--- a/tests/old.test.js",
+    "+++ b/tests/new.test.js",
+    "@@ -1,2 +1,2 @@",
+    "-  assert.equal(x, 1);",
+    "+  assert.equal(x, 1);",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(
+    result.testFiles.map((f) => f.path),
+    ["tests/new.test.js"],
+  );
+});

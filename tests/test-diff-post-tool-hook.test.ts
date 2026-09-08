@@ -106,3 +106,20 @@ test("a payload of literal null exits 2, not on an uncaught error", () => {
   const r = runHook("null");
   assert.equal(r.status, 2);
 });
+
+// A command chained with no space before git is still a commit. Dropping one
+// character from the separator class is invisible to every other test.
+test("a commit chained with no space before git is recognised", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/widget.test.ts", "expect(sum(1, 2)).toBe(3);\n");
+    writeFileSync(join(dir, "tests/widget.test.ts"), "\n");
+    runGit(dir, ["add", "tests/widget.test.ts"]);
+    runGit(dir, ["commit", "-q", "-m", "remove the assertion"]);
+    const result = runHook(
+      { tool_name: "Bash", tool_input: { command: "true&git commit -m x" }, cwd: dir },
+      dir,
+    );
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /assertion-removed/);
+  });
+});

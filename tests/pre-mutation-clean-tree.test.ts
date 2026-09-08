@@ -373,3 +373,37 @@ test("payload larger than the pipe buffer is read in full", () => {
     assert.match(blocked.stderr, /a\.txt/);
   });
 });
+
+// An empty environment variable is how a shell template passes "unset". The
+// hook has to read it that way too, or a CI job exporting ADG_PHASE= would
+// quietly turn the gate off while a phase file sits right there.
+test("an empty ADG_PHASE falls back to the phase file", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "adg-phase"), "review\n");
+    const result = runHook({
+      input: { tool_name: "Edit", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});
+
+// A payload carrying an empty cwd must fall back to the process directory,
+// the same way an absent cwd does, instead of handing git an empty path.
+test("an empty cwd in the payload falls back to the process directory", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "Edit", tool_input: {}, cwd: "" },
+      cwd: dir,
+      env: { ADG_PHASE: "review" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});

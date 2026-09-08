@@ -647,3 +647,27 @@ test("R2 rejects backticked prose that is not a command", () => {
   ].join("\n");
   assert.ok(rulesFired(validateReport(report)).includes("evidence-not-durable"));
 });
+
+// The findings section ends at the next heading of the same level. Letting it
+// run past one would fold a later section's rows in as if they were findings,
+// so a report missing its Low and Info entries could pass on someone else's.
+test("R3 stops at the next same-level heading", () => {
+  const report = [
+    "# Report",
+    "",
+    "## Findings",
+    "",
+    "| ID | Severity | Finding |",
+    "|---|---|---|",
+    "| F1 | Critical | fails open |",
+    "",
+    "## Next steps",
+    "",
+    "| Task | Priority | Note |",
+    "|---|---|---|",
+    "| tidy up | Low | later |",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  assert.deepEqual(rulesFired(validateReport(report)), ["finding-list-incomplete"]);
+});

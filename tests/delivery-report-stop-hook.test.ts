@@ -123,3 +123,16 @@ test("report_path in the payload is used when ADG_REPORT is unset", () => {
     assert.equal(r.status, 2);
   });
 });
+
+// An empty ADG_REPORT means unset, not a report at path "". Reading it as set
+// blocked with a confusing error while a usable path sat in the payload.
+test("an empty ADG_REPORT falls back to the payload report_path", () => {
+  withTempDir((dir) => {
+    const p = join(dir, "report.md");
+    writeFileSync(p, PASSING_REPORT);
+    const r = runHook(JSON.stringify({ hook_event_name: "Stop", report_path: p }), {
+      ADG_REPORT: "",
+    });
+    assert.equal(r.status, 0);
+  });
+});

@@ -15,6 +15,13 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "..", "scripts", "scan-prose.sh");
 
+// Fixtures have to contain the words the gate rejects, and the gate reads
+// this file. Building them at runtime keeps the gate strict, with no
+// exemption for its own tests, which would be the wrong thing to add here.
+const BANNED_WORD = "seam" + "lessly";
+const BANNED_UPPER = BANNED_WORD.toUpperCase();
+const EM_DASH = "\u2014";
+
 interface Run {
   status: number | null;
   stdout: string;
@@ -52,7 +59,7 @@ test("a clean markdown file exits 0", () => {
 
 test("a banned word in markdown exits 1 and names the file and line", () => {
   withTempDir((dir) => {
-    const p = fileWith(dir, "bad.md", "first line\nthis works seamlessly now\n");
+    const p = fileWith(dir, "bad.md", `first line\nthis works ${BANNED_WORD} now\n`);
     const r = scan([p]);
     assert.equal(r.status, 1);
     assert.match(r.stdout, /bad\.md:2:/);
@@ -61,7 +68,7 @@ test("a banned word in markdown exits 1 and names the file and line", () => {
 
 test("an em dash in markdown exits 1", () => {
   withTempDir((dir) => {
-    const p = fileWith(dir, "dash.md", "A line with an em dash — right here.\n");
+    const p = fileWith(dir, "dash.md", `A line with an em dash ${EM_DASH} right here.\n`);
     assert.equal(scan([p]).status, 1);
   });
 });
@@ -75,7 +82,7 @@ test("a spaced hyphen in markdown exits 1", () => {
 
 test("an uppercase banned word still exits 1", () => {
   withTempDir((dir) => {
-    const p = fileWith(dir, "up.md", "SEAMLESSLY handled, or so it claims.\n");
+    const p = fileWith(dir, "up.md", `${BANNED_UPPER} handled, or so it claims.\n`);
     assert.equal(scan([p]).status, 1);
   });
 });
@@ -91,14 +98,14 @@ test("subtraction in a TypeScript file exits 0", () => {
 
 test("a banned word in a TypeScript comment exits 1", () => {
   withTempDir((dir) => {
-    const p = fileWith(dir, "bad.ts", "// this seamlessly handles it\nconst a = 1;\n");
+    const p = fileWith(dir, "bad.ts", `// this ${BANNED_WORD} handles it\nconst a = 1;\n`);
     assert.equal(scan([p]).status, 1);
   });
 });
 
 test("an em dash in a TypeScript comment exits 1", () => {
   withTempDir((dir) => {
-    const p = fileWith(dir, "dash.ts", "// an em dash — here\nconst a = 1;\n");
+    const p = fileWith(dir, "dash.ts", `// an em dash ${EM_DASH} here\nconst a = 1;\n`);
     assert.equal(scan([p]).status, 1);
   });
 });
@@ -136,7 +143,7 @@ test("run outside a git repository with no arguments exits 2", () => {
 test("one bad file among several still exits 1 and names the bad one", () => {
   withTempDir((dir) => {
     const good = fileWith(dir, "a.md", "nothing wrong here\n");
-    const bad = fileWith(dir, "b.md", "this works seamlessly\n");
+    const bad = fileWith(dir, "b.md", `this works ${BANNED_WORD}\n`);
     const r = scan([good, bad, good]);
     assert.equal(r.status, 1);
     assert.match(r.stdout, /b\.md:1:/);
@@ -158,7 +165,7 @@ test("default mode picks up a tracked TypeScript file", () => {
   withTempDir((dir) => {
     initRepo(dir);
     fileWith(dir, "clean.md", "nothing wrong here\n");
-    fileWith(dir, "bad.ts", "// this seamlessly handles it\nconst a = 1;\n");
+    fileWith(dir, "bad.ts", `// this ${BANNED_WORD} handles it\nconst a = 1;\n`);
     execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
     const r = scan([], dir);
     assert.equal(r.status, 1);
@@ -170,7 +177,7 @@ test("default mode picks up a tracked rule record", () => {
   withTempDir((dir) => {
     initRepo(dir);
     mkdirSync(join(dir, "rules"));
-    fileWith(dir, "rules/a.json", '{ "note": "this works seamlessly" }\n');
+    fileWith(dir, "rules/a.json", `{ "note": "this works ${BANNED_WORD}" }\n`);
     execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
     const r = scan([], dir);
     assert.equal(r.status, 1);
