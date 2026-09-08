@@ -47,6 +47,10 @@ const TEMPLATE_ACTIONS: TemplateAction[] = [
   { relPath: join(".githooks", "pre-commit"), templateName: "pre-commit", executable: true },
   { relPath: "AGENTS.md", templateName: "AGENTS.md" },
   { relPath: join("docs", "gate-tally.md"), templateName: "gate-tally.md" },
+  {
+    relPath: join(".github", "workflows", "agent-delivery-gates.yml"),
+    templateName: "github-workflow.yml",
+  },
 ];
 
 const PROSE_RULES_REL_PATH = join(".adg", "prose-rules.txt");

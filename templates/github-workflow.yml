@@ -1,0 +1,67 @@
+# The delivery gates, running with no agent involved.
+#
+# The checks that stop an agent mid-edit are ordinary programs with exit
+# codes, so they also run here on every push and pull request. This file is a
+# starting point: keep the steps that apply to your project and delete the
+# rest.
+
+name: delivery gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The prose scan reads tracked files and the test diff check reads
+          # history. A shallow clone hides both.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+
+      # Only if you turned the prose rules on with a preset. Without a rules
+      # file this reports that nothing was checked, and --require-rules turns
+      # that into a failure so a missing file cannot read as a clean run.
+      - name: prose scan
+        run: npx agent-delivery-gates scan-prose --require-rules --baseline .adg/prose-baseline.txt
+
+      # Fails when the tally names a rule that does not exist, repeats an
+      # entry number, or points at a file that is not there.
+      - name: tally check
+        run: npx agent-delivery-gates tally --check
+
+  test-diff:
+    # What changed in the tests, reported apart from what changed in the
+    # source, for the whole range of a pull request.
+    #
+    # This exits 1 when it finds a weakening, so the job fails and someone
+    # looks. A signal is a place to look and not proof on its own, so if that
+    # is too strong for your project, add continue-on-error: true to the step
+    # and read the summary instead.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+
+      - name: report the test diff apart from the source diff
+        run: |
+          npx agent-delivery-gates test-diff \
+            --range "${{ github.event.pull_request.base.sha }}..${{ github.sha }}" \
+            | tee "$GITHUB_STEP_SUMMARY"

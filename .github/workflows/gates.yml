@@ -1,0 +1,63 @@
+# The gates, running with no agent involved.
+#
+# The two command line tools are ordinary programs with exit codes, so the
+# same checks that stop an agent mid-edit also run here on every push. This
+# workflow is what this repository runs on itself.
+
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The prose scan and the tally check read tracked files, and the
+          # test diff check reads history. A shallow clone hides both.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+
+      - name: typecheck
+        run: npx tsc --noEmit
+
+      - name: tests
+        run: npm test
+
+      - name: prose scan
+        run: scripts/scan-prose.sh --require-rules
+
+      - name: tally check
+        run: node scripts/tally-report.ts --check
+
+  test-diff:
+    # What changed in the tests, reported apart from what changed in the
+    # source. On a pull request this reads the whole range, so a weakening
+    # buried in the middle of a branch is still reported.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+
+      - name: report the test diff apart from the source diff
+        run: |
+          node hooks/test-diff-separator.ts \
+            --range "${{ github.event.pull_request.base.sha }}..${{ github.sha }}" \
+            | tee "$GITHUB_STEP_SUMMARY"
