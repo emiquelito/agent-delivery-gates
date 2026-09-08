@@ -85,7 +85,7 @@ test("every rule named in the tally is a real record", () => {
   }
 });
 
-// AGENTS.md is the cross-vendor rendering of the same twelve rules. It drifted
+// AGENTS.md is the cross-vendor rendering of the same rules. It drifted
 // from the records the first time it was written, describing one rule as
 // having no mechanical check while its own record named seven. A document
 // describing behavior the code does not have is the defect this project
