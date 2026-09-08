@@ -4,7 +4,7 @@
 # See CLAUDE.md for the constraints themselves.
 #
 # Usage:
-#   scan-prose.sh              scan tracked markdown and tracked rule records
+#   scan-prose.sh              scan tracked markdown, rule records, and sources
 #   scan-prose.sh FILE...      scan exactly these files
 #
 # Exit codes:
@@ -27,9 +27,22 @@ set -euo pipefail
 #     a banned word is rejected. Revisit if that starts to bite.
 #   - The JSON half of the default file set covers rules/ only. Widen it when
 #     prose-bearing JSON appears elsewhere.
-PATTERN_REPO='\bgenuine(ly)?\b|\bdisciplin\w*\b|\bshap(e|es|ed|ing)\b|\binstinct\w*\b|\bsurfac(e|es|ed|ing)\b|\bbolt(ed)?[- ]on\b|\bcalls for\b|\brather than\b|—|[[:alpha:]] - [[:alpha:]]'
+#   - TypeScript sources are scanned, so a banned word in a comment fails the
+#     gate. An identifier that matches one fails it too; rename the identifier.
+PATTERN_REPO='\bgenuine(ly)?\b|\bdisciplin\w*\b|\bshap(e|es|ed|ing)\b|\binstinct\w*\b|\bsurfac(e|es|ed|ing)\b|\bbolt(ed)?[- ]on\b|\bcalls for\b|\brather than\b|—'
 PATTERN_TELLS='\bdelv(e|es|ed|ing)\b|\bsubstrates?\b|\bload[- ]bearing\b|\btapestr(y|ies)\b|\btestaments?\b|\brealms?\b|\bnuanc(e|es|ed|ing)\b|\bplethora\b|\bmyriads?\b|\bmeticulous(ly)?\b|\bseamless(ly)?\b|\bintricate\b|\bprofound(ly)?\b|\bparadigms?\b|\bholistic(ally)?\b|\bcutting[- ]edge\b|\bgame[- ]chang(er|ing)\b|\bembark(s|ed|ing)?\b|\belevat(e|es|ed|ing)\b|\bunlock(s|ed|ing)?\b|\bpivotal(ly)?\b|\bcrucial\b|\blandscape\b|\bnavigat(e|es|ed|ing)\b|\butiliz(e|es|ed|ing|ation)\b|\bleverag(e|es|ed|ing)\b|\bdeep dive\b|\bdive into\b|\bworth noting\b'
-PATTERN="$PATTERN_REPO|$PATTERN_TELLS"
+# A spaced hyphen standing in for an em dash is a prose problem. In source it
+# would match ordinary subtraction, so it applies to prose files only.
+PATTERN_HYPHEN='[[:alpha:]] - [[:alpha:]]'
+PATTERN_PROSE="$PATTERN_REPO|$PATTERN_TELLS|$PATTERN_HYPHEN"
+PATTERN_CODE="$PATTERN_REPO|$PATTERN_TELLS"
+
+pattern_for() {
+  case "$1" in
+    *.ts|*.tsx|*.js|*.mjs|*.cjs) printf '%s' "$PATTERN_CODE" ;;
+    *) printf '%s' "$PATTERN_PROSE" ;;
+  esac
+}
 
 die() {
   echo "scan-prose: $1" >&2
@@ -70,7 +83,7 @@ else
   if ! root=$(git rev-parse --show-toplevel 2>"$tmpd/err"); then
     die "not a git repository. git said: $(cat "$tmpd/err")"
   fi
-  if ! git -C "$root" ls-files -z -- '*.md' 'rules/*.json' >"$tmpd/list" 2>"$tmpd/err"; then
+  if ! git -C "$root" ls-files -z -- '*.md' 'rules/*.json' '*.ts' >"$tmpd/list" 2>"$tmpd/err"; then
     die "git ls-files failed. git said: $(cat "$tmpd/err")"
   fi
   if [ -s "$tmpd/list" ]; then
@@ -80,7 +93,7 @@ else
     done
   fi
   if [ "${#files[@]}" -eq 0 ]; then
-    echo "scan-prose: no tracked markdown or rule records to scan"
+    echo "scan-prose: nothing tracked to scan"
     exit 0
   fi
 fi
@@ -90,7 +103,7 @@ had_match=0
 
 for f in "${files[@]}"; do
   set +e
-  output=$(grep -inHE "$PATTERN" -- "$f")
+  output=$(grep -inHE "$(pattern_for "$f")" -- "$f")
   status=$?
   set -e
 
