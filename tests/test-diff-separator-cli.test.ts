@@ -407,6 +407,113 @@ test("a config broadens what the diff separator itself sees, not only --classify
 // exists for reads as an ordinary pair of file changes. The unit tests pass
 // on a diff written with rename headers, so only a real repository catches
 // this.
+// --- Rust: wide (-U30) re-run for classification only -------------------------
+//
+// Default git context is 3 lines. A .rs file's #[cfg(test)] module opener
+// can sit further than that from the line that actually changed; the CLI
+// re-runs the same git invocation with -U30 for classification only (see
+// widerClassificationSignals in hooks/test-diff-separator.ts) so brace
+// matching in src/test-diff-separator.ts can still find the module.
+
+test("a .rs change the narrow (-U3) diff cannot see as a signal is caught once the wide re-run is added: exit 1, skip-added reported", () => {
+  withTempRepo((dir) => {
+    const before = [
+      "#[cfg(all(test, feature = \"flaky\"))]",
+      "mod tests {",
+      "    use super::*;",
+      "",
+      "    // padding so the module opener sits well outside a 3-line",
+      "    // context window around the change below, but still inside",
+      "    // a 30-line one.",
+      "    // line 1",
+      "    // line 2",
+      "    // line 3",
+      "    // line 4",
+      "    // line 5",
+      "    // line 6",
+      "    // line 7",
+      "    // line 8",
+      "",
+      "    fn applies_discount() {",
+      "        let result = discount(120);",
+      "        let expected = 110;",
+      "        result == expected",
+      "    }",
+      "}",
+      "",
+    ].join("\n");
+    const after = before.replace("    fn applies_discount() {", "    #[ignore]\n    fn applies_discount() {");
+    commitFile(dir, "src/pricing.rs", before);
+    writeFileSync(join(dir, "src/pricing.rs"), after);
+    runGit(dir, ["add", "src/pricing.rs"]);
+    runGit(dir, ["commit", "-q", "-m", "add ignore"]);
+
+    // Sanity check: the narrow default-context diff really does not carry
+    // the signal on its own (confirms the fixture actually needs the wide
+    // re-run, and not because the assertion below passes for an unrelated
+    // reason).
+    const narrow = spawnSync("git", ["diff-tree", "-p", "--no-color", "--root", "-r", "--find-renames", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).stdout;
+    assert.doesNotMatch(narrow, /#\[cfg\(all\(test/, "fixture is invalid: the opener leaked into the narrow diff");
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /skip-added/);
+  });
+});
+
+test("the wide re-run never changes the printed source file stats: a plain source-only .rs change still shows the narrow diff's own counts", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "src/pricing.rs", "fn discount(cents: i64) -> i64 {\n    cents - 10\n}\n");
+    writeFileSync(join(dir, "src/pricing.rs"), "fn discount(cents: i64) -> i64 {\n    cents - 20\n}\n");
+    runGit(dir, ["add", "src/pricing.rs"]);
+    runGit(dir, ["commit", "-q", "-m", "change the discount"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /src\/pricing\.rs\s+\+1 -1/);
+  });
+});
+
+test("a git failure on the wide re-run degrades quietly to the narrow result, not a crash", () => {
+  // A fake `git` on PATH that behaves exactly like the real one, except it
+  // fails any invocation carrying -U30. The CLI's first (narrow) git call
+  // never passes -U30, so it succeeds as normal; only the wide re-run
+  // reaches the fake failure, and the CLI must still exit cleanly on the
+  // narrow result instead of crashing or exiting 2.
+  const realGit = spawnSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
+    .stdout.trim()
+    .split("\n")[0];
+  const binDir = mkdtempSync(join(tmpdir(), "adg-test-diff-fake-git-"));
+  const fakeGitPath = join(binDir, "git");
+  writeFileSync(
+    fakeGitPath,
+    `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "-U30" ]; then\n    exit 1\n  fi\ndone\nexec "${realGit}" "$@"\n`,
+  );
+  chmodSync(fakeGitPath, 0o755);
+
+  try {
+    withTempRepo((dir) => {
+      commitFile(dir, "src/pricing.rs", "fn discount(cents: i64) -> i64 {\n    cents - 10\n}\n");
+      writeFileSync(join(dir, "src/pricing.rs"), "fn discount(cents: i64) -> i64 {\n    cents - 20\n}\n");
+      runGit(dir, ["add", "src/pricing.rs"]);
+      runGit(dir, ["commit", "-q", "-m", "change the discount"]);
+
+      const result = runCli({
+        args: ["--rev", "HEAD"],
+        cwd: dir,
+        env: { PATH: `${binDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}` },
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /src\/pricing\.rs\s+\+1 -1/);
+    });
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
 test("a real git rename out of the test naming convention is reported", () => {
   withTempRepo((dir) => {
     writeFileSync(join(dir, "widget.test.js"), 'test("a", () => { assert.ok(1); });\n');

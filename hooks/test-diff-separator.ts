@@ -15,7 +15,14 @@
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readSync } from "node:fs";
-import { classifyTestPath, formatSignalText, separateTestDiff, type RuleSet, type SeparateResult } from "../src/test-diff-separator.ts";
+import {
+  classifyTestPath,
+  formatSignalText,
+  separateTestDiff,
+  type RuleSet,
+  type SeparateResult,
+  type Signal,
+} from "../src/test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
 
 const USAGE = `Usage: test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json] [--config PATH]
@@ -210,6 +217,31 @@ function runGit(args: string[]): string {
   }
 }
 
+/**
+ * The git invocation for the diff the parsed arguments ask for. Shared by
+ * resolveDiffText (the narrow, default-context run whose output is what
+ * gets counted and printed) and widerClassificationSignals (the same
+ * invocation, re-run wide, for classification only). Undefined for
+ * --diff/stdin, which never invokes git at all.
+ */
+function gitInvocationArgs(args: ParsedArgs): string[] | undefined {
+  if (args.diffPath !== undefined) return undefined;
+  if (args.range !== undefined) {
+    return ["diff", "--no-color", "--find-renames", args.range];
+  }
+  if (args.staged) {
+    return ["diff", "--no-color", "--find-renames", "--staged"];
+  }
+  // Default and --rev: the diff introduced by that one commit. --root
+  // makes this work for a commit with no parent by diffing against an
+  // empty tree instead of failing.
+  const rev = args.rev ?? "HEAD";
+  // Rename detection is asked for on purpose. Without it git reports a rename
+  // as a whole file added and a whole file deleted, and the check that a test
+  // file left the naming convention never sees a rename to report.
+  return ["diff-tree", "-p", "--no-color", "--root", "-r", "--find-renames", rev];
+}
+
 /** Resolves the diff text to check from the parsed arguments. */
 function resolveDiffText(args: ParsedArgs): string {
   if (args.diffPath !== undefined) {
@@ -219,20 +251,61 @@ function resolveDiffText(args: ParsedArgs): string {
     }
     return text;
   }
-  if (args.range !== undefined) {
-    return runGit(["diff", "--no-color", "--find-renames", args.range]);
+  return runGit(gitInvocationArgs(args)!);
+}
+
+// A .rs file's own `diff --git` or `+++` header line, present whether the
+// file is new, deleted, modified, or renamed into/out of a .rs path.
+const RUST_FILE_IN_DIFF_RE = /^(?:diff --git a\/.*\.rs b\/.*\.rs|\+\+\+ b\/.*\.rs)$/m;
+
+/** Like runGit, but returns undefined instead of exiting on failure. Only
+ * ever used for the wide re-run below, which is allowed to fail quietly:
+ * it exists purely to find MORE signals than the narrow diff already did,
+ * never to replace the narrow diff's own result. */
+function runGitAllowFail(args: string[]): string | undefined {
+  try {
+    return execFileSync("git", args, { env: gitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    return undefined;
   }
-  if (args.staged) {
-    return runGit(["diff", "--no-color", "--find-renames", "--staged"]);
-  }
-  // Default and --rev: the diff introduced by that one commit. --root
-  // makes this work for a commit with no parent by diffing against an
-  // empty tree instead of failing.
-  const rev = args.rev ?? "HEAD";
-  // Rename detection is asked for on purpose. Without it git reports a rename
-  // as a whole file added and a whole file deleted, and the check that a test
-  // file left the naming convention never sees a rename to report.
-  return runGit(["diff-tree", "-p", "--no-color", "--root", "-r", "--find-renames", rev]);
+}
+
+/** The same git invocation, widened to -U30. Flag order does not matter to
+ * git here, so -U30 is simply inserted right after the subcommand. */
+function widenContext(gitArgs: string[]): string[] {
+  return [gitArgs[0], "-U30", ...gitArgs.slice(1)];
+}
+
+/**
+ * When the diff came from git and touches a .rs file, re-runs the same git
+ * invocation with a wide (-U30) context and classifies that wider text,
+ * returning its signals. This exists because a Rust #[cfg(test)] module's
+ * opener (or closer) can sit outside the default -U3 context window,
+ * making the module invisible to src/test-diff-separator.ts's brace
+ * matching even though the module is real; a wider window makes more of
+ * these visible without changing what a human reads as "the diff".
+ *
+ * Added/removed counts and file stats are never taken from this: only
+ * `.signals` is used, and only to add to what the narrow diff already
+ * found, never to replace it. Returns undefined when the diff has no .rs
+ * file, did not come from git at all (--diff/stdin: the bound documented
+ * in src/test-diff-separator.ts simply applies there), or when the wide
+ * re-run itself fails for any reason. A git failure here must degrade
+ * quietly to the narrow diff's own result, never crash and never be
+ * mistaken for "no signals".
+ */
+function widerClassificationSignals(args: ParsedArgs, narrowDiffText: string, rules: RuleSet): Signal[] | undefined {
+  const gitArgs = gitInvocationArgs(args);
+  if (gitArgs === undefined) return undefined;
+  if (!RUST_FILE_IN_DIFF_RE.test(narrowDiffText)) return undefined;
+  const wideText = runGitAllowFail(widenContext(gitArgs));
+  if (wideText === undefined) return undefined;
+  return separateTestDiff(wideText, { rules }).signals;
+}
+
+/** A signal's identity for deduplication: same finding, reported once. */
+function signalKey(signal: Signal): string {
+  return `${signal.id} ${signal.file} ${signal.line} ${signal.message}`;
 }
 
 function readFileOrFail(path: string): string {
@@ -315,6 +388,22 @@ function main(): void {
 
   const diffText = resolveDiffText(args);
   const result = separateTestDiff(diffText, { rules });
+
+  // A .rs file's #[cfg(test)] module can sit outside the default context
+  // window; a wide re-run only ever adds signals the narrow diff missed,
+  // never touches sourceFiles/testFiles/counts, and degrades silently to
+  // nothing found when it cannot run at all. See widerClassificationSignals.
+  const wideSignals = widerClassificationSignals(args, diffText, rules);
+  if (wideSignals !== undefined) {
+    const seen = new Set(result.signals.map(signalKey));
+    for (const signal of wideSignals) {
+      const key = signalKey(signal);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.signals.push(signal);
+    }
+    result.signalCount = result.signals.length;
+  }
 
   if (args.format === "json") {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

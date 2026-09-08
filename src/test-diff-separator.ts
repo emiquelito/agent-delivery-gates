@@ -310,11 +310,36 @@ export function isTestPath(path: string, extraPatterns: RegExp[] = []): boolean 
 
 // --- Diff parsing -------------------------------------------------------------
 
+/** One line inside a hunk, in file order, tagged with how it changed. */
+export type DiffLineKind = "added" | "removed" | "context";
+
+export interface DiffLine {
+  kind: DiffLineKind;
+  /** The line's content, with its leading +/-/space marker stripped. */
+  content: string;
+}
+
 interface RawFileDiff {
   path: string;
   oldPath: string | null;
   addedLines: string[];
   removedLines: string[];
+  /**
+   * Every hunk line for this file, in file order, added/removed/context
+   * lines alike. Context lines are dropped from addedLines/removedLines
+   * (by design, unchanged from before this field existed), but a module
+   * boundary like Rust's #[cfg(test)] can only be found by reading past
+   * a changed line into the context around it, so this keeps the whole
+   * stream around for that.
+   */
+  lines: DiffLine[];
+  /**
+   * Each `@@ ... @@` hunk header's trailing text, in file order, when
+   * present. Git fills this in with the enclosing scope it can find
+   * above the hunk (a function or, for Rust, a `mod tests {` line),
+   * skipping any hunk whose heading was empty.
+   */
+  hunkHeadings: string[];
 }
 
 /** Strips a leading "a/" or "b/" from a diff header path, when present. */
@@ -323,6 +348,7 @@ function stripAbPrefix(path: string): string {
 }
 
 const GIT_HEADER_RE = /^diff --git a\/(.+?) b\/(.+)$/;
+const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@[ \t]?(.*)$/;
 
 interface FileSection {
   path: string | null;
@@ -330,11 +356,22 @@ interface FileSection {
   oldPath: string | null;
   addedLines: string[];
   removedLines: string[];
+  lines: DiffLine[];
+  hunkHeadings: string[];
   inHunk: boolean;
 }
 
 function newSection(): FileSection {
-  return { path: null, pathA: null, oldPath: null, addedLines: [], removedLines: [], inHunk: false };
+  return {
+    path: null,
+    pathA: null,
+    oldPath: null,
+    addedLines: [],
+    removedLines: [],
+    lines: [],
+    hunkHeadings: [],
+    inHunk: false,
+  };
 }
 
 /**
@@ -356,6 +393,8 @@ function parseDiff(text: string): RawFileDiff[] {
         oldPath: current.oldPath,
         addedLines: current.addedLines,
         removedLines: current.removedLines,
+        lines: current.lines,
+        hunkHeadings: current.hunkHeadings,
       });
     }
     current = null;
@@ -408,6 +447,8 @@ function parseDiff(text: string): RawFileDiff[] {
       }
       if (line.startsWith("@@")) {
         section.inHunk = true;
+        const heading = HUNK_HEADER_RE.exec(line);
+        if (heading && heading[1].trim() !== "") section.hunkHeadings.push(heading[1].trim());
         continue;
       }
       // Other pre-hunk metadata: "index ...", "new file mode ...",
@@ -420,18 +461,34 @@ function parseDiff(text: string): RawFileDiff[] {
 
     // Inside a hunk.
     if (line.startsWith("@@")) {
-      continue; // a later hunk in the same file
+      // A later hunk in the same file: its own changed-line counts are
+      // unaffected, but its heading is its own trace of enclosing scope.
+      const heading = HUNK_HEADER_RE.exec(line);
+      if (heading && heading[1].trim() !== "") section.hunkHeadings.push(heading[1].trim());
+      continue;
     }
     if (line.startsWith("+")) {
-      section.addedLines.push(line.slice(1));
+      const content = line.slice(1);
+      section.addedLines.push(content);
+      section.lines.push({ kind: "added", content });
       continue;
     }
     if (line.startsWith("-")) {
-      section.removedLines.push(line.slice(1));
+      const content = line.slice(1);
+      section.removedLines.push(content);
+      section.lines.push({ kind: "removed", content });
       continue;
     }
     // A context line (leading space), "\ No newline at end of file", or a
-    // blank line from a trailing newline: none of it changed.
+    // blank line from a trailing newline: none of it changed, so none of
+    // it joins addedLines/removedLines, but a context line's content still
+    // joins the ordered stream: it is the only place a module boundary
+    // that did not itself change (Rust's #[cfg(test)]) can be found.
+    if (line.startsWith("\\")) {
+      continue; // "\ No newline at end of file": diff metadata, not content
+    }
+    const content = line.startsWith(" ") ? line.slice(1) : line;
+    section.lines.push({ kind: "context", content });
   }
   finalize();
 
@@ -706,30 +763,186 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
 // kind this file otherwise does, cannot see them: the path reads as source,
 // and the tests inside it go unscrutinised.
 //
-// This is a partial fix, not full detection, and it stays partial on
-// purpose. It reads a .rs file's diff for a trace of test content, on the
-// added or removed lines alone: the #[cfg(test)] attribute itself, a test
-// opener (#[test], #[tokio::test], and the same #[whatever::test] family
-// DEFAULT_RULES.testCases already matches), or one of the assertion macros
-// (assert_eq!, assert_ne!, assert!). When any of those appear anywhere in
-// the file's diff, this runs the same weakening checks a test file gets
-// over that file's changed lines, through the existing rule engine, which
-// already narrows to the lines each check cares about. The file still
-// counts in the source half: its path is source, and nothing here changes
-// that.
+// Two independent traces are read out of a .rs file's diff:
 //
-// What this does not, and cannot, catch: a change to a test inside a
-// #[cfg(test)] module in a file whose diff carries none of these markers,
-// for instance an expected value edited on a line with no assert-like macro
-// of its own, or a hunk that never touches a line matching any of the above.
-// There is no module boundary here to find; only lines. Closing that gap
-// needs a real Rust parser, which this file does not have and does not
-// pretend to.
+// 1. hasRustTestMarker: true when a test-ish token (#[cfg(test)], #[test]
+//    and the #[whatever::test] family, assert_eq!/assert_ne!/assert!) shows
+//    up ANYWHERE in the file's diff, including a context line and a hunk's
+//    `@@ ... @@` section heading, not only an added or removed line. When
+//    true, the whole file's changed lines run through the same weakening
+//    checks a test file gets. This is unchanged in spirit from before,
+//    widened only to read context and headings too, since a marker sitting
+//    two lines above the one that actually changed is real evidence, not
+//    noise.
+//
+// 2. cfgTestRegionMask: a #[cfg(test)] module's extent, found by brace
+//    matching over the file's ordered line stream (added, removed, and
+//    context lines together, in file order). An attribute matching
+//    #[cfg(test)] or #[cfg(all(..., test, ...))], followed (stacked
+//    attributes skipped over) by `mod <name> {`, opens a region; `{`/`}`
+//    are counted from there until the count returns to zero, and every
+//    line from the attribute through that closing brace, inclusive, is
+//    test content, whatever it says. `#[cfg(test)] mod tests;` (a
+//    declaration, module body in another file) opens no region. When only
+//    a marker is missing but a region is open, the weakening checks run
+//    over just that region's added/removed lines, not the whole file, so a
+//    real source-code change elsewhere in the same file still reports
+//    nothing. This is what closes the gap the old comment here called
+//    unclosable: an expected value edited on a line with no assert-like
+//    macro of its own, deep inside a #[cfg(test)] module, is now visible as
+//    long as the module's opener and the changed line are both in the
+//    diff, whether or not either one carries a literal marker word.
+//
+// What this still cannot catch, plainly:
+//
+// - Brace counting is an approximation, not a Rust parser. It strips `//`
+//   line comments and ordinary `"..."`/`'x'` literals (including a
+//   same-line raw string, r"...", r#"..."#, ...) before counting braces,
+//   but it does NOT handle a `/* ... */` block comment, and a raw string
+//   or block comment that spans more than one line is only handled up to
+//   the end of the line it starts on. A `{` or `}` sitting inside one of
+//   those can still throw off the count.
+// - Brace matching can only see what is in the diff. If a #[cfg(test)]
+//   opener sits above the hunk's context window, it is invisible, and the
+//   region it would have opened is never found from this file's diff text
+//   alone; the same is true in reverse if the closing brace sits below the
+//   window. When a region opens but never visibly closes within the diff,
+//   this fails toward calling the rest of the file's visible lines test
+//   content instead of missing them, on purpose: a false "this is a test"
+//   costs a human one look, a false "this is source" is exactly the miss
+//   this file exists to avoid. Widening the context window (the CLI does
+//   this for a .rs diff; see hooks/test-diff-separator.ts) narrows this
+//   bound but cannot erase it. A change far enough from both the opener
+//   and the closer, in a file wide enough, is still outside any diff.
 const RUST_PATH_RE = /\.rs$/;
 const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_eq!|\bassert_ne!|\bassert!/;
 
 function hasRustTestMarker(file: RawFileDiff): boolean {
-  return [...file.addedLines, ...file.removedLines].some((line) => RUST_TEST_MARKER_RE.test(line));
+  if (file.hunkHeadings.some((heading) => RUST_TEST_MARKER_RE.test(heading))) return true;
+  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(line.content));
+}
+
+// Matches "#[cfg(test)]" and "#[cfg(all(test, feature = \"x\"))]" (or any
+// all(...) form naming "test" among its conditions), but not an unrelated
+// #[cfg(...)] that never mentions test.
+const CFG_TEST_ATTR_RE = /#\[cfg\((?:test|all\([^()]*\btest\b[^()]*\))\)\]/;
+// The item a #[cfg(test)] attribute decorates: `mod name {` opens a region,
+// `mod name;` (the module's body lives in another file entirely) does not.
+const MOD_OPEN_OR_DECL_RE = /\bmod\s+\w+\s*([{;])/;
+
+/**
+ * Best-effort removal of the Rust syntax that can hide a brace from the
+ * counter below: a `//` line comment (everything after it on the line is
+ * dropped), an ordinary double-quoted string (backslash escapes
+ * respected), a char literal (`'x'`, `'\n'`), and a raw string opener
+ * (`r"..."`, `r#"..."#`, `r##"..."##`, ...) closed later on the same line.
+ * Explicitly NOT handled: a `/* ... *\/` block comment, and a raw string
+ * or block comment that continues onto another line. If the matching
+ * closer is not found on this same line, the rest of the line is dropped
+ * instead of guessed at. See the comment banner above this section for
+ * what that means for brace counting.
+ */
+function stripRustNoiseForBraceCounting(line: string): string {
+  let out = "";
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    const ch = line[i];
+    if (ch === "/" && line[i + 1] === "/") break;
+    if (ch === "r") {
+      const rawOpen = /^r(#*)"/.exec(line.slice(i));
+      if (rawOpen) {
+        const closer = `"${"#".repeat(rawOpen[1].length)}`;
+        const start = i + rawOpen[0].length;
+        const end = line.indexOf(closer, start);
+        if (end === -1) break; // spans past this line: best-effort, stop here
+        i = end + closer.length;
+        continue;
+      }
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < n && line[j] !== '"') {
+        if (line[j] === "\\") j++;
+        j++;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === "'") {
+      const charLit = /^'(?:\\.|[^'\\])'/.exec(line.slice(i));
+      if (charLit) {
+        i += charLit[0].length;
+        continue;
+      }
+      // Not a closed char literal: most likely a lifetime ('a). Consume
+      // just the quote itself so it is never mistaken for a brace.
+      i++;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** Finds the `mod <name> {` or `mod <name>;` a #[cfg(test)] attribute at
+ * `attrIdx` decorates, skipping over any other attributes stacked between
+ * them. Returns null when nothing that looks like a mod item follows. */
+function locateModOpener(lines: DiffLine[], attrIdx: number): { idx: number; punct: "{" | ";" } | null {
+  const sameLine = MOD_OPEN_OR_DECL_RE.exec(lines[attrIdx].content);
+  if (sameLine) return { idx: attrIdx, punct: sameLine[1] as "{" | ";" };
+  for (let j = attrIdx + 1; j < lines.length; j++) {
+    const trimmed = lines[j].content.trim();
+    if (trimmed === "") continue;
+    if (/^#\[/.test(trimmed)) continue; // a stacked attribute; keep looking
+    const opener = MOD_OPEN_OR_DECL_RE.exec(lines[j].content);
+    return opener ? { idx: j, punct: opener[1] as "{" | ";" } : null;
+  }
+  return null;
+}
+
+/**
+ * Marks every index in `lines` that falls inside a #[cfg(test)] module
+ * region: from the attribute through the closing brace, inclusive. See the
+ * comment banner above this section for the brace-counting approximation
+ * and its limits.
+ */
+function cfgTestRegionMask(lines: DiffLine[]): boolean[] {
+  const mask = new Array<boolean>(lines.length).fill(false);
+  let i = 0;
+  while (i < lines.length) {
+    if (!CFG_TEST_ATTR_RE.test(lines[i].content)) {
+      i++;
+      continue;
+    }
+    const opener = locateModOpener(lines, i);
+    if (opener === null || opener.punct === ";") {
+      i++;
+      continue;
+    }
+    let depth = 0;
+    let closeIdx = lines.length - 1; // fails toward "still in region" if never closed in view
+    for (let k = opener.idx; k < lines.length; k++) {
+      const stripped = stripRustNoiseForBraceCounting(lines[k].content);
+      let closed = false;
+      for (const ch of stripped) {
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            closeIdx = k;
+            closed = true;
+            break;
+          }
+        }
+      }
+      if (closed) break;
+    }
+    for (let m = i; m <= closeIdx; m++) mask[m] = true;
+    i = closeIdx + 1;
+  }
+  return mask;
 }
 
 // --- Entry point ---------------------------------------------------------------
@@ -737,10 +950,13 @@ function hasRustTestMarker(file: RawFileDiff): boolean {
 /**
  * Separates a unified diff into its source and test parts, and finds
  * weakening signals in the test files alone. A source file with a line
- * that looks like an assertion produces no signal, with one exception: a
- * .rs source file whose diff carries a Rust test marker (see
- * hasRustTestMarker above) still gets checked, because Rust's own tests
- * commonly live inside a source file's own #[cfg(test)] module.
+ * that looks like an assertion produces no signal, with two exceptions,
+ * both there because Rust's own tests commonly live inside a source
+ * file's own #[cfg(test)] module: a .rs file whose diff carries a Rust
+ * test marker anywhere (see hasRustTestMarker above) gets its whole diff
+ * checked, and failing that, a .rs file whose diff shows a #[cfg(test)]
+ * module region (see cfgTestRegionMask above) gets that region's own
+ * added/removed lines checked, marker or not.
  */
 export function separateTestDiff(diffText: string, options: SeparateOptions = {}): SeparateResult {
   const ruleSet = options.rules ?? DEFAULT_RULES;
@@ -772,8 +988,34 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
       sourceFiles.push(stats);
       sourceAdded += stats.added;
       sourceRemoved += stats.removed;
-      if (RUST_PATH_RE.test(file.path) && hasRustTestMarker(file)) {
-        signals.push(...signalsForTestFile(file, rules));
+      if (RUST_PATH_RE.test(file.path)) {
+        if (hasRustTestMarker(file)) {
+          signals.push(...signalsForTestFile(file, rules));
+        } else {
+          const mask = cfgTestRegionMask(file.lines);
+          const regionAdded: string[] = [];
+          const regionRemoved: string[] = [];
+          file.lines.forEach((line, idx) => {
+            if (!mask[idx]) return;
+            if (line.kind === "added") regionAdded.push(line.content);
+            else if (line.kind === "removed") regionRemoved.push(line.content);
+          });
+          if (regionAdded.length > 0 || regionRemoved.length > 0) {
+            signals.push(
+              ...signalsForTestFile(
+                {
+                  path: file.path,
+                  oldPath: file.oldPath,
+                  addedLines: regionAdded,
+                  removedLines: regionRemoved,
+                  lines: [],
+                  hunkHeadings: [],
+                },
+                rules,
+              ),
+            );
+          }
+        }
       }
     }
   }

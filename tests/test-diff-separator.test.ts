@@ -962,3 +962,233 @@ test("a removed assert_eq! in a .rs file under tests/ still behaves as before: r
   );
   assert.deepEqual(result.sourceFiles, []);
 });
+
+// --- Rust: #[cfg(test)] module regions found by brace matching ---------------
+//
+// These build a single-file diff hunk line by line, each already carrying
+// its own "+"/"-"/" " marker, so a fixture can place a change deep inside a
+// #[cfg(test)] module while a plain context line (no marker word of its
+// own) sits right next to it: the exact case that path/line marker
+// scanning alone cannot see, and that the brace-matched region (see
+// cfgTestRegionMask in src/test-diff-separator.ts) is there to catch.
+function diffWithHunk(path: string, hunkLines: string[]): string {
+  let oldCount = 0;
+  let newCount = 0;
+  for (const line of hunkLines) {
+    if (line.startsWith("-")) oldCount++;
+    else if (line.startsWith("+")) newCount++;
+    else {
+      oldCount++;
+      newCount++;
+    }
+  }
+  const parts = [
+    `diff --git a/${path} b/${path}`,
+    "index 1111111..2222222 100644",
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -1,${oldCount} +1,${newCount} @@`,
+    ...hunkLines,
+    "",
+  ];
+  return parts.join("\n");
+}
+
+test("a skip added inside a #[cfg(test)] module, with no Rust test marker anywhere in the diff, still reports skip-added", () => {
+  // #[ignore] carries no #[cfg(test)]/#[test]/::test/assert_eq!/assert_ne!/
+  // assert! wording of its own, and the module is opened with the
+  // all(test, ...) form, which RUST_TEST_MARKER_RE does not match either
+  // (only the plain "#[cfg(test)]" spelling is in that regex). Nothing in
+  // this whole diff matches RUST_TEST_MARKER_RE, so only the region (opened
+  // by the #[cfg(all(test, ...))]/mod tests { pair) can explain the
+  // skip-added signal below; the marker path would report nothing here.
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(all(test, feature = "flaky"))]',
+    " mod tests {",
+    "     use super::*;",
+    " ",
+    "+    #[ignore]",
+    "     fn applies_discount() {",
+    "         let result = discount(120);",
+    "         let expected = 110;",
+    "         result == expected",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("skip-added"),
+    `expected skip-added, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["src/pricing.rs"],
+  );
+  assert.deepEqual(result.testFiles, []);
+});
+
+test("an assertion removed inside a #[cfg(test)] module reports assertion-removed", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod tests {",
+    "     #[test]",
+    "     fn applies_discount() {",
+    "         let result = discount(120);",
+    "-        assert_eq!(result, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("assertion-removed"),
+    `expected assertion-removed, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+});
+
+test("a change to real source code in the same .rs file, outside the #[cfg(test)] module, reports nothing", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    " fn discount(cents: i64) -> i64 {",
+    "-    cents - 10",
+    "+    cents - 20",
+    " }",
+    " ",
+    " #[cfg(test)]",
+    " mod tests {",
+    "     #[test]",
+    "     fn applies_discount() {",
+    "         assert_eq!(discount(120), 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["src/pricing.rs"],
+  );
+});
+
+test("nested braces inside the test module (a fn, a match, and a closure) do not close the region early", () => {
+  // If brace counting were wrong -- stopped early, or never decremented --
+  // this change, which sits after several nested `{...}` blocks but still
+  // inside the outer `mod tests { ... }`, would be missed.
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod tests {",
+    "     fn helper(n: i64) -> i64 {",
+    "         match n {",
+    "             0 => 0,",
+    "             _ => (|x: i64| { x + 1 })(n),",
+    "         }",
+    "     }",
+    " ",
+    "     #[test]",
+    "     fn applies_discount() {",
+    "         let result = discount(120);",
+    "-        assert_eq!(result, 100);",
+    "+        assert_eq!(result, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("assertion-weakened"),
+    `expected assertion-weakened past the nested braces, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+});
+
+test("#[cfg(all(test, feature = \"slow\"))] opens a region, same as plain #[cfg(test)]", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(all(test, feature = "slow"))]',
+    " mod tests {",
+    "     fn check(n: i64) {",
+    "-        verify(n, 100);",
+    "+        verify(n, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).length > 0,
+    `expected a signal from inside the all(test, ...) region, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+});
+
+test("#[cfg(test)] mod tests; (a declaration, body in another file) opens no region", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod tests;",
+    " ",
+    " fn discount(cents: i64) -> i64 {",
+    "-    cents - 10",
+    "+    cents - 20",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a .rs file with no test module at all behaves exactly as before: no signal", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    " fn discount(cents: i64) -> i64 {",
+    "-    cents - 10",
+    "+    cents - 20",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["src/pricing.rs"],
+  );
+});
+
+test("cfg(test) region detection never changes the file's added/removed counts, or which half it counts in", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod tests {",
+    "     #[test]",
+    "     fn applies_discount() {",
+    "         let result = discount(120);",
+    "-        assert_eq!(result, 100);",
+    "+        assert_eq!(result, 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.equal(result.sourceAdded, 1);
+  assert.equal(result.sourceRemoved, 1);
+  assert.equal(result.testAdded, 0);
+  assert.equal(result.testRemoved, 0);
+  assert.deepEqual(
+    result.sourceFiles.map((f) => ({ path: f.path, added: f.added, removed: f.removed })),
+    [{ path: "src/pricing.rs", added: 1, removed: 1 }],
+  );
+});
+
+test("the region closes at its own closing brace: a later, unrelated source change past it reports nothing", () => {
+  // The module comes first this time, using the all(test, ...) form so
+  // this only goes through the region path, never the marker path (see the
+  // skip-added test above for why). If the region's depth counter did not
+  // close it at the right brace -- for instance if it never closed at all
+  // -- everything after it, including this unrelated later change, would
+  // be swept in as test content too and this would wrongly report a
+  // skip-added signal for the plain source edit below.
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(all(test, feature = "flaky"))]',
+    " mod tests {",
+    "     fn helper(n: i64) -> bool {",
+    "         let result = discount(n);",
+    "-        result == 100",
+    "+        result == 110",
+    "     }",
+    " }",
+    " ",
+    " fn unrelated(n: i64) -> i64 {",
+    "-    n + 1",
+    "+    n.skip(1)",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
