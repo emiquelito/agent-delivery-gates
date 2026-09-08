@@ -15,6 +15,16 @@
 # never quiet.
 set -euo pipefail
 
+# The gates run through the locally installed package. A gate that cannot run
+# is not a gate that passed, so a missing package stops the commit and says
+# how to fix it.
+if ! npx --no-install agent-delivery-gates --version >/dev/null 2>&1; then
+  echo "pre-commit: agent-delivery-gates could not be found in this project." >&2
+  echo "pre-commit: install it first:  npm install --save-dev agent-delivery-gates" >&2
+  echo "pre-commit: no checks ran, so this commit is stopped." >&2
+  exit 1
+fi
+
 if [ -n "${ADG_SKIP_PRECOMMIT:-}" ]; then
   echo "=============================================================="
   echo " pre-commit: SKIPPED because ADG_SKIP_PRECOMMIT is set."
@@ -91,15 +101,15 @@ else
 fi
 
 if [ -f "$ROOT/.adg/prose-rules.txt" ]; then
-  run_step "prose scan" "npx agent-delivery-gates scan-prose --require-rules" \
-    npx agent-delivery-gates scan-prose --require-rules
+  run_step "prose scan" "npx --no-install agent-delivery-gates scan-prose --require-rules" \
+    npx --no-install agent-delivery-gates scan-prose --require-rules
 else
   skip_step "prose scan" "no .adg/prose-rules.txt; run init --prose-preset to turn this on"
 fi
 
 if [ -f "$ROOT/docs/gate-tally.md" ]; then
-  run_step "tally check" "npx agent-delivery-gates tally --check" \
-    npx agent-delivery-gates tally --check
+  run_step "tally check" "npx --no-install agent-delivery-gates tally --check" \
+    npx --no-install agent-delivery-gates tally --check
 else
   skip_step "tally check" "no docs/gate-tally.md"
 fi

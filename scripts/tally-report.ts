@@ -21,7 +21,8 @@
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
 import { parseTally, type TallySummary } from "../src/tally.ts";
 
 const USAGE = `Usage: tally-report [--tally PATH] [--format text|json] [--check]
@@ -102,8 +103,19 @@ function findRepoRoot(): string {
   }
 }
 
+/**
+ * Rule ids come from the project's own rules directory when it has one, and
+ * from the installed package otherwise. A project adopting this tool has no
+ * rules directory of its own, and reading only the working directory made the
+ * check unusable anywhere but here.
+ */
 function readRuleIds(repoRoot: string): Set<string> {
-  const rulesDir = join(repoRoot, "rules");
+  const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const candidates = [join(repoRoot, "rules"), join(packageRoot, "rules")];
+  const rulesDir = candidates.find((dir) => existsSync(dir));
+  if (rulesDir === undefined) {
+    fail(`could not find a rules directory, looked in: ${candidates.join(", ")}`);
+  }
   let files: string[];
   try {
     files = readdirSync(rulesDir);

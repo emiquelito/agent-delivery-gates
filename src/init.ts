@@ -9,7 +9,7 @@
 // touches .claude/settings.json at all; the lines a person would add
 // there are printed, never written.
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 export interface InitOptions {
@@ -33,10 +33,12 @@ export interface InitOutcome {
 interface TemplateAction {
   relPath: string;
   templateName: string;
+  /** git ignores a hook that is not executable, and only hints about it. */
+  executable?: boolean;
 }
 
 const TEMPLATE_ACTIONS: TemplateAction[] = [
-  { relPath: join(".githooks", "pre-commit"), templateName: "pre-commit" },
+  { relPath: join(".githooks", "pre-commit"), templateName: "pre-commit", executable: true },
   { relPath: "AGENTS.md", templateName: "AGENTS.md" },
   { relPath: join("docs", "gate-tally.md"), templateName: "gate-tally.md" },
 ];
@@ -52,7 +54,13 @@ interface WriteCtx {
 /** Writes one file under targetDir, or, in dry-run mode, only reports what
  * it would have done. Never touches a file that already exists unless
  * force is set. */
-function writeOrPlan(targetDir: string, relPath: string, getContent: () => string, ctx: WriteCtx): void {
+function writeOrPlan(
+  targetDir: string,
+  relPath: string,
+  getContent: () => string,
+  ctx: WriteCtx,
+  executable = false,
+): void {
   const target = resolve(targetDir, relPath);
   // Every relPath passed in above is a fixed literal, never built from
   // user input, so this can only trip if that ever changes. Kept as a
@@ -75,6 +83,9 @@ function writeOrPlan(targetDir: string, relPath: string, getContent: () => strin
 
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, getContent());
+  // git ignores a hook that is not executable, and says so only in a hint.
+  // A gate that looks installed and does nothing is the worst outcome here.
+  if (executable) chmodSync(target, 0o755);
   ctx.lines.push(`${exists ? "overwrote" : "created"}: ${relPath}`);
 }
 
@@ -152,13 +163,13 @@ export function runInit(options: InitOptions): InitOutcome {
   // Every template is resolved and checked before anything is written.
   // A missing template means the run cannot proceed at all; failing here
   // keeps a bad install from producing a half-finished setup on disk.
-  const resolvedActions: { relPath: string; templatePath: string }[] = [];
+  const resolvedActions: { relPath: string; templatePath: string; executable: boolean }[] = [];
   for (const action of TEMPLATE_ACTIONS) {
     const templatePath = join(packageRoot, "templates", action.templateName);
     if (!existsSync(templatePath)) {
       return fail(`template '${templatePath}' is missing from the installed package`);
     }
-    resolvedActions.push({ relPath: action.relPath, templatePath });
+    resolvedActions.push({ relPath: action.relPath, templatePath, executable: action.executable === true });
   }
 
   let prosePresetPath: string | undefined;
@@ -176,7 +187,13 @@ export function runInit(options: InitOptions): InitOutcome {
   const ctx: WriteCtx = { dryRun, force, lines };
 
   for (const action of resolvedActions) {
-    writeOrPlan(targetDir, action.relPath, () => readFileSync(action.templatePath, "utf8"), ctx);
+    writeOrPlan(
+      targetDir,
+      action.relPath,
+      () => readFileSync(action.templatePath, "utf8"),
+      ctx,
+      action.executable,
+    );
   }
 
   if (prosePresetPath !== undefined) {
@@ -187,6 +204,15 @@ export function runInit(options: InitOptions): InitOutcome {
   lines.push("");
   lines.push("Next steps:");
   lines.push("");
+  // A one-off npx run leaves nothing installed, so the hook it writes cannot
+  // find the tool later. Better to say so here than to let the first commit
+  // discover it.
+  if (!existsSync(join(targetDir, "node_modules", "agent-delivery-gates"))) {
+    lines.push("This project does not have agent-delivery-gates installed, so the hook");
+    lines.push("written above cannot run yet. Install it first:");
+    lines.push("  npm install --save-dev agent-delivery-gates");
+    lines.push("");
+  }
   lines.push("Enable the git hook (run this yourself; init never touches git config):");
   lines.push("  git config core.hooksPath .githooks");
   lines.push("");
