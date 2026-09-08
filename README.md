@@ -103,7 +103,10 @@ commit:
 - `filesystem-allowlist`: a build agent's file access stays inside an
   allowlist of roots, checked against the real, symlink-free path.
 - `full-finding-list`: a report on a review has to carry every finding,
-  every severity, with nothing marked deferred on the agent's own say.
+  every severity, with nothing marked deferred on the agent's own say. The
+  hook checks one part of that: the list holds a Low or Info entry, or
+  says there were none. Whether something was dropped before the list was
+  written is left to a reader.
 - `induced-failure-required`: a claim that a failure path is handled
   needs evidence the failure actually happened and the handling fired.
 - `test-diff-reported-apart`: a fix that touches an existing test file
@@ -163,7 +166,7 @@ matter what calls them.
 `induced-failure-required`.
 
 ```
-delivery-report-validator [--report PATH] [--prior PATH] [--format text|json]
+node hooks/delivery-report-validator.ts [--report PATH] [--prior PATH] [--format text|json]
 ```
 
 With no `--report`, it reads the report from standard input. Exit `0`
@@ -176,7 +179,7 @@ clean one.
 half and reports weakening signals found only in the test files.
 
 ```
-test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
+node hooks/test-diff-separator.ts [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
 ```
 
 With none of `--rev`, `--range`, `--staged`, or `--diff` given, it
