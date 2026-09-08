@@ -127,6 +127,77 @@ test("--dry-run: reports it would create .codex/hooks.json, writes nothing", () 
   });
 });
 
+// --- MCP client config files: created when absent, left alone when present --
+//
+// Same rule as the hook configs above: init never edits one of these once it
+// exists, --force included, since it may already wire up other servers.
+
+const MCP_STANDARD_PATHS = [".mcp.json", join(".cursor", "mcp.json"), join(".windsurf", "mcp.json")];
+
+for (const rel of MCP_STANDARD_PATHS) {
+  test(`in an empty directory: creates ${rel} with the standard mcpServers block`, () => {
+    withTempDir((dir) => {
+      const result = runInitCli(["--dir", dir]);
+      assert.equal(result.status, 0, result.stderr);
+      const target = join(dir, rel);
+      assert.ok(existsSync(target), `expected ${rel} to exist`);
+      const parsed = JSON.parse(readFileSync(target, "utf8"));
+      assert.ok(Array.isArray(parsed.mcpServers["agent-delivery-gates"].args));
+      assert.ok(parsed.mcpServers["agent-delivery-gates"].args.includes("mcp"));
+    });
+  });
+
+  test(`with an existing ${rel}: leaves it unchanged and prints the block`, () => {
+    withTempDir((dir) => {
+      const target = join(dir, rel);
+      mkdirSync(dirname(target), { recursive: true });
+      const original = '{"mcpServers": {"already": "here"}}';
+      writeFileSync(target, original);
+      const result = runInitCli(["--dir", dir]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(target, "utf8"), original);
+      const escaped = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\//g, "[\\\\/]");
+      assert.match(result.stdout, new RegExp(`exists, not written: ${escaped}`));
+      assert.match(result.stdout, /agent-delivery-gates/);
+    });
+  });
+}
+
+test("in an empty directory: creates .vscode/mcp.json with VS Code's own \"servers\" key", () => {
+  withTempDir((dir) => {
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    const target = join(dir, ".vscode", "mcp.json");
+    assert.ok(existsSync(target), "expected .vscode/mcp.json to exist");
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    assert.ok(parsed.servers, "expected a top-level servers key");
+    assert.equal(parsed.mcpServers, undefined, "VS Code does not use mcpServers");
+    assert.ok(parsed.servers["agent-delivery-gates"].args.includes("mcp"));
+  });
+});
+
+test("with an existing .vscode/mcp.json: leaves it unchanged", () => {
+  withTempDir((dir) => {
+    const target = join(dir, ".vscode", "mcp.json");
+    mkdirSync(dirname(target), { recursive: true });
+    const original = '{"servers": {"already": "here"}}';
+    writeFileSync(target, original);
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(target, "utf8"), original);
+    assert.match(result.stdout, /exists, not written: \.vscode[\\/]mcp\.json/);
+  });
+});
+
+test("prints the Codex MCP config equivalent, and writes nothing under a codex home path", () => {
+  withTempDir((dir) => {
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /mcp_servers\.agent-delivery-gates/);
+    assert.match(result.stdout, /config\.toml/);
+  });
+});
+
 // --- running twice is safe ---------------------------------------------------
 
 test("run twice with no flags: the second run reports everything present, creates nothing, exits 0", () => {

@@ -51,6 +51,8 @@ Commands:
   tally [...]              read or check the gate tally log
   scan-prose [...]         scan text against configured prose rules
   check                    run the pre-publication checks
+  mcp                      start the MCP server on stdio; advisory, an
+                           agent calls its tools when it chooses to
 
 Hook entry points, for a settings file or another agent's hook config:
   hook-clean-tree          block an edit while the tree is dirty
@@ -240,6 +242,9 @@ function main(): void {
       break;
     case "check":
       shellTool("scripts/pre-publication-check.sh", rest);
+      break;
+    case "mcp":
+      nodeTool("hooks/mcp-server.ts", rest);
       break;
     // The hook entry points, so a settings file can name a subcommand instead
     // of a path computed into node_modules. That path breaks under

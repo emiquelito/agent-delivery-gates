@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "agent-delivery-gates": {
+      "command": "npx",
+      "args": ["--no-install", "agent-delivery-gates", "mcp"]
+    }
+  }
+}

@@ -59,6 +59,20 @@ const CURSOR_HOOKS_REL_PATH = join(".cursor", "hooks.json");
 const CODEX_HOOKS_REL_PATH = join(".codex", "hooks.json");
 const COPILOT_HOOKS_REL_PATH = join(".github", "hooks", "agent-delivery-gates.json");
 
+// MCP client config files. Each one carries this server's standard stdio
+// entry, either verbatim (templates/mcp.json, the "mcpServers" form most
+// clients use) or in VS Code's own form (templates/vscode-mcp.json, whose
+// top-level key is "servers" instead; confirmed against VS Code's own MCP
+// documentation, not guessed). Codex's config is TOML in the user's home
+// directory, not a file in this repository, so it gets no entry here: its
+// equivalent is only printed, in runInit below.
+const MCP_CLIENT_CONFIGS: Array<{ relPath: string; templateName: string }> = [
+  { relPath: ".mcp.json", templateName: "mcp.json" },
+  { relPath: join(".cursor", "mcp.json"), templateName: "mcp.json" },
+  { relPath: join(".vscode", "mcp.json"), templateName: "vscode-mcp.json" },
+  { relPath: join(".windsurf", "mcp.json"), templateName: "mcp.json" },
+];
+
 interface WriteCtx {
   dryRun: boolean;
   force: boolean;
@@ -284,6 +298,41 @@ export function runInit(options: InitOptions): InitOutcome {
     writeFileSync(copilotHooksTarget, copilotHooksContent);
     lines.push(`created: ${COPILOT_HOOKS_REL_PATH}`);
   }
+
+  // Each MCP client config gets the same treatment as the hook configs
+  // above: an existing file may already wire up other servers, so it is
+  // never touched, --force included, and the block is printed instead for
+  // a person to merge by hand.
+  for (const { relPath, templateName } of MCP_CLIENT_CONFIGS) {
+    const templatePath = join(packageRoot, "templates", templateName);
+    if (!existsSync(templatePath)) {
+      return fail(`template '${templatePath}' is missing from the installed package`);
+    }
+    const content = readFileSync(templatePath, "utf8");
+    const target = resolve(targetDir, relPath);
+    if (existsSync(target)) {
+      lines.push(`exists, not written: ${relPath}`);
+      lines.push(`init does not edit an existing ${relPath}. Merge this block into it yourself:`);
+      lines.push(content.trimEnd());
+    } else if (dryRun) {
+      lines.push(`would create: ${relPath}`);
+    } else {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, content);
+      lines.push(`created: ${relPath}`);
+    }
+  }
+
+  // Codex keeps its MCP config in TOML, in the user's home directory, not
+  // in this repository. There is nothing here for init to write, so the
+  // equivalent is only printed, the same way the standalone
+  // .claude/settings.json lines are printed further down.
+  lines.push("");
+  lines.push("Codex's MCP config is TOML in your home directory, not a file in this repo,");
+  lines.push("so init writes nothing there. Add this to ~/.codex/config.toml yourself:");
+  lines.push("  [mcp_servers.agent-delivery-gates]");
+  lines.push('  command = "npx"');
+  lines.push('  args = ["--no-install", "agent-delivery-gates", "mcp"]');
 
   let proseRulesCreatedThisRun = false;
   if (prosePresetPath !== undefined) {
