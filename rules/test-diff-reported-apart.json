@@ -1,0 +1,19 @@
+{
+  "id": "test-diff-reported-apart",
+  "name": "Test changes reported apart from source changes",
+  "claim_class": "A claim that a fix works, resting on a test run that came back green.",
+  "proof_obligation": "When a fix changes files that already held tests, the report shows the test changes apart from the source changes, so a reader sees what happened to the tests instead of only the colour of the run. A hook does this on every commit and names seven things: an assertion removed with none added back, an assertion swapped for one that proves less, an assertion that kept its form while the value it expects changed, a test case removed, a test file renamed out of the naming rules, a skip or a narrowing to one test added, and a tolerance or a timeout changed. A change a hook names is not proof of anything on its own. It is a place for a person to look, and the report says what was found there.",
+  "failure_mode": "A fix reaches green by changing the tests instead of the code. An assertion is deleted, or loosened, or its expected value is edited to match the behaviour that was wrong, or a case is skipped, or a test file is renamed so it stops being collected. From outside the run looks the same as a fix that works, and the source change is often one line, which is where a reader's eye goes.",
+  "origin_incident": "No single recorded event is documented for this rule, and it does not come from the same source as the other twelve. It was written for this project after the first two rules were built, because nothing in the catalog covered the case where the tests move to meet the code. It generalises a pattern anyone who has watched a suite go green can name.",
+  "severity": "high",
+  "enforcement": "hook",
+  "emits": [
+    "assertion-removed",
+    "assertion-weakened",
+    "test-case-removed",
+    "test-file-declassified",
+    "skip-added",
+    "tolerance-widened",
+    "timeout-raised"
+  ]
+}

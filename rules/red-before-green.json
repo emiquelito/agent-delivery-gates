@@ -2,18 +2,10 @@
   "id": "red-before-green",
   "name": "Red before green",
   "claim_class": "A claim that a bug fix actually fixed something.",
-  "proof_obligation": "Every fix ships with a test that failed before the fix landed and passes after it, and the delivery report states plainly that this red-before-fix check was done. This is a stronger guarantee than re-running a coverage pass for each fix, because a test that already passed before the fix says nothing about whether the fix changed anything. This is distinct from the existing `induced-failure-required` record: that rule requires every robustness claim to cite an induced failure, while this rule requires every fix to carry a test that was red before the fix and green after. A hook covers one half of this mechanically and cannot cover the other. On a commit that changes existing test files it reports the test diff apart from the source diff and names what was weakened: an assertion removed with none added back, an assertion swapped for one that proves less, an expected value edited while the call stayed the same, a test case removed, a test file renamed out of the naming rules, a skip added, a tolerance or a timeout changed. It catches a fix reaching green by changing the tests. It does not check that a red-before-green test exists for a fix, which stays with the report and the reviewer.",
+  "proof_obligation": "Every fix ships with a test that failed before the fix landed and passes after it, and the delivery report states plainly that this red-before-fix check was done. This is a stronger guarantee than re-running a coverage pass for each fix, because a test that already passed before the fix says nothing about whether the fix changed anything. This is distinct from the existing `induced-failure-required` record: that rule requires every robustness claim to cite an induced failure, while this rule requires every fix to carry a test that was red before the fix and green after. No hook checks this. A hook cannot tell that a test failed before a fix and passed after, so this one rests on the report and the reviewer. The nearest mechanical help is `test-diff-reported-apart`, which catches a fix reaching green by changing the tests.",
   "failure_mode": "A fix lands with a test that passed both before and after it, or with no dedicated test at all, and the report still claims the fix is proven. Nothing in the evidence shows the bug was ever reproduced, so there is no way to tell whether the change fixed the reported problem or just added an unrelated passing test next to it.",
   "origin_incident": "No single recorded event is documented for this rule. It generalizes a recurring pattern: a fix ships with a test that was never confirmed to fail on the old code, so a green suite after the fix proves nothing about whether the fix addressed the actual bug.",
   "severity": "high",
-  "enforcement": "hook",
-  "emits": [
-    "assertion-removed",
-    "assertion-weakened",
-    "test-case-removed",
-    "test-file-declassified",
-    "skip-added",
-    "tolerance-widened",
-    "timeout-raised"
-  ]
+  "enforcement": "prompt",
+  "emits": []
 }

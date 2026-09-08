@@ -8,12 +8,12 @@ run and a false claim can look identical from outside, and only one of
 them is true. The rules and tools here exist to tell the two apart.
 
 `CLAUDE.md` covers this repository's own conventions for building the
-project. This file exists so the twelve rules are usable by an agent that
+project. This file exists so the thirteen rules are usable by an agent that
 is not Claude Code. The tools that carry the mechanical checks are
 ordinary command line programs, and they work the same way no matter what
 is calling them.
 
-## The twelve rules
+## The thirteen rules
 
 Each rule below is a proof obligation: a kind of claim, and what evidence
 that claim needs before it counts as validated. The heading is the rule's
@@ -77,6 +77,21 @@ passed before the fix says nothing about whether the fix changed
 anything; without a red run first, a fix can ship next to a test that
 passed both before and after it, or with no dedicated test at all, and
 still get reported as proven.
+
+### test-diff-reported-apart
+
+Covers a claim that a fix works, resting on a run that came back green. When
+a fix changes files that already held tests, the report has to show the test
+changes apart from the source changes. A fix can reach green by changing the
+tests instead of the code: an assertion deleted, an assertion loosened, an
+expected value edited to match the wrong behaviour, a case skipped, a test
+file renamed so it stops being collected. From outside that looks the same as
+a fix that works, and the source change is often one line, which is where a
+reader's eye goes.
+
+This rule was written for this project. The other twelve come from one set of
+notes; this one was added later, because nothing in that set covered a fix
+where the tests move to meet the code.
 
 ### standing-adversarial-self-review
 
