@@ -80,27 +80,29 @@ export function resolvePhase(
   env: Record<string, string | undefined>,
   repoRoot: string,
 ): Phase | null | { error: string } {
-  let raw = env.ADG_PHASE;
-  let source = "ADG_PHASE";
-  if (raw === undefined || raw.trim() === "") {
-    const phaseFile = join(repoRoot, ".claude", "adg-phase");
-    if (existsSync(phaseFile)) {
-      // A file that exists but cannot be read is an error, never a reason to
-      // treat the phase as unset. Failing open here would let a mutation run
-      // against a dirty tree.
-      try {
-        raw = readFileSync(phaseFile, "utf8").split("\n")[0]?.trim();
-      } catch (err) {
-        return {
-          error: `could not read .claude/adg-phase: ${(err as Error).message}`,
-        };
-      }
-      source = ".claude/adg-phase";
-    } else {
-      raw = undefined;
+  // The file wins over the variable. The variable is ambient: a session sets
+  // it once and everything spawned inside inherits it, so a reviewer started
+  // inside a building session would inherit "build" and switch its own gate
+  // off. The file is written on purpose, in this checkout, by whoever is
+  // about to review, and it is gitignored, so it stays local session state.
+  let raw: string | undefined;
+  let source = ".claude/adg-phase";
+  const phaseFile = join(repoRoot, ".claude", "adg-phase");
+  if (existsSync(phaseFile)) {
+    // A file that exists and cannot be read is an error, never a reason to
+    // treat the phase as unset. Failing open here would let a mutation run
+    // against a dirty tree.
+    try {
+      raw = readFileSync(phaseFile, "utf8").split("\n")[0]?.trim();
+    } catch (err) {
+      return {
+        error: `could not read .claude/adg-phase: ${(err as Error).message}`,
+      };
     }
-  } else {
-    raw = raw.trim();
+  }
+  if (raw === undefined || raw === "") {
+    raw = env.ADG_PHASE?.trim();
+    source = "ADG_PHASE";
   }
   if (raw === undefined || raw === "") {
     return null;

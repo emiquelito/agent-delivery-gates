@@ -293,17 +293,49 @@ test("phase from .claude/adg-phase file: dirty tree blocked", () => {
   });
 });
 
-// ADG_PHASE takes precedence over the file when both are set and disagree.
-test("ADG_PHASE overrides .claude/adg-phase file", () => {
+// The file wins over the variable. A reviewer started inside a building
+// session inherits ADG_PHASE=build, so if the variable won, the reviewer
+// would switch off the gate that exists to protect the builder's work. The
+// file is written on purpose by whoever is about to review.
+test("the phase file overrides an inherited ADG_PHASE", () => {
   withTempRepo((dir) => {
     commitFile(dir, "a.txt", "hello\n");
     mkdirSync(join(dir, ".claude"), { recursive: true });
-    // File says review (would block), env says build (allows).
+    // File says review, which blocks. Inherited variable says build.
     writeFileSync(join(dir, ".claude", "adg-phase"), "review\n");
     writeFileSync(join(dir, "a.txt"), "changed\n");
     const result = runHook({
       input: { tool_name: "Write", tool_input: {}, cwd: dir },
       env: { ADG_PHASE: "build" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /a\.txt/);
+  });
+});
+
+// With no file, the variable is what there is.
+test("ADG_PHASE applies when no phase file exists", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "Write", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "build" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
+
+// A phase file saying build is a deliberate local opt out and still wins.
+test("a phase file saying build overrides an inherited review", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.txt", "hello\n");
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "adg-phase"), "build\n");
+    writeFileSync(join(dir, "a.txt"), "changed\n");
+    const result = runHook({
+      input: { tool_name: "Write", tool_input: {}, cwd: dir },
+      env: { ADG_PHASE: "review" },
     });
     assert.equal(result.status, 0, result.stderr);
   });
