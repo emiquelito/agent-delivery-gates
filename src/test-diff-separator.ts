@@ -20,7 +20,10 @@ export type SignalId =
   | "tolerance-widened"
   | "timeout-raised";
 
-export type Severity = "high" | "medium" | "low";
+// How bad one finding is. This is not the severity in rules/schema.json,
+// which ranks a rule. The two vocabularies differ on purpose and used to
+// share a name, which made them look like one thing.
+export type FindingSeverity = "high" | "medium" | "low";
 
 export interface FileStats {
   path: string;
@@ -30,7 +33,7 @@ export interface FileStats {
 
 export interface Signal {
   id: SignalId;
-  severity: Severity;
+  severity: FindingSeverity;
   file: string;
   /** The line content that triggered the signal, without its +/- marker. */
   line: string;
@@ -354,7 +357,7 @@ function declassifiedTestSignals(file: RawFileDiff, extraPatterns: RegExp[]): Si
 function netRemovalSignal(
   file: RawFileDiff,
   id: SignalId,
-  severity: Severity,
+  severity: FindingSeverity,
   re: RegExp,
   message: string,
 ): Signal[] {
@@ -374,7 +377,7 @@ function netRemovalSignal(
 function changedValueSignal(
   file: RawFileDiff,
   id: SignalId,
-  severity: Severity,
+  severity: FindingSeverity,
   re: RegExp,
   message: string,
 ): Signal[] {

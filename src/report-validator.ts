@@ -18,11 +18,14 @@ export type RuleId =
   | "missing-commit-line"
   | "open-finding-not-carried";
 
-export type Severity = "critical" | "high" | "medium";
+// How bad one finding is. This is not the severity in rules/schema.json,
+// which ranks a rule. The two vocabularies differ on purpose and used to
+// share a name, which made them look like one thing.
+export type FindingSeverity = "critical" | "high" | "medium";
 
 export interface Finding {
   rule: RuleId;
-  severity: Severity;
+  severity: FindingSeverity;
   /** 1-based line number the finding anchors to. */
   line: number;
   message: string;

@@ -37,7 +37,7 @@
         "medium",
         "low"
       ],
-      "description": "How much damage this rule prevents when it fires, ranked from critical down to low."
+      "description": "How much damage this rule prevents when it fires, ranked from critical down to low. This ranks the rule itself and is a separate vocabulary from the severity a hook puts on an individual finding, which is why the two sets of values differ."
     },
     "enforcement": {
       "type": "string",
