@@ -254,11 +254,16 @@ check_forbidden_names() {
       [ -n "$n" ] && names+=("$n")
     done
   elif [ -n "${ADG_FORBIDDEN_NAMES_FILE:-}" ]; then
-    [ -f "$ADG_FORBIDDEN_NAMES_FILE" ] || {
-      fail "$id" "$name: ADG_FORBIDDEN_NAMES_FILE '$ADG_FORBIDDEN_NAMES_FILE' does not exist"
-      return
-    }
+    # A names file that is not there means this run was asked for something it
+    # cannot do. That is exit 2, not a failed check, and never a quiet pass.
+    if [ ! -f "$ADG_FORBIDDEN_NAMES_FILE" ] || [ ! -r "$ADG_FORBIDDEN_NAMES_FILE" ]; then
+      echo "pre-publication-check: cannot read ADG_FORBIDDEN_NAMES_FILE '$ADG_FORBIDDEN_NAMES_FILE'" >&2
+      exit 2
+    fi
     while IFS= read -r line || [ -n "$line" ]; do
+      case "${line#"${line%%[![:space:]]*}"}" in
+        '#'*) continue ;;
+      esac
       IFS=',' read -r -a parts <<<"$line"
       for n in "${parts[@]}"; do
         n="${n#"${n%%[![:space:]]*}"}"
@@ -269,7 +274,7 @@ check_forbidden_names() {
   fi
 
   if [ "${#names[@]}" -eq 0 ]; then
-    skip "$id" "$name: no names configured. Set ADG_FORBIDDEN_NAMES (one per line or comma separated) or ADG_FORBIDDEN_NAMES_FILE to run this check. A skipped check makes the run incomplete, not clean."
+    skip "$id" "$name: no names configured. Set ADG_FORBIDDEN_NAMES (comma separated) or ADG_FORBIDDEN_NAMES_FILE (one per line, blank lines and lines starting with # ignored) to run this check. A skipped check makes the run incomplete, not clean."
     return
   fi
 

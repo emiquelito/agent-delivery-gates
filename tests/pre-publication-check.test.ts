@@ -255,3 +255,33 @@ test("a directory that is not a git repository exits 2", () => {
     assert.equal(r.status, 2);
   });
 });
+
+// The names file is written by a person, so it needs the things a person
+// writes: notes to themselves, and blank lines. Treating a note as a name to
+// search for turns the check into noise.
+test("a comment line in the names file is not treated as a name", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    const namesFile = join(dir, "..", "names-with-comment.txt");
+    writeFileSync(namesFile, "# a note to myself\n\nzzznotpresentzzz\n");
+    try {
+      const r = runCheck(dir, { ADG_FORBIDDEN_NAMES_FILE: namesFile });
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stdout, /checked 1 name/);
+    } finally {
+      rmSync(namesFile, { force: true });
+    }
+  });
+});
+
+// Being asked to read a file that is not there is not a failed check. It is
+// the script unable to do what it was asked, which is a different exit code
+// and must never look like either a pass or a clean fail.
+test("a names file that cannot be read exits 2", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    const r = runCheck(dir, { ADG_FORBIDDEN_NAMES_FILE: join(dir, "..", "absent-names.txt") });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /cannot read/);
+  });
+});
