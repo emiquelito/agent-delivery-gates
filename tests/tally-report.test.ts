@@ -5,13 +5,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+
 const ROOT = join(HERE, "..");
+// The real tally grows as the work goes, so a fixed number here would break
+// every time an entry is added and would teach nobody anything. Count the rows
+// in the file and check the tool agrees.
+function realTallyRowCount(): number {
+  const text = readFileSync(join(ROOT, "docs", "gate-tally.md"), "utf8");
+  return text.split("\n").filter((line: string) => /^\|\s*\d+\s*\|/.test(line)).length;
+}
+
 const CLI_PATH = join(ROOT, "scripts", "tally-report.ts");
 
 interface RunResult {
@@ -41,10 +51,10 @@ function withTempFile(content: string, fn: (path: string) => void): void {
 
 // --- the real tally -------------------------------------------------------
 
-test("the real docs/gate-tally.md reports 33 entries and exits 0", () => {
+test("the real docs/gate-tally.md reports every row and exits 0", () => {
   const result = runCli([]);
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /total entries: 33/);
+  assert.match(result.stdout, new RegExp(`total entries: ${realTallyRowCount()}`));
 });
 
 test("--check on the real tally exits 0", () => {
@@ -57,7 +67,7 @@ test("--format json on the real tally parses and carries the total", () => {
   const result = runCli(["--format", "json"]);
   assert.equal(result.status, 0);
   const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.total, 33);
+  assert.equal(parsed.total, realTallyRowCount());
 });
 
 test("running from a subfolder gives the same answer as from the root", () => {
