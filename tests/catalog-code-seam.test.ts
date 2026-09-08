@@ -38,6 +38,7 @@ function emittedIds(): string[] {
   return [
     ...idsFromUnion("report-validator.ts", "RuleId"),
     ...idsFromUnion("test-diff-separator.ts", "SignalId"),
+    ...idsFromUnion("path-allowlist.ts", "CheckId"),
   ];
 }
 

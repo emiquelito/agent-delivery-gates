@@ -41,6 +41,27 @@ test("the settings file exists and parses", () => {
   assert.ok(readSettings().hooks);
 });
 
+// hooks/ holds command line tools as well as hook entry points, and those
+// tools exit 1 on a failed report, a code no hook contract defines. Naming
+// the entry points keeps a command line tool from being wired as a hook.
+const HOOK_ENTRY_POINTS = new Set([
+  "pre-mutation-clean-tree.ts",
+  "path-confinement.ts",
+  "test-diff-post-tool-hook.ts",
+  "delivery-report-stop-hook.ts",
+]);
+
+test("every command names a hook entry point, not a command line tool", () => {
+  for (const command of allCommands(readSettings())) {
+    const match = /hooks\/([\w-]+\.ts)/.exec(command);
+    assert.ok(match, `no hook path found in command: ${command}`);
+    assert.ok(
+      HOOK_ENTRY_POINTS.has(match[1]),
+      `${match[1]} is not a hook entry point; hooks/ also holds command line tools`,
+    );
+  }
+});
+
 test("every hook file named in the settings exists on disk", () => {
   const commands = allCommands(readSettings());
   assert.ok(commands.length > 0);
@@ -90,8 +111,10 @@ test("every hook command is anchored to the project directory", () => {
 // file is that the enforcement layer is readable.
 test("the working phase default is stated in the settings, not left implied", () => {
   const commands = allCommands(readSettings()).join(" ");
-  assert.match(commands, /ADG_PHASE=/);
-  assert.match(commands, /\$\{ADG_PHASE:-build\}/);
+  // Which phase is the working default is a workflow choice. The invariant is
+  // that it is written down here and can be read, instead of depending on
+  // what nobody typed.
+  assert.match(commands, /ADG_PHASE="\$\{ADG_PHASE:-[a-z-]+\}"/);
 });
 
 // If the project directory variable is missing, node cannot find the hook and

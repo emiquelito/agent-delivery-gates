@@ -9,6 +9,15 @@
             "command": "ADG_PHASE=\"${ADG_PHASE:-build}\" node \"$CLAUDE_PROJECT_DIR/hooks/pre-mutation-clean-tree.ts\" || exit 2"
           }
         ]
+      },
+      {
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/hooks/path-confinement.ts\" || exit 2"
+          }
+        ]
       }
     ],
     "PostToolUse": [
