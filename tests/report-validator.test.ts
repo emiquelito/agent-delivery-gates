@@ -628,3 +628,22 @@ test("R1 does not fire on a finding stating that something is not handled", () =
   ].join("\n");
   assert.deepEqual(rulesFired(validateReport(report)), []);
 });
+
+// Backticks alone used to satisfy R2. A context phrase in backticks is caught
+// by the context check, so this case pins the command test on its own: prose
+// in backticks that names no command and no file.
+test("R2 rejects backticked prose that is not a command", () => {
+  const report = [
+    "# R",
+    "",
+    "The retry was validated.",
+    "Evidence: `it works fine`",
+    "",
+    "## Findings",
+    "",
+    "- Low: x",
+    "",
+    "Committed a1b2c3d, tree is clean.",
+  ].join("\n");
+  assert.ok(rulesFired(validateReport(report)).includes("evidence-not-durable"));
+});
