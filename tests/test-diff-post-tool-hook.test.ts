@@ -103,6 +103,6 @@ test("malformed JSON on stdin: exits 2", () => {
 // which exited 1 with a stack trace. A hook must only ever exit on a code it
 // defines, since an undefined code is read as a non-blocking error.
 test("a payload of literal null exits 2, not on an uncaught error", () => {
-  const r = runHook("null", {});
+  const r = runHook("null");
   assert.equal(r.status, 2);
 });
