@@ -216,13 +216,28 @@ const CONTEXT_ONLY_RE =
 // two or more words, or a word carrying a flag, a path, or a call. Wrapping a
 // phrase in backticks used to be enough, so `as shown earlier` passed.
 const BACKTICK_COMMAND_RE = /`([^`\n]+)`/;
-const COMMAND_SHAPE_RE = /^[\w./-]+(?:\s+[-\w./=:]+)+$|^[\w.-]+\([^)]*\)$|^[\w.-]+\/[\w./-]+$/;
+// Any run of words used to read as a command, so `it works fine` counted.
+// A command names a runner, carries a flag, is a path, or is a call.
+const COMMAND_RUNNER_RE =
+  /^(?:npm|npx|node|pnpm|yarn|git|bash|sh|zsh|make|cargo|go|python3?|pytest|tox|docker|deno|bun|jest|vitest|mvn|gradle|dotnet)\b/i;
+const COMMAND_FLAG_RE = /\s-{1,2}[A-Za-z]/;
+const COMMAND_PATH_RE = /^[\w.-]+\/[\w./-]+$/;
+const COMMAND_CALL_RE = /^[\w.-]+\([^)]*\)$/;
+
+function looksLikeCommand(span: string): boolean {
+  return (
+    COMMAND_RUNNER_RE.test(span) ||
+    COMMAND_FLAG_RE.test(span) ||
+    COMMAND_PATH_RE.test(span) ||
+    COMMAND_CALL_RE.test(span)
+  );
+}
 
 function hasCommandInBackticks(line: string): boolean {
   const re = new RegExp(BACKTICK_COMMAND_RE.source, "g");
   let m: RegExpExecArray | null;
   while ((m = re.exec(line)) !== null) {
-    if (COMMAND_SHAPE_RE.test(m[1].trim())) return true;
+    if (looksLikeCommand(m[1].trim())) return true;
   }
   return false;
 }
