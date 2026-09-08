@@ -17,8 +17,6 @@ created: .mcp.json
 created: .cursor/mcp.json
 created: .vscode/mcp.json
 created: .windsurf/mcp.json
-created: .adg/prose-rules.txt
-created: .adg/prose-baseline.txt (2 match(es) recorded)
 
 The prose gate stays off until a project says what it wants checked. The word
 list is a project's own, never this one's. A team writes theirs into

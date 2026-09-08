@@ -122,15 +122,18 @@ function withScratchDir(fn: (dir: string) => void): void {
   }
 }
 
-// A stub `npx` that records its arguments to a file and exits 0, so the
-// guard's shell can run to completion without the real package installed.
-function installStubNpx(dir: string): { binDir: string; callsFile: string } {
+// A stub `npx` that records its arguments to a file, so the guard's shell can
+// run to completion without the real package installed. The exit code is a
+// parameter because the guard has to pass a real scan failure back out: a
+// guard that ran the scan and swallowed its exit code would report a clean
+// build over prose that failed the rules.
+function installStubNpx(dir: string, exitCode = 0): { binDir: string; callsFile: string } {
   const binDir = join(dir, "bin");
   const callsFile = join(dir, "npx-calls.txt");
   execFileSync("mkdir", ["-p", binDir]);
   writeFileSync(
     join(binDir, "npx"),
-    `#!/usr/bin/env bash\necho "$@" >> "${callsFile}"\nexit 0\n`,
+    `#!/usr/bin/env bash\necho "$@" >> "${callsFile}"\nexit ${exitCode}\n`,
     { mode: 0o755 },
   );
   return { binDir, callsFile };
@@ -189,6 +192,24 @@ test("the CI template's prose step uses the baseline only when it exists", () =>
     assert.equal(withBaseline.status, 0);
     assert.match(readFileSync(callsNoBaseline, "utf8"), /--baseline \.adg\/prose-baseline\.txt/);
   });
+});
+
+test("the CI template's prose step fails the build when the scan it runs fails", () => {
+  for (const baseline of [false, true]) {
+    withScratchDir((dir) => {
+      execFileSync("mkdir", ["-p", join(dir, ".adg")]);
+      writeFileSync(join(dir, ".adg", "prose-rules.txt"), "\\bexample\\b\n");
+      if (baseline) writeFileSync(join(dir, ".adg", "prose-baseline.txt"), "");
+      const { binDir, callsFile } = installStubNpx(dir, 1);
+      const result = runProseScanShell(dir, binDir);
+      assert.match(readFileSync(callsFile, "utf8"), /scan-prose/, "the scan never ran");
+      assert.equal(
+        result.status,
+        1,
+        `the guard swallowed the scan's failure (baseline present: ${baseline})`,
+      );
+    });
+  }
 });
 
 test("this repository's own workflow runs the prose scan unconditionally with --require-rules", () => {
