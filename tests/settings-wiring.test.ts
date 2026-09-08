@@ -2,7 +2,7 @@
 // turns three working hooks into an enforcement layer, and a typo in a path
 // there fails silently: the hook never runs and every tool call looks fine.
 // Nothing else in this repo would notice, so these tests check the wiring
-// itself rather than the hooks it points at.
+// itself, not the hooks it points at.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -92,4 +92,14 @@ test("the working phase default is stated in the settings, not left implied", ()
   const commands = allCommands(readSettings()).join(" ");
   assert.match(commands, /ADG_PHASE=/);
   assert.match(commands, /\$\{ADG_PHASE:-build\}/);
+});
+
+// If the project directory variable is missing, node cannot find the hook and
+// exits 1. A hook contract has only 0 and 2 in it, and anything else is read
+// as a non-blocking error, so the tool call would proceed unchecked. Every
+// command turns an unexpected failure into a block.
+test("every hook command turns an unexpected failure into a block", () => {
+  for (const command of allCommands(readSettings())) {
+    assert.match(command, /\|\|\s*exit 2\s*$/);
+  }
 });

@@ -84,7 +84,10 @@ else
   if ! root=$(git rev-parse --show-toplevel 2>"$tmpd/err"); then
     die "not a git repository. git said: $(cat "$tmpd/err")"
   fi
-  if ! git -C "$root" ls-files -z -- '*.md' 'rules/*.json' '*.ts' >"$tmpd/list" 2>"$tmpd/err"; then
+  # --others --exclude-standard adds files that are not tracked yet and not
+  # ignored. Without them a new file was never checked until after its first
+  # commit, which is exactly when checking it still helps.
+  if ! git -C "$root" ls-files -z --cached --others --exclude-standard -- '*.md' 'rules/*.json' '*.ts' >"$tmpd/list" 2>"$tmpd/err"; then
     die "git ls-files failed. git said: $(cat "$tmpd/err")"
   fi
   if [ -s "$tmpd/list" ]; then

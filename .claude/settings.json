@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ADG_PHASE=\"${ADG_PHASE:-build}\" node \"$CLAUDE_PROJECT_DIR/hooks/pre-mutation-clean-tree.ts\""
+            "command": "ADG_PHASE=\"${ADG_PHASE:-build}\" node \"$CLAUDE_PROJECT_DIR/hooks/pre-mutation-clean-tree.ts\" || exit 2"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/hooks/test-diff-post-tool-hook.ts\""
+            "command": "node \"$CLAUDE_PROJECT_DIR/hooks/test-diff-post-tool-hook.ts\" || exit 2"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/hooks/delivery-report-stop-hook.ts\""
+            "command": "node \"$CLAUDE_PROJECT_DIR/hooks/delivery-report-stop-hook.ts\" || exit 2"
           }
         ]
       }
