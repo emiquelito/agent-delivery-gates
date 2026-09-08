@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "npx --no-install agent-delivery-gates cursor-hook clean-tree",
+        "type": "command",
+        "failClosed": true
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "npx --no-install agent-delivery-gates cursor-hook path-confinement",
+        "type": "command",
+        "failClosed": true
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "npx --no-install agent-delivery-gates cursor-hook test-diff",
+        "type": "command",
+        "failClosed": true
+      }
+    ],
+    "stop": [
+      {
+        "command": "npx --no-install agent-delivery-gates cursor-hook report",
+        "type": "command",
+        "failClosed": true
+      }
+    ]
+  }
+}

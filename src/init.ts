@@ -51,6 +51,7 @@ const TEMPLATE_ACTIONS: TemplateAction[] = [
 
 const PROSE_RULES_REL_PATH = join(".adg", "prose-rules.txt");
 const PROSE_BASELINE_REL_PATH = join(".adg", "prose-baseline.txt");
+const CURSOR_HOOKS_REL_PATH = join(".cursor", "hooks.json");
 
 interface WriteCtx {
   dryRun: boolean;
@@ -205,6 +206,30 @@ export function runInit(options: InitOptions): InitOutcome {
       ctx,
       action.executable,
     );
+  }
+
+  // .cursor/hooks.json is Cursor's own hook config, not this project's.
+  // Unlike every file above, it is never silently skipped-and-reported the
+  // same way: an existing one may already carry entries wiring up other
+  // tools, and overwriting it would drop them with no way back. So this
+  // never touches a file that is already there, --force included, and
+  // instead prints the template's content for a person to merge by hand.
+  const cursorHooksTemplatePath = join(packageRoot, "templates", "cursor-hooks.json");
+  if (!existsSync(cursorHooksTemplatePath)) {
+    return fail(`template '${cursorHooksTemplatePath}' is missing from the installed package`);
+  }
+  const cursorHooksContent = readFileSync(cursorHooksTemplatePath, "utf8");
+  const cursorHooksTarget = resolve(targetDir, CURSOR_HOOKS_REL_PATH);
+  if (existsSync(cursorHooksTarget)) {
+    lines.push(`exists, not written: ${CURSOR_HOOKS_REL_PATH}`);
+    lines.push("init does not edit an existing .cursor/hooks.json. Merge these entries into it yourself:");
+    lines.push(cursorHooksContent.trimEnd());
+  } else if (dryRun) {
+    lines.push(`would create: ${CURSOR_HOOKS_REL_PATH}`);
+  } else {
+    mkdirSync(dirname(cursorHooksTarget), { recursive: true });
+    writeFileSync(cursorHooksTarget, cursorHooksContent);
+    lines.push(`created: ${CURSOR_HOOKS_REL_PATH}`);
   }
 
   let proseRulesCreatedThisRun = false;
