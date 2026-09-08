@@ -13,48 +13,30 @@ $ node --test tests/*.test.js
 # fail 0
 ```
 
-Nothing failed, because nothing ran. `tests/refund.test.js` was renamed to
-`tests/refund.spec.helper.js`, the runner collects `tests/*.test.js`, and four
-tests stopped being executed while staying in the repository.
+Nothing failed, because nothing ran. A green run and a green run over nothing
+look the same from outside, and only one of them means anything. That gap is
+what this repository is about.
 
-Here is everything a reviewer sees:
+Three worked examples, each one a change that passes every other check a
+project runs:
 
-```
-$ git show --stat --format='' HEAD
- src/refund.js                                   | 2 +-
- tests/{refund.test.js => refund.spec.helper.js} | 0
- 2 files changed, 1 insertion(+), 1 deletion(-)
-```
+- **[Tests that stopped running](docs/examples/01-tests-that-stopped-running.md)**:
+  a test file renamed so the runner stops collecting it. Git reports zero
+  lines changed against that file and git is right, the suite goes green with
+  nothing left to fail, and the only trace is a test count nobody reads on a
+  passing build.
+- **[A test edited to match the bug](docs/examples/02-test-edited-to-match-a-bug.md)**:
+  a bulk discount that was never built, and a failing test made to pass by
+  changing what it expects from 108 to 120, so the assertion agrees with the
+  missing feature.
+- **[A report claiming more than it proved](docs/examples/03-report-claiming-more-than-it-proved.md)**:
+  "failure handling verified", with nothing behind it anyone can open. A
+  robustness claim has to point at a commit, a path, or a command; pointing at
+  a conversation fails.
 
-Zero lines against the test file, and git is right: not one character of it
-changed. The source file did change, so this is not a commit that only touches
-tests either.
-
-```
-$ npx agent-delivery-gates test-diff --rev HEAD
-Source diff:
-  src/refund.js  +1 -1
-
-Test diff:
-  tests/refund.spec.helper.js  +0 -0
-
-Signals (1):
-  test-file-declassified high tests/refund.spec.helper.js: a test file was renamed so its basename no longer matches a test naming convention; the file may no longer be collected by the test runner, so its tests stop running while the suite still reports success
-    tests/refund.test.js -> tests/refund.spec.helper.js
-```
-
-Exit code 1.
-
-Every other check a project runs says this commit is fine. The tests pass,
-because there are none left to fail. The lines that remain keep their
-coverage. A linter sees valid code. Continuous integration goes green. The
-only sign is the test count dropping, and nobody reads that on a passing
-build.
-
-A [second example](docs/examples/02-test-edited-to-match-a-bug.md) is quieter
-and more common: a bulk discount that was never built, and an agent that makes
-the failing test pass by editing what it expects, from 108 to 120, so the
-assertion agrees with the missing feature.
+There is also `adg mutate`, which breaks your code in known ways and reports
+the breaks no test noticed. A suite that passes is not the same as a suite
+that would have caught this.
 
 ## What this is
 
@@ -134,11 +116,11 @@ file in the project, so `init` prints the block to add to
 
 ## 📁 More examples
 
-The cart fix above is one of four scenarios, each run for real with the
-exact output it produced, collected in
-[`docs/examples/`](docs/examples/README.md). The other three: a report
-that claims more than it proved, an edit blocked mid-review because the
-tree was dirty, and adopting the gates on a project that already exists.
+The three above are worked through in full in
+[`docs/examples/`](docs/examples/README.md), each run for real with the
+exact output it produced, along with two more: an edit blocked mid-review
+because the tree was dirty, and adopting the gates on a project that
+already exists.
 
 ## 🗂️ What happened
 
@@ -185,24 +167,24 @@ hardest:
   from is what caught the overclaim, in the file most likely to be read.
 
 Running `agent-delivery-gates tally` counts entries per rule. As of this
-build: 66 entries, dated 2026-09-07 to 2026-09-08, five with no automated
+build: 77 entries, dated 2026-09-07 to 2026-09-08, five with no automated
 test behind them because someone read the situation and wrote it down
 instead.
 
 ```
-induced-failure-required: 23
-full-finding-list: 15
-cross-cutting-audit: 9
+induced-failure-required: 27
+full-finding-list: 16
+cross-cutting-audit: 12
 named-spec-files-fail-loud: 9
 filesystem-allowlist: 5
 commit-before-mutation: 4
+test-diff-reported-apart: 2
 coverage-as-gap-finder: 1
+one-fail-loud-setup-script: 1
 artifact-inputs-reproducible: 0
 builder-reviewer-separation: 0
-one-fail-loud-setup-script: 0
 red-before-green: 0
 standing-adversarial-self-review: 0
-test-diff-reported-apart: 0
 ```
 
 A zero does not mean a rule was unnecessary. It means the work stayed
