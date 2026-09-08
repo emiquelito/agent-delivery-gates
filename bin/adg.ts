@@ -48,6 +48,8 @@ Commands:
   init [options]           write starter files into a project
   validate-report [...]    check a delivery report's claims
   test-diff [...]          separate a diff's source half from its test half
+  mutate [...]             break the code in known ways and report what
+                           the test suite failed to notice
   tally [...]              read or check the gate tally log
   scan-prose [...]         scan text against configured prose rules
   check                    run the pre-publication checks
@@ -233,6 +235,9 @@ function main(): void {
       break;
     case "test-diff":
       nodeTool("hooks/test-diff-separator.ts", rest);
+      break;
+    case "mutate":
+      nodeTool("hooks/mutate.ts", rest);
       break;
     case "tally":
       nodeTool("scripts/tally-report.ts", rest);

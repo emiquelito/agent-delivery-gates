@@ -19,6 +19,7 @@ pre-commit hook.
 ```
 agent-delivery-gates validate-report [--report PATH] [--prior PATH] [--format text|json]
 agent-delivery-gates test-diff [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
+agent-delivery-gates mutate [--rev REV] [--range A..B] [--staged] [--paths PATH...] [--command CMD] [--max N] [--timeout SECONDS] [--format text|json]
 agent-delivery-gates scan-prose [FILE...] [--rules PATH] [--require-rules] [--baseline PATH | --write-baseline PATH]
 agent-delivery-gates tally [--tally PATH] [--format text|json] [--check]
 agent-delivery-gates check
@@ -47,6 +48,24 @@ under test; this is how that move gets caught.
 Exit codes: `0` no test file changed, or none of the changed files carry
 a signal; `1` at least one signal was found; `2` could not run as asked,
 including a git failure, so a broken git call never reads as a pass.
+
+### mutate
+
+Breaks the code in a fixed set of known ways, one break at a time, runs
+the test command after each one, and reports the breaks the command did
+not notice. A break that nothing noticed means no test is holding that
+line: the suite runs the code without proving it. The operators are
+comparison boundaries, equality, boolean connectives, boolean literals,
+and addition against subtraction.
+
+It refuses to start on a dirty working tree, restores every file it
+writes to, and checks the tree is clean again before it finishes; test
+files are never mutated. A baseline run comes first, and a suite that is
+already red is exit 2, not a result.
+
+Exit codes: `0` no mutation survived; `1` at least one survived; `2`
+could not run as asked, including a dirty tree, a failing baseline, no
+command to run, or a selector that named nothing to mutate.
 
 ### scan-prose
 

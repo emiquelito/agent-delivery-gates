@@ -504,7 +504,7 @@ const COMMENT_LINE_RE = /^\s*(?:\/\/|#(?!\[)|\*|\/\*|--)/;
  * removes it from the run, so a commented copy must not count as the
  * assertion being added back. A comment naming a skip is not a skip either.
  */
-function isCommentLine(line: string): boolean {
+export function isCommentLine(line: string): boolean {
   return COMMENT_LINE_RE.test(line);
 }
 
@@ -522,7 +522,7 @@ const IMPORT_LINE_RE = /^\s*(?:import\b|from\s+\S+\s+import\b|use\s+[A-Za-z_])|\
  * IMPORT_LINE_RE covers. Never itself an assertion, a test case opener, or
  * a skip, whatever word it happens to contain.
  */
-function isImportLine(line: string): boolean {
+export function isImportLine(line: string): boolean {
   return IMPORT_LINE_RE.test(line);
 }
 
