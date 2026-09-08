@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Pre-commit hook installed by `agent-delivery-gates init`.
+#
+# Not run automatically until enabled with:
+#
+#   git config core.hooksPath .githooks
+#
+# Runs whatever of these four checks the project has set up: the
+# typecheck, the test suite, the prose scan, and the gate tally check. A
+# check with nothing to run against is skipped, and the skip is printed
+# on its own line so it is never mistaken for a pass. A fresh project has
+# no test suite yet, and that is fine; this hook says so and moves on.
+#
+# Set ADG_SKIP_PRECOMMIT=1 to skip this hook for one commit. The skip is
+# never quiet.
+set -euo pipefail
+
+if [ -n "${ADG_SKIP_PRECOMMIT:-}" ]; then
+  echo "=============================================================="
+  echo " pre-commit: SKIPPED because ADG_SKIP_PRECOMMIT is set."
+  echo " None of the checks below ran for this commit. Unset"
+  echo " ADG_SKIP_PRECOMMIT to run them again next time."
+  echo "=============================================================="
+  exit 0
+fi
+
+# Strip every GIT_* override before running git: a leftover GIT_DIR or
+# GIT_WORK_TREE would point git at a different tree than the one being
+# committed.
+while IFS='=' read -r -d '' entry; do
+  name=${entry%%=*}
+  case "$name" in
+    GIT_*) unset "$name" ;;
+  esac
+done < <(env -0)
+
+if ! ROOT=$(git rev-parse --show-toplevel 2>&1); then
+  echo "pre-commit: not a git repository. git said: $ROOT" >&2
+  exit 2
+fi
+cd "$ROOT"
+
+# Output is held back and printed only when a step fails, so a good commit
+# stays short and a hook that stays quiet is one people keep running.
+LOG=$(mktemp)
+trap 'rm -f "$LOG"' EXIT
+
+fail_step() {
+  echo "==============================================================" >&2
+  echo " pre-commit: FAILED at: $1" >&2
+  echo " Run it alone with:" >&2
+  echo "   $2" >&2
+  echo "==============================================================" >&2
+  cat "$LOG" >&2
+  exit 1
+}
+
+run_step() {
+  local label=$1 command=$2
+  shift 2
+  printf 'pre-commit: %s\n' "$label"
+  if ! "$@" >"$LOG" 2>&1; then
+    fail_step "$label" "$command"
+  fi
+}
+
+skip_step() {
+  printf 'pre-commit: %s -- skipped (%s)\n' "$1" "$2"
+}
+
+if [ -f "$ROOT/tsconfig.json" ]; then
+  run_step "typecheck" "npx tsc --noEmit" npx tsc --noEmit
+else
+  skip_step "typecheck" "no tsconfig.json found"
+fi
+
+has_test_script=0
+if [ -f "$ROOT/package.json" ]; then
+  if node -e '
+    const pkg = require(process.argv[1]);
+    const test = pkg && pkg.scripts && pkg.scripts.test;
+    process.exit(test && !/no test specified/.test(test) ? 0 : 1);
+  ' "$ROOT/package.json" 2>/dev/null; then
+    has_test_script=1
+  fi
+fi
+if [ "$has_test_script" -eq 1 ]; then
+  run_step "tests" "npm test" npm test
+else
+  skip_step "tests" "no test suite configured yet"
+fi
+
+if [ -f "$ROOT/.adg/prose-rules.txt" ]; then
+  run_step "prose scan" "npx agent-delivery-gates scan-prose --require-rules" \
+    npx agent-delivery-gates scan-prose --require-rules
+else
+  skip_step "prose scan" "no .adg/prose-rules.txt; run init --prose-preset to turn this on"
+fi
+
+if [ -f "$ROOT/docs/gate-tally.md" ]; then
+  run_step "tally check" "npx agent-delivery-gates tally --check" \
+    npx agent-delivery-gates tally --check
+else
+  skip_step "tally check" "no docs/gate-tally.md"
+fi
+
+echo "pre-commit: all checks that could run, passed"
+exit 0

@@ -1,16 +1,51 @@
 {
   "name": "agent-delivery-gates",
   "version": "0.1.0",
-  "private": true,
+  "description": "Delivery gates that check what an AI coding agent claims about its own work, not only the code it wrote.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emiquelito/agent-delivery-gates.git"
+  },
+  "homepage": "https://github.com/emiquelito/agent-delivery-gates#readme",
+  "keywords": [
+    "ai-agent",
+    "delivery-gate",
+    "code-review",
+    "git-hooks",
+    "cli",
+    "prose-lint",
+    "test-diff"
+  ],
   "type": "module",
   "engines": {
     "node": ">=22.18"
   },
+  "bin": {
+    "agent-delivery-gates": "dist/bin/adg.js",
+    "adg": "dist/bin/adg.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "hooks",
+    "scripts",
+    "src",
+    "presets",
+    "rules",
+    "templates",
+    ".githooks",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "scan": "scripts/scan-prose.sh",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/bin/adg.js",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
     "verify": "tsc --noEmit && node --test tests/*.test.ts && scripts/scan-prose.sh && node scripts/tally-report.ts --check"
   },
   "devDependencies": {
