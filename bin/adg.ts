@@ -26,6 +26,7 @@
 // either way.
 
 import process from "node:process";
+import { findPackageRoot } from "../src/package-root.ts";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -37,19 +38,8 @@ import { runInit } from "../src/init.ts";
  * `dirname` calls because this same source runs from two different
  * depths: bin/adg.ts directly from a checkout, and dist/bin/adg.js one
  * level deeper once built. */
-function findPackageRoot(startDir: string): string {
-  let dir = startDir;
-  for (;;) {
-    if (existsSync(join(dir, "package.json"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) {
-      throw new Error(`could not find this package's own package.json above '${startDir}'`);
-    }
-    dir = parent;
-  }
-}
 
-const PACKAGE_ROOT = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
+const PACKAGE_ROOT = findPackageRoot(import.meta.url);
 
 const USAGE = `Usage: agent-delivery-gates <command> [options]
        adg <command> [options]
@@ -76,7 +66,7 @@ wraps and exits with that tool's own exit code. Run any command with
 --help for its own usage.
 `;
 
-const INIT_USAGE = `Usage: agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--dir PATH]
+const INIT_USAGE = `Usage: agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--baseline] [--dir PATH]
 
 Writes starter files into a project: a git pre-commit hook, AGENTS.md,
 and an empty gate tally log. It only ever creates a file that does not
@@ -88,6 +78,10 @@ exist yet.
                          (from this package's presets/ directory); without
                          this flag, no prose rules file is written and the
                          prose gate stays off
+  --baseline            also record every prose match the project already
+                         has, to .adg/prose-baseline.txt, so turning the
+                         gate on does not fail on everything it already
+                         had; only does anything alongside --prose-preset
   --dir PATH            target this directory instead of the current one
   --help                print this message and exit 0
 
@@ -137,12 +131,13 @@ interface ParsedInitArgs {
   dryRun: boolean;
   force: boolean;
   prosePreset?: string;
+  baseline: boolean;
   dir?: string;
   help: boolean;
 }
 
 function parseInitArgs(argv: string[]): ParsedInitArgs {
-  const result: ParsedInitArgs = { dryRun: false, force: false, help: false };
+  const result: ParsedInitArgs = { dryRun: false, force: false, baseline: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
@@ -155,6 +150,9 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
         break;
       case "--force":
         result.force = true;
+        break;
+      case "--baseline":
+        result.baseline = true;
         break;
       case "--prose-preset":
         result.prosePreset = argv[++i];
@@ -193,6 +191,7 @@ function runInitCommand(argv: string[]): never {
     dryRun: args.dryRun,
     force: args.force,
     prosePreset: args.prosePreset,
+    baseline: args.baseline,
   });
 
   for (const line of outcome.lines) {

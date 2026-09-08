@@ -219,7 +219,9 @@ export function parseTally(text: string, options: ParseOptions): TallyResult {
   }
 
   if (entries.length === 0) {
-    problems.push({ line: headerIndex + 1, message: "the table has no entries" });
+  // An empty table is a valid starting state: a project that has adopted the
+  // gates and has not had one reject anything yet. Only a file with no table
+  // at all is an error, and that is handled where the table is located.
   } else {
     // Gap-free sequence starting at one, checked over well-formed numbers
     // only: a malformed number already produced its own problem above.

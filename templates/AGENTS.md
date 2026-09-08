@@ -19,10 +19,10 @@ pre-commit hook.
 ```
 agent-delivery-gates validate-report [--report PATH] [--prior PATH] [--format text|json]
 agent-delivery-gates test-diff [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
-agent-delivery-gates scan-prose [FILE...] [--rules PATH] [--require-rules]
+agent-delivery-gates scan-prose [FILE...] [--rules PATH] [--require-rules] [--baseline PATH | --write-baseline PATH]
 agent-delivery-gates tally [--tally PATH] [--format text|json] [--check]
 agent-delivery-gates check
-agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--dir PATH]
+agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--baseline] [--dir PATH]
 ```
 
 ### validate-report
@@ -57,6 +57,16 @@ NAME`, to turn it on.
 
 Exit codes: `0` clean, or nothing configured; `1` a banned pattern was
 found; `2` the scan could not run: a missing rules file or a bad path.
+
+### Turning the prose scan on for an existing project
+
+An existing project usually already has text the rules would catch, and
+a scan that fails on everything already there gets turned off before it
+catches anything new. Turn the rules on with `init --prose-preset NAME`,
+then add `--baseline` to record every match the project already has, to
+`.adg/prose-baseline.txt`. Once the baseline is in place, the scan fails
+only on a new match; fixing an old one and deleting its recorded line
+lets the baseline shrink over time.
 
 ### tally
 

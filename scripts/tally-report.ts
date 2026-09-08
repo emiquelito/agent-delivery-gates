@@ -21,7 +21,7 @@
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { findPackageRoot } from "../src/package-root.ts";
 import { dirname, join, resolve } from "node:path";
 import { parseTally, type TallySummary } from "../src/tally.ts";
 
@@ -110,7 +110,7 @@ function findRepoRoot(): string {
  * check unusable anywhere but here.
  */
 function readRuleIds(repoRoot: string): Set<string> {
-  const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const packageRoot = findPackageRoot(import.meta.url);
   const candidates = [join(repoRoot, "rules"), join(packageRoot, "rules")];
   const rulesDir = candidates.find((dir) => existsSync(dir));
   if (rulesDir === undefined) {

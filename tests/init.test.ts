@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -258,4 +258,103 @@ test("a missing template exits 2, not a partial setup", () => {
       rmSync(fakePackageRoot, { recursive: true, force: true });
     }
   });
+});
+
+// --- --baseline: a starting point so an existing project can adopt the ------
+// prose gate without failing on everything it already has
+
+function initGitRepo(dir: string): void {
+  const git = (args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git(["init", "-q"]);
+  git(["config", "user.email", "test@example.invalid"]);
+  git(["config", "user.name", "Test"]);
+}
+
+test("init --baseline without --prose-preset exits 2 with a message", () => {
+  withTempDir((dir) => {
+    const result = runInitCli(["--dir", dir, "--baseline"]);
+    assert.equal(result.status, 2);
+    assert.match(result.stdout + result.stderr, /--prose-preset/);
+    for (const rel of CREATED_FILES) {
+      assert.equal(existsSync(join(dir, rel)), false);
+    }
+    assert.equal(existsSync(join(dir, ".adg", "prose-rules.txt")), false);
+  });
+});
+
+test("--prose-preset house-style --baseline in a project with legacy violations writes both files, and a commit-time scan then passes", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    // A legacy violation this project already has, using the house-style
+    // preset's own banned word so the fixture stays real.
+    const legacyWord = "gen" + "uinely";
+    writeFileSync(join(dir, "notes.md"), `this file has always ${legacyWord} said that\n`);
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
+
+    const result = runInitCli(["--dir", dir, "--prose-preset", "house-style", "--baseline"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+
+    const rulesPath = join(dir, ".adg", "prose-rules.txt");
+    const baselinePath = join(dir, ".adg", "prose-baseline.txt");
+    assert.ok(existsSync(rulesPath));
+    assert.ok(existsSync(baselinePath));
+    assert.match(readFileSync(baselinePath, "utf8"), /notes\.md/);
+    assert.match(result.stdout, /created: .*prose-baseline\.txt/);
+
+    // The same legacy violation, scanned with the baseline in place, no
+    // longer fails: this is what makes the commit-time scan pass.
+    const scanResult = spawnSync(BIN, ["scan-prose", "--rules", rulesPath, "--baseline", baselinePath], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    assert.equal(scanResult.status, 0, scanResult.stdout + scanResult.stderr);
+
+    // A brand-new violation still fails, baseline or not.
+    writeFileSync(join(dir, "new.md"), `this is a ${legacyWord} new problem\n`);
+    const scanWithNew = spawnSync(BIN, ["scan-prose", "--rules", rulesPath, "--baseline", baselinePath], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    assert.equal(scanWithNew.status, 1);
+    assert.match(scanWithNew.stdout, /new\.md/);
+  });
+});
+
+test("--baseline: a bad preset name exits 2 and writes neither the rules file nor a baseline", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    const result = runInitCli(["--dir", dir, "--prose-preset", "no-such-preset", "--baseline"]);
+    assert.equal(result.status, 2);
+    assert.equal(existsSync(join(dir, ".adg", "prose-rules.txt")), false);
+    assert.equal(existsSync(join(dir, ".adg", "prose-baseline.txt")), false);
+  });
+});
+
+test("--prose-preset with --baseline but no git repository exits 2 and leaves no half-finished rules file", () => {
+  withTempDir((dir) => {
+    // Not a git repository: the default-mode scan the baseline write runs
+    // cannot list files at all, so the whole combination must fail instead
+    // of leaving a rules file with no baseline behind it.
+    const result = runInitCli(["--dir", dir, "--prose-preset", "house-style", "--baseline"]);
+    assert.equal(result.status, 2);
+    assert.equal(
+      existsSync(join(dir, ".adg", "prose-rules.txt")),
+      false,
+      "a rules file with no baseline behind it fails every commit",
+    );
+  });
+});
+
+test("pre-commit template passes --baseline when the baseline file exists, and not when it does not", () => {
+  const content = readFileSync(join(REPO_ROOT, "templates", "pre-commit"), "utf8");
+  // Branches on the baseline file's presence.
+  assert.match(content, /if \[ -f "\$ROOT\/\.adg\/prose-baseline\.txt" \]/);
+  // One branch passes --baseline ...
+  assert.match(content, /agent-delivery-gates scan-prose --require-rules --baseline \.adg\/prose-baseline\.txt/);
+  // ... and the other still runs the scan, just without the flag: the step
+  // must not be silently skipped when there is no baseline yet.
+  const withoutBaseline = content.match(
+    /agent-delivery-gates scan-prose --require-rules(?! --baseline)/g,
+  );
+  assert.ok(withoutBaseline && withoutBaseline.length >= 2, "expected the no-baseline branch to still run the scan");
 });

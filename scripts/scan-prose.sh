@@ -12,6 +12,28 @@
 #                                     usual lookup
 #   scan-prose.sh --require-rules    treat "no rules configured" as exit 2
 #                                     instead of exit 0
+#   scan-prose.sh --write-baseline PATH ...
+#                                     run the scan, record every current
+#                                     match at PATH, print the count, and
+#                                     exit 0 regardless of what was found
+#   scan-prose.sh --baseline PATH ... run the scan, forgive a match already
+#                                     recorded at PATH, and fail only on a
+#                                     match the baseline does not hold
+#
+# Baseline files:
+#   A baseline lets an existing project turn the scan on without failing on
+#   every match it already has. It is keyed on the file path and the
+#   trimmed text of the matching line, never on the line number: inserting
+#   a line above a recorded match must not invalidate it. The same text
+#   moved to a different line in the same file is still forgiven. The same
+#   text in a DIFFERENT file is not forgiven; a moved or renamed file
+#   re-flags and needs its own baseline entry. Each entry also records how
+#   many times that exact text matched, so a fourth copy of a line recorded
+#   three times is a new, unforgiven match.
+#
+#   --write-baseline and --baseline are mutually exclusive; passing both is
+#   a bad argument and exits 2. A --baseline path that is missing or
+#   unreadable is exit 2, never a silent run without one.
 #
 # Rules files:
 #   A rules file is plain text, one entry per line.
@@ -54,6 +76,8 @@ die() {
 
 rules_path_arg=""
 require_rules=0
+write_baseline_path=""
+baseline_path_arg=""
 args=()
 
 while [ "$#" -gt 0 ]; do
@@ -71,6 +95,24 @@ while [ "$#" -gt 0 ]; do
       require_rules=1
       shift
       ;;
+    --write-baseline)
+      [ "$#" -ge 2 ] || die "--write-baseline requires a path argument"
+      write_baseline_path=$2
+      shift 2
+      ;;
+    --write-baseline=*)
+      write_baseline_path=${1#--write-baseline=}
+      shift
+      ;;
+    --baseline)
+      [ "$#" -ge 2 ] || die "--baseline requires a path argument"
+      baseline_path_arg=$2
+      shift 2
+      ;;
+    --baseline=*)
+      baseline_path_arg=${1#--baseline=}
+      shift
+      ;;
     --)
       shift
       args+=("$@")
@@ -82,6 +124,83 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# --- baseline setup ------------------------------------------------------------
+
+if [ -n "$write_baseline_path" ] && [ -n "$baseline_path_arg" ]; then
+  die "--write-baseline and --baseline cannot be used together"
+fi
+
+# current_count tallies, over the whole run, how many times each (file,
+# trimmed line text) key has been matched so far. baseline_count holds the
+# same tally as loaded from an existing baseline file. Both are keyed on
+# the file path and the trimmed matching text joined by a byte that never
+# appears in either half, so a match on occurrence N of a key is forgiven
+# exactly when N does not exceed what the baseline recorded for it.
+declare -A current_count=()
+declare -A baseline_count=()
+BASELINE_SEP=$'\x1f'
+
+# Strips leading and trailing whitespace, keeping everything in between
+# (including internal tabs) exactly as matched. Used both when building a
+# key to write to the baseline and when reading one back, so the two stay
+# comparable.
+trim() {
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  s=${s%"${s##*[![:space:]]}"}
+  printf '%s' "$s"
+}
+
+# Writes current_count out to PATH as a baseline file: one header comment
+# explaining the format, then one sorted "<count><TAB><file><TAB><text>"
+# line per key. Sorted so the file diffs cleanly as it shrinks over time.
+write_baseline_file() {
+  local path=$1 tmp key file text
+  tmp=$(mktemp) || die "could not create a temporary file"
+  {
+    echo "# Prose scan baseline for scripts/scan-prose.sh."
+    echo "#"
+    echo "# Every match already present in this project when the baseline was"
+    echo "# recorded, so turning the prose gate on does not fail on everything"
+    echo "# the project already had. Meant to shrink over time: fix a match and"
+    echo "# delete its line here, and the fix is checked in as the reason that"
+    echo "# match stops being forgiven. Deleting a line makes that violation"
+    echo "# fail again the next time it is seen."
+    echo "#"
+    echo "# Keyed on the file path and the trimmed text of the matching line,"
+    echo "# never on the line number, so inserting a line above a recorded"
+    echo "# match does not invalidate it. The same text in a DIFFERENT file is"
+    echo "# a different key and is not forgiven; a moved or renamed file"
+    echo "# re-flags and needs its own entry here."
+    echo "#"
+    echo "# Format: <count><TAB><file><TAB><trimmed line text>"
+    if [ "${#current_count[@]}" -gt 0 ]; then
+      for key in "${!current_count[@]}"; do
+        file=${key%%"$BASELINE_SEP"*}
+        text=${key#*"$BASELINE_SEP"}
+        printf '%s\t%s\t%s\n' "${current_count[$key]}" "$file" "$text"
+      done | LC_ALL=C sort -t "$(printf '\t')" -k2,2 -k3,3
+    fi
+  } >"$tmp" || die "could not write baseline to '$path'"
+  mv -f -- "$tmp" "$path" || die "could not write baseline to '$path'"
+}
+
+if [ -n "$baseline_path_arg" ]; then
+  [ -f "$baseline_path_arg" ] || die "baseline file '$baseline_path_arg' does not exist"
+  [ -r "$baseline_path_arg" ] || die "baseline file '$baseline_path_arg' is not readable"
+  baseline_line=""
+  while IFS= read -r baseline_line || [ -n "$baseline_line" ]; do
+    [[ "$baseline_line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$baseline_line" =~ ^[[:space:]]*# ]] && continue
+    b_count=${baseline_line%%$'\t'*}
+    b_rest=${baseline_line#*$'\t'}
+    b_file=${b_rest%%$'\t'*}
+    b_text=${b_rest#*$'\t'}
+    [[ "$b_count" =~ ^[0-9]+$ ]] || die "baseline file '$baseline_path_arg' has a malformed entry: '$baseline_line'"
+    baseline_count["$b_file$BASELINE_SEP$b_text"]=$b_count
+  done < "$baseline_path_arg"
+fi
 
 # --- rules loading ------------------------------------------------------------
 
@@ -188,6 +307,11 @@ if [ "${#fragments[@]}" -eq 0 ] && [ "${#prose_only[@]}" -eq 0 ]; then
   if [ "$require_rules" -eq 1 ]; then
     die "no prose rules are configured; nothing was checked"
   fi
+  if [ -n "$write_baseline_path" ]; then
+    write_baseline_file "$write_baseline_path"
+    echo "scan-prose: wrote 0 match(es) to $write_baseline_path"
+    exit 0
+  fi
   echo "scan-prose: no prose rules are configured; nothing was checked"
   exit 0
 fi
@@ -260,6 +384,9 @@ fi
 
 matched_count=0
 had_match=0
+total_matches=0
+forgiven_matches=0
+new_matches=0
 
 for f in "${files[@]}"; do
   pat=$(pattern_for "$f")
@@ -277,17 +404,68 @@ for f in "${files[@]}"; do
   set -e
 
   case "$status" in
-    0)
-      matched_count=$((matched_count + 1))
-      had_match=1
-      printf '%s\n' "$output"
-      ;;
-    1) ;;
+    0) ;;
+    1) continue ;;
     *) die "error reading '$f'" ;;
   esac
+
+  file_had_new=0
+  while IFS= read -r matchline; do
+    [ -z "$matchline" ] && continue
+    rest=${matchline#*:}
+    content=${rest#*:}
+    text=$(trim "$content")
+    key="$f$BASELINE_SEP$text"
+
+    current_count["$key"]=$(( ${current_count["$key"]:-0} + 1 ))
+    occurrence=${current_count["$key"]}
+    total_matches=$((total_matches + 1))
+
+    if [ -n "$write_baseline_path" ]; then
+      # Recording only: nothing here ever fails.
+      continue
+    fi
+
+    if [ -n "$baseline_path_arg" ]; then
+      recorded=${baseline_count["$key"]:-0}
+      if [ "$occurrence" -le "$recorded" ]; then
+        forgiven_matches=$((forgiven_matches + 1))
+      else
+        new_matches=$((new_matches + 1))
+        file_had_new=1
+        printf '%s\n' "$matchline"
+      fi
+    else
+      new_matches=$((new_matches + 1))
+      file_had_new=1
+      printf '%s\n' "$matchline"
+    fi
+  done <<<"$output"
+
+  if [ "$file_had_new" -eq 1 ]; then
+    matched_count=$((matched_count + 1))
+    had_match=1
+  fi
 done
 
+if [ -n "$write_baseline_path" ]; then
+  write_baseline_file "$write_baseline_path"
+  echo "scan-prose: wrote $total_matches match(es) to $write_baseline_path"
+  exit 0
+fi
+
 echo "scan-prose: scanned ${#files[@]} file(s), $matched_count contained matches"
+
+if [ -n "$baseline_path_arg" ]; then
+  not_seen=0
+  for key in "${!baseline_count[@]}"; do
+    if [ "${current_count["$key"]:-0}" -eq 0 ]; then
+      not_seen=$((not_seen + 1))
+    fi
+  done
+  echo "scan-prose: baseline $baseline_path_arg: $total_matches found, $forgiven_matches forgiven, $new_matches new"
+  echo "scan-prose: $not_seen baseline entries not seen this run (fixed; safe to delete from $baseline_path_arg)"
+fi
 
 [ "$had_match" -eq 1 ] && exit 1
 exit 0

@@ -9,8 +9,9 @@
 // touches .claude/settings.json at all; the lines a person would add
 // there are printed, never written.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface InitOptions {
   /** Directory init writes into. Must already be an absolute path. */
@@ -23,6 +24,11 @@ export interface InitOptions {
    * means no prose rules file is written at all, which is the default:
    * the prose gate stays off until a preset is named. */
   prosePreset?: string;
+  /** Records the project's current prose matches to .adg/prose-baseline.txt
+   * so an existing project can turn the prose gate on without failing on
+   * everything it already has. Only does anything alongside prosePreset;
+   * on its own it is an argument error. */
+  baseline?: boolean;
 }
 
 export interface InitOutcome {
@@ -44,6 +50,7 @@ const TEMPLATE_ACTIONS: TemplateAction[] = [
 ];
 
 const PROSE_RULES_REL_PATH = join(".adg", "prose-rules.txt");
+const PROSE_BASELINE_REL_PATH = join(".adg", "prose-baseline.txt");
 
 interface WriteCtx {
   dryRun: boolean;
@@ -148,7 +155,11 @@ function suggestedNpmScripts(): string[] {
 }
 
 export function runInit(options: InitOptions): InitOutcome {
-  const { targetDir, packageRoot, dryRun, force, prosePreset } = options;
+  const { targetDir, packageRoot, dryRun, force, prosePreset, baseline } = options;
+
+  if (baseline === true && prosePreset === undefined) {
+    return fail("--baseline only makes sense together with --prose-preset; on its own there are no rules to baseline against");
+  }
 
   let stat;
   try {
@@ -196,9 +207,51 @@ export function runInit(options: InitOptions): InitOutcome {
     );
   }
 
+  let proseRulesCreatedThisRun = false;
   if (prosePresetPath !== undefined) {
+    const rulesTarget = resolve(targetDir, PROSE_RULES_REL_PATH);
+    const existedBefore = existsSync(rulesTarget);
     const content = `include: ${prosePresetPath}\n`;
     writeOrPlan(targetDir, PROSE_RULES_REL_PATH, () => content, ctx);
+    // Only a fresh file is safe to roll back on failure below; an existing
+    // file --force overwrote already held content that was not ours to
+    // discard a second time.
+    proseRulesCreatedThisRun = !dryRun && !existedBefore;
+  }
+
+  if (prosePresetPath !== undefined && baseline === true) {
+    if (dryRun) {
+      lines.push(`would create: ${PROSE_BASELINE_REL_PATH}`);
+    } else {
+      const scanScript = join(packageRoot, "scripts", "scan-prose.sh");
+      const rulesTarget = resolve(targetDir, PROSE_RULES_REL_PATH);
+      const baselineTarget = resolve(targetDir, PROSE_BASELINE_REL_PATH);
+      const result = spawnSync(
+        "bash",
+        [scanScript, "--rules", rulesTarget, "--write-baseline", baselineTarget],
+        { cwd: targetDir, encoding: "utf8" },
+      );
+      // --write-baseline never fails on what it finds; a non-zero exit here
+      // means the scan itself could not run (e.g. not a git repository). A
+      // rules file with no baseline behind it would fail every commit, so
+      // roll back a rules file this run wrote before reporting the error.
+      if (result.error || result.status !== 0) {
+        if (proseRulesCreatedThisRun) {
+          try {
+            unlinkSync(rulesTarget);
+          } catch {
+            // best effort: the failure below is reported regardless
+          }
+        }
+        const detail = result.error
+          ? result.error.message
+          : (result.stderr || result.stdout || "").trim() || `exit code ${result.status}`;
+        return fail(`could not write the prose baseline (${detail})`);
+      }
+      const recorded = /wrote (\d+) match/.exec(result.stdout ?? "");
+      const countNote = recorded ? ` (${recorded[1]} match(es) recorded)` : "";
+      lines.push(`created: ${PROSE_BASELINE_REL_PATH}${countNote}`);
+    }
   }
 
   lines.push("");

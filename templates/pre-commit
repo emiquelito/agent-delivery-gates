@@ -101,8 +101,14 @@ else
 fi
 
 if [ -f "$ROOT/.adg/prose-rules.txt" ]; then
-  run_step "prose scan" "npx --no-install agent-delivery-gates scan-prose --require-rules" \
-    npx --no-install agent-delivery-gates scan-prose --require-rules
+  if [ -f "$ROOT/.adg/prose-baseline.txt" ]; then
+    run_step "prose scan" \
+      "npx --no-install agent-delivery-gates scan-prose --require-rules --baseline .adg/prose-baseline.txt" \
+      npx --no-install agent-delivery-gates scan-prose --require-rules --baseline .adg/prose-baseline.txt
+  else
+    run_step "prose scan" "npx --no-install agent-delivery-gates scan-prose --require-rules" \
+      npx --no-install agent-delivery-gates scan-prose --require-rules
+  fi
 else
   skip_step "prose scan" "no .adg/prose-rules.txt; run init --prose-preset to turn this on"
 fi

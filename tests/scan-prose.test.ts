@@ -385,3 +385,129 @@ test("a rules file named by --rules that does not exist exits 2", () => {
     assert.equal(r.status, 2);
   });
 });
+
+// --- baselines: an existing project turns the gate on without failing on -----
+// everything it already has
+
+function widgetRules(dir: string): string {
+  return fileWith(dir, "widget-rules.txt", "\\bwidget\\b\n");
+}
+
+test("--write-baseline records the current matches, exits 0, and reports the count", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\nanother widget there\n");
+    const base = join(dir, "base.txt");
+    const r = scan(["--rules", rules, "--write-baseline", base, p]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /wrote 2 match/);
+  });
+});
+
+test("scanning again with that baseline exits 0", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\nanother widget there\n");
+    const base = join(dir, "base.txt");
+    assert.equal(scan(["--rules", rules, "--write-baseline", base, p]).status, 0);
+    const r = scan(["--rules", rules, "--baseline", base, p]);
+    assert.equal(r.status, 0, r.stderr);
+  });
+});
+
+test("a newly added violation with the baseline in place exits 1 and names only the new one", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\n");
+    const base = join(dir, "base.txt");
+    assert.equal(scan(["--rules", rules, "--write-baseline", base, p]).status, 0);
+    writeFileSync(p, "a widget here\na second widget shows up\n");
+    const r = scan(["--rules", rules, "--baseline", base, p]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /second widget/);
+    // Only the new line is named, once.
+    const occurrences = (r.stdout.match(/p\.md:/g) || []).length;
+    assert.equal(occurrences, 1);
+  });
+});
+
+test("fixing a recorded violation still exits 0, and reports one baseline entry not seen", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\n");
+    const base = join(dir, "base.txt");
+    assert.equal(scan(["--rules", rules, "--write-baseline", base, p]).status, 0);
+    writeFileSync(p, "nothing wrong here\n");
+    const r = scan(["--rules", rules, "--baseline", base, p]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /1 baseline entries not seen/);
+  });
+});
+
+test("the same offending text moved to a different line in the same file is still forgiven", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "line one\na widget here\n");
+    const base = join(dir, "base.txt");
+    assert.equal(scan(["--rules", rules, "--write-baseline", base, p]).status, 0);
+    writeFileSync(p, "inserted at the top\nline one\na widget here\n");
+    const r = scan(["--rules", rules, "--baseline", base, p]);
+    assert.equal(r.status, 0, r.stderr);
+  });
+});
+
+test("a fourth copy of a line recorded three times fails", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\na widget here\na widget here\n");
+    const base = join(dir, "base.txt");
+    assert.equal(scan(["--rules", rules, "--write-baseline", base, p]).status, 0);
+    writeFileSync(p, "a widget here\na widget here\na widget here\na widget here\n");
+    const r = scan(["--rules", rules, "--baseline", base, p]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /1 new/);
+  });
+});
+
+test("the same text in a different file fails", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\n");
+    const other = fileWith(dir, "other.md", "a widget here\n");
+    const base = join(dir, "base.txt");
+    assert.equal(scan(["--rules", rules, "--write-baseline", base, p]).status, 0);
+    const r = scan(["--rules", rules, "--baseline", base, other]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /other\.md/);
+  });
+});
+
+test("--baseline naming a file that does not exist exits 2", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\n");
+    const r = scan(["--rules", rules, "--baseline", join(dir, "absent-base.txt"), p]);
+    assert.equal(r.status, 2);
+  });
+});
+
+test("--baseline and --write-baseline together exit 2", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\n");
+    const base = fileWith(dir, "base.txt", "");
+    const r = scan(["--rules", rules, "--baseline", base, "--write-baseline", join(dir, "other-base.txt"), p]);
+    assert.equal(r.status, 2);
+  });
+});
+
+test("an empty baseline file behaves as no forgiveness at all", () => {
+  withTempDir((dir) => {
+    const rules = widgetRules(dir);
+    const p = fileWith(dir, "p.md", "a widget here\n");
+    const base = fileWith(dir, "base.txt", "");
+    const r = scan(["--rules", rules, "--baseline", base, p]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /p\.md/);
+  });
+});

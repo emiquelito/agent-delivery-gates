@@ -172,11 +172,13 @@ test("a file with no trailing newline is handled", () => {
   assert.equal(result.entries.length, 1);
 });
 
-test("an empty table is reported as a problem, not as zero entries", () => {
-  const text = [HEADER, SEPARATOR].join("\n");
+test("an empty table is a valid starting state, not a problem", () => {
+  // A project that has adopted the gates and has not had one reject anything
+  // yet has an empty table. Calling that a problem failed its first commit.
+  const text = [HEADER, SEPARATOR].join("\n") + "\n";
   const result = parseTally(text, options());
-  assert.equal(result.entries.length, 0);
-  assert.ok(result.problems.some((p) => /no entries/i.test(p.message)));
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.summary.total, 0);
 });
 
 test("a file with no table at all is reported as a problem", () => {
