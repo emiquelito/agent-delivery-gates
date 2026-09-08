@@ -23,6 +23,7 @@ import {
   ACCEPTED_PHASES,
   formatDirtyTreeMessage,
   getGitStatus,
+  isMutatingTool,
   resolvePhase,
   resolveRepoRoot,
 } from "./clean-tree-gate.ts";
@@ -116,17 +117,20 @@ function gitEnv(): NodeJS.ProcessEnv {
 // this needs revisiting.
 //
 // A second, harder gap: neither platform's documentation gives an
-// allowlist of literal edit-tool names. This matches toolName against a
-// permissive pattern instead (anything that looks like an edit, write,
-// delete, create, or notebook tool), and when toolName is missing
-// entirely, treats the call as relevant instead of skipping it. Erring
-// toward checking is the safer direction for a gate whose entire purpose
-// is to stop a destructive mutation; the cost is a false positive on a
-// tool that turns out to be a pure read, not a missed mutation.
-const EDIT_TOOL_PATTERN = /write|edit|delete|create|notebook/i;
+// allowlist of literal edit-tool names, and this project has already been
+// bitten by keeping a second, separate copy of that decision (see
+// src/clean-tree-gate.ts's own header comment). This calls isMutatingTool
+// from clean-tree-gate.ts, the one place the verified names and the
+// heuristic pattern live, so this path and the Claude/Codex hook path
+// agree on every tool name instead of drifting apart. When toolName is
+// missing entirely, this treats the call as relevant instead of skipping
+// it. Erring toward checking is the safer direction for a gate whose
+// entire purpose is to stop a destructive mutation; the cost is a false
+// positive on a tool that turns out to be a pure read, not a missed
+// mutation.
 
 export function runCleanTreeGate(payload: CanonicalPayload): AdapterDecision {
-  if (payload.toolName !== undefined && !EDIT_TOOL_PATTERN.test(payload.toolName)) {
+  if (payload.toolName !== undefined && !isMutatingTool(payload.toolName, process.env)) {
     return allow();
   }
 

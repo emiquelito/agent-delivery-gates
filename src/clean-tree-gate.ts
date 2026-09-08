@@ -7,71 +7,78 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-// The tool names this gate treats as a mutation. "Edit", "Write",
-// "MultiEdit", "NotebookEdit" are verified: they are the exact names Claude
-// Code's own PreToolUse payload carries. Every other entry below is a guess
-// at the name another coding agent gives its own file-writing tool. No
-// research was available while writing this list, so none of the guesses
-// are checked against a real payload from those tools; they are included
-// because a name this set fails to recognise is a silent hole, and an
-// extra name checked needlessly costs nothing but one comparison. Override
-// with ADG_MUTATING_TOOLS (a comma separated list) when a project knows its
-// agent's real tool names, see resolveMutatingTools below.
-export const MUTATING_TOOLS = new Set([
-  // Verified: Claude Code's own PreToolUse tool names.
+// The tool names this gate treats as a mutation. This is the one place that
+// decision is made: every hook and every platform adapter in this project
+// calls isMutatingTool below instead of keeping its own copy, because two
+// copies of this same decision have already drifted apart three times.
+//
+// VERIFIED_MUTATING_TOOLS carries only names checked against a real agent
+// payload:
+//   - "Edit", "Write", "MultiEdit", "NotebookEdit" are Claude Code's own
+//     PreToolUse tool names.
+//   - "apply_patch" is Codex's file-edit tool name. Codex's own matcher
+//     config for a hook may be written as apply_patch, Edit, or Write, but
+//     the payload it actually sends always reports tool_name: "apply_patch"
+//     for a file edit (and "Bash" for a shell call, which this project does
+//     not treat as a mutation to guard here; see hooks/path-confinement.ts's
+//     own header for why Bash is out of scope for a path check).
+//   - "unified_exec" is Codex's other tool that takes part in hooks: one
+//     tool for running a shell command and reading its output.
+// A name outside this list, for an agent nobody has checked a real payload
+// from yet, falls to MUTATING_TOOL_HEURISTIC below instead of being
+// invented and added here. An invented name that turns out wrong is not
+// free: it is a chance to guard something that was never a mutation, and
+// this project has already recorded that a noisy gate gets switched off.
+export const VERIFIED_MUTATING_TOOLS = new Set([
   "Edit",
   "Write",
   "MultiEdit",
   "NotebookEdit",
-  // Guesses below, grouped loosely by what they are guesses for. None of
-  // these have been checked against a real agent payload.
-  // Codex CLI / OpenAI-style patch and file tools:
   "apply_patch",
-  "ApplyPatch",
-  "patch",
-  "shell_apply_patch",
-  // Generic "editor" tool names seen across various agent frameworks:
-  "str_replace_editor",
-  "str_replace_based_edit_tool",
-  "text_editor",
-  "editor",
-  // Plain-English CRUD-style names some agents use for file tools:
-  "create_file",
-  "edit_file",
-  "write_file",
-  "update_file",
-  "delete_file",
-  "patch_file",
-  "CreateFile",
-  "EditFile",
-  "WriteFile",
-  "UpdateFile",
-  "DeleteFile",
-  "PatchFile",
-  "FileEdit",
-  "FileWrite",
-  "FileCreate",
+  "unified_exec",
 ]);
 
+// A heuristic for a tool name outside the verified list: anything that
+// reads like a write, edit, delete, create, or notebook tool. This is a
+// guess, not evidence, about naming across agent frameworks; it exists
+// because a name this gate has never seen still needs a verdict, and erring
+// toward guarding is the safer direction for a gate whose purpose is to
+// stop a destructive mutation. isMutatingTool below checks the verified
+// list OR this pattern, so a verified name still matches even where it
+// happens not to fit this wording (apply_patch and unified_exec, for
+// instance, match neither "edit" nor "write").
+export const MUTATING_TOOL_HEURISTIC = /write|edit|delete|create|notebook/i;
+
 /**
- * The mutating-tool set this gate actually checks against, for one run.
- * ADG_MUTATING_TOOLS, a comma separated list, replaces MUTATING_TOOLS
- * entirely when set and non-empty, for a project whose agent's tool names
- * are known and differ from every guess above. An empty entry between two
- * commas is dropped instead of kept as an empty string nothing could ever
- * match.
+ * Whether one tool name counts as a mutation, for one run. ADG_MUTATING_TOOLS,
+ * a comma separated list, replaces both the verified list and the heuristic
+ * entirely when set and non-empty: a project that knows its agent's real
+ * tool names gets an exact match against only those names, with no guessing
+ * layered on top. An empty entry between two commas is dropped instead of
+ * kept as an empty string nothing could ever match.
+ *
+ * With no override, a name matches when it is in VERIFIED_MUTATING_TOOLS or
+ * matches MUTATING_TOOL_HEURISTIC.
  */
-export function resolveMutatingTools(env: Record<string, string | undefined>): Set<string> {
+export function isMutatingTool(name: string, env: Record<string, string | undefined>): boolean {
+  const override = resolveMutatingToolsOverride(env);
+  if (override !== null) return override.has(name);
+  return VERIFIED_MUTATING_TOOLS.has(name) || MUTATING_TOOL_HEURISTIC.test(name);
+}
+
+/**
+ * Parses ADG_MUTATING_TOOLS into an explicit override set, or null when it
+ * is unset or empty, meaning no override is active.
+ */
+function resolveMutatingToolsOverride(env: Record<string, string | undefined>): Set<string> | null {
   const override = env.ADG_MUTATING_TOOLS;
-  if (typeof override === "string" && override.trim() !== "") {
-    return new Set(
-      override
-        .split(",")
-        .map((name) => name.trim())
-        .filter((name) => name !== ""),
-    );
-  }
-  return MUTATING_TOOLS;
+  if (typeof override !== "string" || override.trim() === "") return null;
+  return new Set(
+    override
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name !== ""),
+  );
 }
 
 export const ACCEPTED_PHASES = new Set(["review", "mutation-testing", "build"]);

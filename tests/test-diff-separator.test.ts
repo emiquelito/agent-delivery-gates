@@ -906,3 +906,59 @@ test("the fixture: a source change plus a rename out of the runner's naming conv
   const result = separateTestDiff(diff);
   assert.deepEqual(signalIds(result.signals), ["test-file-declassified"]);
 });
+
+// --- Rust: tests declared inside an ordinary source file ---------------------
+//
+// Rust's #[cfg(test)] module lives inside the same file as the code it
+// covers, so the path alone reads as source. See src/test-diff-separator.ts's
+// own comment ahead of hasRustTestMarker for what this can and cannot catch.
+
+test("a .rs diff removing an assert_eq! from inside a #[cfg(test)] module reports a weakening, and the file still counts as source", () => {
+  const diff = oneFileDiff(
+    "src/widget.rs",
+    [
+      "#[cfg(test)]",
+      "mod tests {",
+      "    #[test]",
+      "    fn adds() {",
+      "        assert_eq!(add(2, 3), 5);",
+      "    }",
+      "}",
+    ],
+    ["#[cfg(test)]", "mod tests {", "    #[test]", "    fn adds() {", "    }", "}"],
+  );
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("assertion-removed"),
+    `expected assertion-removed, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["src/widget.rs"],
+  );
+  assert.deepEqual(result.testFiles, []);
+});
+
+test("a .rs diff with no test markers at all reports nothing", () => {
+  const diff = oneFileDiff("src/widget.rs", ["fn add(a: i32, b: i32) -> i32 {"], ["fn add(a: i64, b: i64) -> i64 {"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["src/widget.rs"],
+  );
+});
+
+test("a removed assert_eq! in a .rs file under tests/ still behaves as before: reported as a test file, still fires the signal", () => {
+  const diff = oneFileDiff("tests/widget_test.rs", ["assert_eq!(add(2, 3), 5);"], []);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("assertion-removed"),
+    `expected assertion-removed, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+  assert.deepEqual(
+    result.testFiles.map((f) => f.path),
+    ["tests/widget_test.rs"],
+  );
+  assert.deepEqual(result.sourceFiles, []);
+});

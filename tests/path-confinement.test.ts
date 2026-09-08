@@ -237,15 +237,18 @@ test("a read tool named by another agent is checked too", () => {
 });
 
 test("the tool set can be overridden for an agent whose names are known", () => {
+  // "widget_tool" names neither a verified tool nor anything the heuristic
+  // pattern reads as write/edit/delete/create/notebook, so a case fits:
+  // unguarded until named explicitly.
   const payload = {
     hook_event_name: "PreToolUse",
-    tool_name: "my_writer",
+    tool_name: "widget_tool",
     tool_input: { file_path: "/etc/shadow" },
     cwd: process.cwd(),
   };
   assert.equal(runHook({ input: payload }).status, 0, "an unknown name is not guarded by default");
   assert.equal(
-    runHook({ input: payload, env: { ADG_MUTATING_TOOLS: "my_writer" } }).status,
+    runHook({ input: payload, env: { ADG_MUTATING_TOOLS: "widget_tool" } }).status,
     2,
     "naming it in the override guards it",
   );

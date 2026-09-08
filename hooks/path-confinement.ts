@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { delimiter } from "node:path";
 import { checkPathAllowed } from "../src/path-allowlist.ts";
 import { readAllStdin, parseHookInput,
-  resolveMutatingTools,
+  isMutatingTool,
 } from "../src/clean-tree-gate.ts";
 
 // Reads as well as writes, because this gate is about where a tool is
@@ -32,8 +32,8 @@ import { readAllStdin, parseHookInput,
 // tool was called something else.
 const READ_TOOLS = ["Read", "read_file", "ReadFile", "view", "cat_file", "open_file"];
 
-function checkedTools(env: Record<string, string | undefined>): Set<string> {
-  return new Set([...READ_TOOLS, ...resolveMutatingTools(env)]);
+function isCheckedTool(name: string, env: Record<string, string | undefined>): boolean {
+  return READ_TOOLS.includes(name) || isMutatingTool(name, env);
 }
 
 function block(message: string): never {
@@ -87,7 +87,7 @@ function main(): void {
     block(`path-confinement: could not read hook input (${parsed.error}).`);
   }
 
-  if (!checkedTools(process.env).has(parsed.tool_name)) {
+  if (!isCheckedTool(parsed.tool_name, process.env)) {
     // Bash included: its filesystem effects live inside a command string,
     // not a structured path field, so there is nothing here to check.
     allow();

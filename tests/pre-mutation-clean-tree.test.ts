@@ -516,12 +516,32 @@ test("a session in a subdirectory still reads the phase file at the root", () =>
 // --- non-Claude tool names, the point of this task ---------------------------
 //
 // The contract that matters: a gate wired only to Claude Code's tool names
-// protects nothing under another agent. Every name below is one of the
-// guesses added to MUTATING_TOOLS for a coding agent whose own tool name is
-// not "Edit", "Write", "MultiEdit", or "NotebookEdit"; each must still block
-// a mutation on a dirty tree.
-for (const tool of ["apply_patch", "str_replace_editor", "write_file", "PatchFile"]) {
-  test(`a payload built like Codex's, tool ${tool}, dirty tree, review phase: blocked`, () => {
+// protects nothing under another agent. "apply_patch" and "unified_exec" are
+// Codex's own verified tool names (see VERIFIED_MUTATING_TOOLS in
+// src/clean-tree-gate.ts); each must still block a mutation on a dirty tree,
+// including "unified_exec", which matches no word in the heuristic pattern,
+// so this also proves the verified list is checked on its own, not only as
+// a side effect of the pattern.
+for (const tool of ["apply_patch", "unified_exec"]) {
+  test(`a verified non-Claude tool name, ${tool}, dirty tree, review phase: blocked`, () => {
+    withTempRepo((dir) => {
+      commitFile(dir, "a.txt", "hello\n");
+      writeFileSync(join(dir, "a.txt"), "changed\n");
+      const result = runHook({
+        input: { tool_name: tool, tool_input: {}, cwd: dir },
+        env: { ADG_PHASE: "review" },
+      });
+      assert.equal(result.status, 2, `tool ${tool} was not guarded`);
+      assert.match(result.stderr, /a\.txt/);
+    });
+  });
+}
+
+// A name for an agent nobody has checked a real payload from yet still
+// gets guarded when it reads like a write/edit/delete/create/notebook
+// tool, through MUTATING_TOOL_HEURISTIC, not through being enumerated.
+for (const tool of ["str_replace_editor", "write_file", "CreateWidgetTool"]) {
+  test(`a tool name matching the heuristic but not the verified list, ${tool}: blocked`, () => {
     withTempRepo((dir) => {
       commitFile(dir, "a.txt", "hello\n");
       writeFileSync(join(dir, "a.txt"), "changed\n");
@@ -536,9 +556,10 @@ for (const tool of ["apply_patch", "str_replace_editor", "write_file", "PatchFil
 }
 
 // A tool name that is plainly a read, under any vendor's likely spelling,
-// stays unguarded: the widened set is not "block everything unrecognised",
-// it is a wider allowlist of tools known to write.
-test("a plainly-read tool name outside every guessed set: allowed on a dirty tree", () => {
+// and matches neither the verified list nor the heuristic, stays unguarded:
+// the check is not "block everything unrecognised", it is a match against
+// tools known, or plausibly guessed, to write.
+test("a plainly-read tool name outside the verified list and the heuristic: allowed on a dirty tree", () => {
   withTempRepo((dir) => {
     commitFile(dir, "a.txt", "hello\n");
     writeFileSync(join(dir, "a.txt"), "changed\n");

@@ -20,9 +20,9 @@ import {
   ACCEPTED_PHASES,
   formatDirtyTreeMessage,
   getGitStatus,
+  isMutatingTool,
   parseMutationHookInput,
   readAllStdin,
-  resolveMutatingTools,
   resolvePhase,
   resolveRepoRoot,
 } from "../src/clean-tree-gate.ts";
@@ -43,12 +43,11 @@ function main(): void {
     block(`pre-mutation-clean-tree: could not read hook input (${parsed.error}).`);
   }
 
-  const mutatingTools = resolveMutatingTools(process.env);
   const toolName = parsed.tool_name;
   // A named tool this gate does not recognise as mutating is skipped, same
   // as before. A payload naming no tool at all is not skipped: see the
   // header comment for why.
-  if (toolName !== undefined && toolName !== "" && !mutatingTools.has(toolName)) {
+  if (toolName !== undefined && toolName !== "" && !isMutatingTool(toolName, process.env)) {
     allow();
   }
 

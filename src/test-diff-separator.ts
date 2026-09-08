@@ -698,13 +698,49 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
   ];
 }
 
+// --- Rust: tests declared inside an ordinary source file ---------------------
+//
+// Rust puts unit tests in a #[cfg(test)] module inside the same file as the
+// code they cover, so a file's path alone never says "this is a test" the
+// way tests/foo.rs or foo.test.js does. File-level classification, the only
+// kind this file otherwise does, cannot see them: the path reads as source,
+// and the tests inside it go unscrutinised.
+//
+// This is a partial fix, not full detection, and it stays partial on
+// purpose. It reads a .rs file's diff for a trace of test content, on the
+// added or removed lines alone: the #[cfg(test)] attribute itself, a test
+// opener (#[test], #[tokio::test], and the same #[whatever::test] family
+// DEFAULT_RULES.testCases already matches), or one of the assertion macros
+// (assert_eq!, assert_ne!, assert!). When any of those appear anywhere in
+// the file's diff, this runs the same weakening checks a test file gets
+// over that file's changed lines, through the existing rule engine, which
+// already narrows to the lines each check cares about. The file still
+// counts in the source half: its path is source, and nothing here changes
+// that.
+//
+// What this does not, and cannot, catch: a change to a test inside a
+// #[cfg(test)] module in a file whose diff carries none of these markers,
+// for instance an expected value edited on a line with no assert-like macro
+// of its own, or a hunk that never touches a line matching any of the above.
+// There is no module boundary here to find; only lines. Closing that gap
+// needs a real Rust parser, which this file does not have and does not
+// pretend to.
+const RUST_PATH_RE = /\.rs$/;
+const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_eq!|\bassert_ne!|\bassert!/;
+
+function hasRustTestMarker(file: RawFileDiff): boolean {
+  return [...file.addedLines, ...file.removedLines].some((line) => RUST_TEST_MARKER_RE.test(line));
+}
+
 // --- Entry point ---------------------------------------------------------------
 
 /**
  * Separates a unified diff into its source and test parts, and finds
  * weakening signals in the test files alone. A source file with a line
- * that looks like an assertion produces no signal: signals come from test
- * files only.
+ * that looks like an assertion produces no signal, with one exception: a
+ * .rs source file whose diff carries a Rust test marker (see
+ * hasRustTestMarker above) still gets checked, because Rust's own tests
+ * commonly live inside a source file's own #[cfg(test)] module.
  */
 export function separateTestDiff(diffText: string, options: SeparateOptions = {}): SeparateResult {
   const ruleSet = options.rules ?? DEFAULT_RULES;
@@ -736,6 +772,9 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
       sourceFiles.push(stats);
       sourceAdded += stats.added;
       sourceRemoved += stats.removed;
+      if (RUST_PATH_RE.test(file.path) && hasRustTestMarker(file)) {
+        signals.push(...signalsForTestFile(file, rules));
+      }
     }
   }
 
