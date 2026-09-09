@@ -1,0 +1,92 @@
+# The project homepage, published to GitHub Pages.
+#
+# The page is generated from the rule records and the gate tally, so it says
+# what the repository says and nothing else. A project arguing that unproven
+# claims should not ship must not publish its own pitch from a red build, so
+# the gates run first here and the site jobs wait on them.
+#
+# `needs` only reaches jobs in the same workflow, which is why the gates are
+# a job in this file and not a cross-workflow reference. It runs the same
+# four checks as gates.yml.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read the repository, write the Pages deployment, and mint the OIDC token
+# deploy-pages exchanges for it. Nothing here needs write access to the code.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. A run already in flight is left to finish, so a
+# half-published site is never what a reader lands on.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The prose scan and the tally check read tracked files, and the
+          # test diff check reads history. A shallow clone hides both.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+
+      - name: typecheck
+        run: npx tsc --noEmit
+
+      - name: tests
+        run: npm test
+
+      - name: prose scan
+        run: scripts/scan-prose.sh --require-rules
+
+      - name: tally check
+        run: node scripts/tally-report.ts --check
+
+  build:
+    # Only from main, and only over a green run of the gates above.
+    needs: gates
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # No npm ci here on purpose. The generator has no dependencies, and
+      # the site package has none either; an install step would say otherwise.
+      - name: generate the site
+        run: node site/build.js --out site/dist
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,734 @@
+#!/usr/bin/env node
+// Builds the project homepage from the records in this repository.
+//
+// Every number, id, and name on the page comes from `rules/*.json`,
+// `docs/gate-tally.md`, and `docs/examples/*.md`, read at build time.
+// Nothing factual is typed into the template, because a page that repeats
+// a count by hand goes stale the moment the count moves, and this
+// repository has already caught its own catalog contradicting its own code
+// more than once.
+//
+// Plain JavaScript on purpose: no dependency, and no TypeScript file that
+// the root typecheck would have to know about. The root tsconfig lists its
+// own directories explicitly and this one is not among them.
+//
+// Usage:
+//   node build.js [--out PATH]
+//
+// Exit codes:
+//   0  the site was written
+//   2  the build could not run as asked: a missing input, an unreadable
+//      file, or a tally table that would not parse
+//
+// Exit 2 matters here for the same reason it matters in the gates: a build
+// that could not read its inputs must never look like a build that read
+// them and found nothing to say.
+
+import { readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import process from "node:process";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, "..");
+
+// The site is served from its own domain, not from the github.io path.
+// Every absolute URL on the page, in the sitemap and in the robots file is
+// built from this one constant, and CNAME below carries the same hostname.
+// GitHub Pages drops a custom domain on any deploy whose output has no
+// CNAME file, so the file is written on every build, never checked in once
+// and forgotten.
+const SITE_URL = "https://agentgates.dev/";
+const SITE_HOST = new URL(SITE_URL).hostname;
+const REPO_URL = "https://github.com/emiquelito/agent-delivery-gates";
+const BLOB_URL = REPO_URL + "/blob/main/";
+const AUTHOR = "Evandro Miquelito";
+const PACKAGE_NAME = "agent-delivery-gates";
+const SOCIAL_IMAGE = "social-card.svg";
+
+const TAGLINE =
+  "Rules that check what an AI coding agent claims about its own work, not just the code it wrote.";
+const DESCRIPTION =
+  "Proof obligations for an AI coding agent's delivery report. A green test run and a green run over" +
+  " checks that cannot fail look the same from outside, and only one of them means anything." +
+  " Runs as a git hook, in CI, or as a local MCP server, with no runtime dependencies.";
+
+function fail(message) {
+  process.stderr.write(`site build: ${message}\n`);
+  process.exit(2);
+}
+
+function readFile(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return fail(`could not read ${path}: ${detail}`);
+  }
+}
+
+// --- inputs ------------------------------------------------------------------
+
+/** Every rule record, minus the schema, sorted by id. */
+function readRules() {
+  const dir = join(ROOT, "rules");
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return fail(`could not list ${dir}: ${detail}`);
+  }
+  const rules = [];
+  for (const name of names.sort()) {
+    if (!name.endsWith(".json") || name === "schema.json") continue;
+    const path = join(dir, name);
+    let record;
+    try {
+      record = JSON.parse(readFile(path));
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return fail(`could not parse ${path}: ${detail}`);
+    }
+    for (const field of ["id", "name", "claim_class", "severity", "enforcement"]) {
+      if (typeof record[field] !== "string" || record[field] === "") {
+        return fail(`${path} has no usable "${field}" field`);
+      }
+    }
+    if (record.id !== name.replace(/\.json$/, "")) {
+      return fail(`${path} declares id "${record.id}", which does not match its file name`);
+    }
+    rules.push(record);
+  }
+  if (rules.length === 0) fail(`no rule records found in ${dir}`);
+  return rules;
+}
+
+/** One markdown table row split into trimmed cells. */
+function splitRow(line) {
+  let body = line.trim();
+  if (body.startsWith("|")) body = body.slice(1);
+  if (body.endsWith("|")) body = body.slice(0, -1);
+  return body.split("|").map((cell) => cell.trim());
+}
+
+function isSeparatorRow(line) {
+  const cells = splitRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{2,}:?$/.test(cell));
+}
+
+/**
+ * Reads the tally table: how many rejections were logged, over what dates,
+ * and how many per rule. The header row is found the same way the tally
+ * tooling finds it, by a first cell of "#" followed by a separator row, so
+ * the prose above the table is never mistaken for data.
+ */
+function readTally(ruleIds) {
+  const path = join(ROOT, "docs", "gate-tally.md");
+  const lines = readFile(path).split(/\r\n|\r|\n/);
+  let headerIndex = -1;
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (!lines[i].trim().startsWith("|")) continue;
+    if (splitRow(lines[i])[0] !== "#") continue;
+    if (!isSeparatorRow(lines[i + 1])) continue;
+    headerIndex = i;
+    break;
+  }
+  if (headerIndex < 0) fail(`no tally table found in ${path}`);
+
+  const counts = new Map(ruleIds.map((id) => [id, 0]));
+  const dates = [];
+  let total = 0;
+  for (let i = headerIndex + 2; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim().startsWith("|")) break;
+    const cells = splitRow(line);
+    if (cells.length !== 5) fail(`${path} line ${i + 1} has ${cells.length} columns, expected 5`);
+    const [, date, rule] = cells;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail(`${path} line ${i + 1} has no usable date`);
+    if (!counts.has(rule)) fail(`${path} line ${i + 1} names rule "${rule}", which has no record`);
+    counts.set(rule, counts.get(rule) + 1);
+    dates.push(date);
+    total += 1;
+  }
+  if (total === 0) fail(`${path} holds a table with no entries`);
+  dates.sort();
+  return { total, first: dates[0], last: dates[dates.length - 1], counts };
+}
+
+/** The worked examples, by file name order, titled from their own headings. */
+function readExamples() {
+  const dir = join(ROOT, "docs", "examples");
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return fail(`could not list ${dir}: ${detail}`);
+  }
+  const examples = [];
+  for (const name of names.sort()) {
+    if (!/^\d+-.*\.md$/.test(name)) continue;
+    const text = readFile(join(dir, name));
+    const heading = text.split(/\r\n|\r|\n/).find((line) => line.startsWith("# "));
+    if (heading === undefined) fail(`docs/examples/${name} has no top-level heading to title it`);
+    examples.push({ file: `docs/examples/${name}`, title: heading.slice(2).trim() });
+  }
+  if (examples.length === 0) fail(`no worked examples found in ${dir}`);
+  return examples;
+}
+
+// --- rendering ---------------------------------------------------------------
+
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function escapeXml(text) {
+  return String(text).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** English for a small count, so a sentence reads as a sentence. */
+const NUMBER_WORDS = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+  "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+  "nineteen", "twenty",
+];
+
+function words(count) {
+  return count < NUMBER_WORDS.length ? NUMBER_WORDS[count] : String(count);
+}
+
+const ENFORCEMENT_GROUPS = [
+  {
+    key: "hook",
+    heading: "Enforced by a hook",
+    blurb: "Checked mechanically on a relevant tool call or on every commit.",
+  },
+  {
+    key: "prompt",
+    heading: "Carried by prompt instructions",
+    blurb:
+      "No mechanical check today. These depend on the agent following the instruction and on a" +
+      " person reading the report afterward.",
+  },
+  {
+    key: "human_gate",
+    heading: "Needs a human gate",
+    blurb: "No script can confirm these from the outside. They can be arranged for and then checked.",
+  },
+];
+
+function ruleRow(rule, count) {
+  const emits = Array.isArray(rule.emits) ? rule.emits : [];
+  const emitted =
+    emits.length > 0
+      ? `<p class="emits">Emits ${emits.map((id) => `<code>${escapeHtml(id)}</code>`).join(", ")}</p>`
+      : "";
+  return `        <li>
+          <h4><code>${escapeHtml(rule.id)}</code></h4>
+          <p class="rule-name">${escapeHtml(rule.name)}</p>
+          <p>${escapeHtml(rule.claim_class)}</p>
+          <p class="meta"><span class="tag sev-${escapeHtml(rule.severity)}">severity: ${escapeHtml(rule.severity)}</span>
+            <span class="tag">tally entries: ${count}</span>
+            <a href="${BLOB_URL}rules/${escapeHtml(rule.id)}.json">the <code>${escapeHtml(rule.id)}</code> record</a></p>
+          ${emitted}
+        </li>`;
+}
+
+function renderCatalog(rules, tally) {
+  const sections = [];
+  for (const group of ENFORCEMENT_GROUPS) {
+    const members = rules.filter((rule) => rule.enforcement === group.key);
+    if (members.length === 0) continue;
+    const items = members.map((rule) => ruleRow(rule, tally.counts.get(rule.id))).join("\n");
+    sections.push(`      <h3>${escapeHtml(group.heading)} (${members.length})</h3>
+      <p>${escapeHtml(group.blurb)}</p>
+      <ul class="rules">
+${items}
+      </ul>`);
+  }
+  const other = rules.filter((rule) => !ENFORCEMENT_GROUPS.some((g) => g.key === rule.enforcement));
+  if (other.length > 0) {
+    fail(`rule records use an enforcement value this page has no group for: ${other.map((r) => r.enforcement).join(", ")}`);
+  }
+  return sections.join("\n\n");
+}
+
+function renderTallyTable(rules, tally) {
+  const ordered = [...rules].sort((a, b) => {
+    const diff = tally.counts.get(b.id) - tally.counts.get(a.id);
+    return diff !== 0 ? diff : a.id.localeCompare(b.id);
+  });
+  const rows = ordered
+    .map(
+      (rule) =>
+        `          <tr><th scope="row"><code>${escapeHtml(rule.id)}</code></th><td>${tally.counts.get(rule.id)}</td></tr>`,
+    )
+    .join("\n");
+  return `      <table>
+        <caption>Gate rejections logged per rule, from <code>docs/gate-tally.md</code></caption>
+        <thead>
+          <tr><th scope="col">Rule</th><th scope="col">Entries</th></tr>
+        </thead>
+        <tbody>
+${rows}
+        </tbody>
+      </table>`;
+}
+
+// The questions here are answered on the page itself, in the same words, and
+// each one has been asked about this project. None was invented to fill out
+// the structured data block.
+function faqEntries(rules, tally) {
+  const hookCount = rules.filter((rule) => rule.enforcement === "hook").length;
+  const zeroed = rules.filter((rule) => tally.counts.get(rule.id) === 0).length;
+  return [
+    {
+      q: "Does this need an AI agent to run?",
+      a:
+        "No. The command line tools are ordinary programs with exit codes. The same checks run from a" +
+        " git pre-commit hook, from CI, or by hand, with no agent involved.",
+    },
+    {
+      q: "Does anything leave the machine?",
+      a:
+        "No. The MCP server is a local subprocess on stdio, not a hosted service. Nothing about a" +
+        " project's code or reports leaves the machine, and there is no analytics or telemetry.",
+    },
+    {
+      q: `How many of the ${words(rules.length)} rules are checked mechanically?`,
+      a:
+        `${words(hookCount).replace(/^./, (c) => c.toUpperCase())} of the ${words(rules.length)} are enforced by a hook that runs on a tool call or a commit.` +
+        " The rest are carried by prompt instructions or need a person, and the catalog says which is which.",
+    },
+    {
+      q: "What does a rule with zero tally entries mean?",
+      a:
+        `A zero does not mean a rule was unnecessary. ${words(zeroed).replace(/^./, (c) => c.toUpperCase())} of the rules sit at zero. It means the work stayed clean` +
+        " on that rule for the life of this build, or nothing looked closely enough to catch anything" +
+        " on it yet, and the count alone cannot tell you which.",
+    },
+  ];
+}
+
+function renderPage(rules, tally, examples) {
+  const faq = faqEntries(rules, tally);
+  const title = `${PACKAGE_NAME}: proof obligations for an AI coding agent's delivery report`;
+  const socialUrl = SITE_URL + SOCIAL_IMAGE;
+  const socialAlt =
+    "A terminal showing seven passing tests, beside the note that every check got better while the" +
+    " money is no longer checked by anything.";
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareSourceCode",
+        "@id": SITE_URL + "#software",
+        name: PACKAGE_NAME,
+        alternateName: "Agent delivery gates",
+        description: DESCRIPTION,
+        url: SITE_URL,
+        codeRepository: REPO_URL,
+        programmingLanguage: ["TypeScript", "JavaScript", "Shell"],
+        runtimePlatform: "Node.js 22.18 or newer",
+        license: "https://www.apache.org/licenses/LICENSE-2.0",
+        author: { "@type": "Person", name: AUTHOR },
+        maintainer: { "@type": "Person", name: AUTHOR },
+        image: socialUrl,
+        keywords: [
+          "AI coding agent",
+          "delivery gate",
+          "code review",
+          "git hooks",
+          "test integrity",
+          "MCP server",
+        ],
+        applicationCategory: "DeveloperApplication",
+        operatingSystem: "Linux, macOS, Windows",
+        isAccessibleForFree: true,
+      },
+      {
+        "@type": "FAQPage",
+        "@id": SITE_URL + "#faq",
+        mainEntity: faq.map((item) => ({
+          "@type": "Question",
+          name: item.q,
+          acceptedAnswer: { "@type": "Answer", text: item.a },
+        })),
+      },
+    ],
+  };
+
+  const exampleItems = examples
+    .map(
+      (example) =>
+        `          <li><a href="${BLOB_URL}${escapeHtml(example.file)}">${escapeHtml(example.title)}</a></li>`,
+    )
+    .join("\n");
+
+  const faqItems = faq
+    .map(
+      (item) => `        <div class="qa">
+          <h3>${escapeHtml(item.q)}</h3>
+          <p>${escapeHtml(item.a)}</p>
+        </div>`,
+    )
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(DESCRIPTION)}">
+<link rel="canonical" href="${SITE_URL}">
+<meta name="author" content="${escapeHtml(AUTHOR)}">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${escapeHtml(PACKAGE_NAME)}">
+<meta property="og:url" content="${SITE_URL}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(DESCRIPTION)}">
+<!-- The social image is an SVG. Producing a PNG here would mean adding an
+     image library, and this build has no dependencies by design; the same
+     rule that keeps the published package free of them applies to the page
+     that describes it. Crawlers read the SVG; a few social previewers do not
+     render one, and show no image at all. -->
+<meta property="og:image" content="${socialUrl}">
+<meta property="og:image:type" content="image/svg+xml">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${escapeHtml(socialAlt)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${escapeHtml(title)}">
+<meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
+<meta name="twitter:image" content="${socialUrl}">
+<meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2312161c'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%234c9f70' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5b6672;
+  --rule: #d9dee4;
+  --code-bg: #f4f6f8;
+  --link: #1f6f4a;
+  --accent: #4c9f70;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c;
+    --fg: #e6e9ef;
+    --muted: #9aa4b2;
+    --rule: #2a313a;
+    --code-bg: #1b212a;
+    --link: #7ecfa0;
+    --accent: #4c9f70;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.wrap { max-width: 46rem; margin: 0 auto; padding: 2rem 1.1rem 4rem; }
+header { border-bottom: 3px solid var(--accent); padding-bottom: 1rem; }
+h1 { font-size: 1.9rem; line-height: 1.25; margin: 0 0 .4rem; letter-spacing: -.01em; }
+h2 { font-size: 1.35rem; margin: 2.6rem 0 .6rem; padding-top: 1.4rem; border-top: 1px solid var(--rule); }
+h3 { font-size: 1.08rem; margin: 1.8rem 0 .4rem; }
+h4 { font-size: 1rem; margin: 0 0 .2rem; }
+p { margin: 0 0 1rem; }
+a { color: var(--link); }
+a:hover { text-decoration: none; }
+.lede { color: var(--muted); font-size: 1.1rem; }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: .35rem 1rem; padding: 0; margin: 1rem 0 0; }
+nav a { font-size: .95rem; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+code { background: var(--code-bg); padding: .1em .3em; border-radius: 3px; }
+pre { background: var(--code-bg); padding: .85rem 1rem; border-radius: 6px; overflow-x: auto; border: 1px solid var(--rule); }
+pre code { background: none; padding: 0; }
+ul.plain, ul.rules { list-style: none; padding: 0; }
+ul.rules > li { border: 1px solid var(--rule); border-radius: 6px; padding: .8rem 1rem; margin: 0 0 .7rem; }
+ul.rules p { margin: 0 0 .35rem; }
+.rule-name { font-weight: 600; }
+.meta { color: var(--muted); font-size: .88rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
+.emits { color: var(--muted); font-size: .88rem; }
+.tag { border: 1px solid var(--rule); border-radius: 999px; padding: .05rem .55rem; }
+.sev-critical { border-color: #c05a3e; color: #c05a3e; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 1rem; font-size: .95rem; }
+caption { text-align: left; color: var(--muted); font-size: .9rem; padding-bottom: .5rem; }
+th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+td:last-child, th:last-child { text-align: left; }
+.scroller { overflow-x: auto; }
+.qa h3 { margin-bottom: .2rem; }
+footer { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .92rem; }
+img { max-width: 100%; height: auto; }
+@media (max-width: 34rem) { body { font-size: 16px; } h1 { font-size: 1.55rem; } }
+</style>
+<script type="application/ld+json">
+${JSON.stringify(jsonLd, null, 2)}
+</script>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>${escapeHtml(PACKAGE_NAME)}</h1>
+  <p class="lede">${escapeHtml(TAGLINE)}</p>
+  <nav aria-label="Sections of this page">
+    <ul>
+      <li><a href="#green-run">A green run that proves nothing</a></li>
+      <li><a href="#examples">Worked examples</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#where-it-runs">Where it runs</a></li>
+      <li><a href="#rules">The ${escapeHtml(words(rules.length))} rules</a></li>
+      <li><a href="#tally">The tally</a></li>
+      <li><a href="#questions">Questions</a></li>
+      <li><a href="${REPO_URL}">Source on GitHub</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main>
+  <article>
+    <section id="green-run">
+      <h2>A green run that proves nothing</h2>
+      <p>A shopping cart with four passing tests. An agent is asked to add promo
+        codes. It does, and it adds three tests for the new behaviour.</p>
+      <pre><code>$ node --test tests/*.test.js
+# tests 7
+# pass 7
+# fail 0</code></pre>
+      <p>Four tests became seven. Nothing failed. The feature works. Coverage went up.
+        A customer whose cart comes to exactly 50 has just started paying for
+        shipping, and the test that would have said so was edited, in the same
+        commit, until it could no longer fail.</p>
+      <p>Every check a project normally runs got better here, which is the point. A
+        green run and a green run over checks that cannot fail look the same from
+        outside, and only one of them means anything.</p>
+      <p>A rule system checks the code an agent wrote. Runtime guardrails check its
+        inputs and tool calls while it works. Neither checks what the agent claims
+        about its own work once the work is done, which is what this project is
+        for: <a href="#rules">${escapeHtml(words(rules.length))} proof obligations</a> for a delivery report,
+        ${escapeHtml(words(rules.filter((rule) => rule.enforcement === "hook").length))} of them checked by a hook on every commit, tooling that runs the
+        same way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
+        pre-commit hook with no agent at all, and an MCP server for an agent that
+        would rather ask than be stopped.</p>
+    </section>
+
+    <section id="examples">
+      <h2>${escapeHtml(words(examples.length).replace(/^./, (c) => c.toUpperCase()))} worked examples</h2>
+      <p>Each one run for real, with the exact output it produced. They open in the
+        repository on GitHub.</p>
+      <ul class="plain">
+${exampleItems}
+      </ul>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <pre><code>npm install --save-dev ${escapeHtml(PACKAGE_NAME)}
+npx adg init
+git config core.hooksPath .githooks</code></pre>
+      <p><code>init</code> writes a git pre-commit hook, <code>AGENTS.md</code>, an empty
+        gate tally log, a CI workflow, and the hook and MCP configs for the agents
+        listed below, and only ever creates a file that does not already exist.
+        <code>--dry-run</code> prints what would happen without writing anything,
+        <code>--force</code> overwrites a file that already exists, and
+        <code>--dir PATH</code> targets a directory other than the current one.</p>
+      <p>The two command line tools are <code>agent-delivery-gates validate-report</code>
+        and <code>agent-delivery-gates test-diff</code>. Both are ordinary programs with
+        exit codes, so they run from any pre-commit hook or CI job.
+        <code>agent-delivery-gates mcp</code> starts a local MCP server on stdio: a
+        client starts it, writes to its stdin and reads its stdout, and nothing about
+        a project's code or reports leaves the machine.</p>
+      <p>Node 22.18 or newer. No runtime dependencies. Licensed under Apache 2.0.</p>
+    </section>
+
+    <section id="where-it-runs">
+      <h2>Where it runs</h2>
+      <div class="scroller">
+        <table>
+          <caption>The wiring each agent uses</caption>
+          <thead>
+            <tr><th scope="col">Agent</th><th scope="col">Wiring</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Claude Code</th><td>a plugin that wires its own hooks in with no <code>init</code> step needed, or the lines <code>init</code> prints for <code>.claude/settings.json</code></td></tr>
+            <tr><th scope="row">Cursor</th><td><code>.cursor/hooks.json</code>, written by <code>init</code></td></tr>
+            <tr><th scope="row">Codex</th><td><code>.codex/hooks.json</code>, written by <code>init</code></td></tr>
+            <tr><th scope="row">GitHub Copilot</th><td><code>.github/hooks/agent-delivery-gates.json</code>, written by <code>init</code></td></tr>
+            <tr><th scope="row">CI, no agent</th><td><code>.github/workflows/agent-delivery-gates.yml</code>, written by <code>init</code></td></tr>
+            <tr><th scope="row">Command line, no agent</th><td><code>validate-report</code> and <code>test-diff</code>, run directly or from any pre-commit hook</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The Codex, Cursor, and Copilot hook configs use each platform's tool names
+        as best guesses. Only the Claude Code plugin has run against the real tool,
+        so the other three configs have not been loaded and confirmed by the coding
+        tool they target.</p>
+    </section>
+
+    <section id="rules">
+      <h2>The ${escapeHtml(words(rules.length))} rules</h2>
+      <p>All ${escapeHtml(words(rules.length))} are recorded in
+        <a href="${REPO_URL}/tree/main/rules">the <code>rules</code> directory</a>, one JSON file per
+        rule. Everything below is read out of those files at build time, so this page
+        cannot describe a rule the records do not carry. Grouped by each record's own
+        <code>enforcement</code> field.</p>
+
+${renderCatalog(rules, tally)}
+    </section>
+
+    <section id="tally">
+      <h2>What the gates caught here</h2>
+      <p>Building this project produced its own record of what its gates caught,
+        logged in <a href="${BLOB_URL}docs/gate-tally.md">the gate tally</a> as the work
+        went: ${tally.total} entries, dated ${escapeHtml(tally.first)} to ${escapeHtml(tally.last)}. Each entry says
+        where to see the result, so any row can be checked instead of taken on trust.</p>
+      <div class="scroller">
+${renderTallyTable(rules, tally)}
+      </div>
+      <p>A zero does not mean a rule was unnecessary. It means the work stayed clean
+        on that rule for the life of this build, or nothing looked closely enough to
+        catch anything on it yet, and the count alone cannot tell you which.</p>
+    </section>
+
+    <section id="questions">
+      <h2>Questions</h2>
+${faqItems}
+    </section>
+  </article>
+</main>
+
+<footer>
+  <p><a href="${REPO_URL}">${escapeHtml(PACKAGE_NAME)} on GitHub</a>. Apache 2.0. No analytics, no
+    trackers, no third-party requests from this page.</p>
+  <p>This page is generated from the rule records and the gate tally in the
+    repository, so its numbers move when the records move.</p>
+</footer>
+</div>
+</body>
+</html>
+`;
+}
+
+// Allow everything by default, then name the search and AI crawlers one by
+// one. The blanket rule already permits them; naming them leaves no room to
+// read the file as an opt-out.
+const CRAWLERS = [
+  "Googlebot",
+  "Bingbot",
+  "DuckDuckBot",
+  "Applebot",
+  "GPTBot",
+  "OAI-SearchBot",
+  "ChatGPT-User",
+  "ClaudeBot",
+  "Claude-User",
+  "anthropic-ai",
+  "PerplexityBot",
+  "Perplexity-User",
+  "Google-Extended",
+  "Applebot-Extended",
+  "CCBot",
+  "Bytespider",
+  "Amazonbot",
+  "meta-externalagent",
+];
+
+function renderRobots() {
+  const blocks = ["User-agent: *", "Allow: /", ""];
+  for (const agent of CRAWLERS) {
+    blocks.push(`User-agent: ${agent}`, "Allow: /", "");
+  }
+  blocks.push(`Sitemap: ${SITE_URL}sitemap.xml`, "");
+  return [
+    "# Every crawler is welcome here, search engines and AI crawlers alike.",
+    "# The blanket rule below already allows them; each one is named after it",
+    "# so the intent cannot be misread as an opt-out.",
+    "",
+    ...blocks,
+  ].join("\n");
+}
+
+function renderSitemap(lastmod) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${escapeXml(SITE_URL)}</loc>
+    <lastmod>${escapeXml(lastmod)}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
+`;
+}
+
+// --- build -------------------------------------------------------------------
+
+function parseArgs(argv) {
+  let out = join(HERE, "dist");
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--out") {
+      const value = argv[++i];
+      if (value === undefined) fail("--out needs a path argument");
+      out = resolve(value);
+    } else if (argv[i] === "--help" || argv[i] === "-h") {
+      process.stdout.write("Usage: node build.js [--out PATH]\n");
+      process.exit(0);
+    } else {
+      fail(`unknown argument '${argv[i]}'`);
+    }
+  }
+  return out;
+}
+
+function main() {
+  const outDir = parseArgs(process.argv.slice(2));
+  const rules = readRules();
+  const tally = readTally(rules.map((rule) => rule.id));
+  const examples = readExamples();
+
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+
+  const written = [];
+  function write(name, contents) {
+    const path = join(outDir, name);
+    writeFileSync(path, contents, "utf8");
+    written.push([name, Buffer.byteLength(contents, "utf8")]);
+  }
+
+  write("index.html", renderPage(rules, tally, examples));
+  write("robots.txt", renderRobots());
+  // The tally's last entry dates the content, which keeps a rebuild of
+  // unchanged inputs byte for byte identical to the one before it.
+  write("sitemap.xml", renderSitemap(tally.last));
+  // GitHub Pages runs Jekyll over a directory unless this file is present.
+  write(".nojekyll", "");
+  write("CNAME", SITE_HOST + "\n");
+  copyFileSync(join(HERE, "static", SOCIAL_IMAGE), join(outDir, SOCIAL_IMAGE));
+  written.push([SOCIAL_IMAGE, readFileSync(join(HERE, "static", SOCIAL_IMAGE)).length]);
+
+  process.stdout.write(`site build: ${outDir}\n`);
+  process.stdout.write(
+    `site build: ${rules.length} rules, ${tally.total} tally entries (${tally.first} to ${tally.last}), ${examples.length} worked examples\n`,
+  );
+  for (const [name, size] of written) {
+    process.stdout.write(`site build:   ${name} (${size} bytes)\n`);
+  }
+}
+
+main();

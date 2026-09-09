@@ -1,0 +1,14 @@
+{
+  "name": "agent-delivery-gates-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The project homepage, generated from the rule records and the gate tally.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "node build.js"
+  }
+}

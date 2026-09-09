@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="agent-delivery-gates: rules that check what an AI coding agent claims about its own work">
+  <title>agent-delivery-gates</title>
+  <rect width="1200" height="630" fill="#12161c"/>
+  <rect x="0" y="0" width="1200" height="8" fill="#4c9f70"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="80" y="190" fill="#e6e9ef" font-size="66" font-weight="700">agent-delivery-gates</text>
+    <text x="80" y="268" fill="#9aa4b2" font-size="34">Rules that check what an AI coding agent claims</text>
+    <text x="80" y="316" fill="#9aa4b2" font-size="34">about its own work, not just the code it wrote.</text>
+    <g font-size="30">
+      <text x="80" y="424" fill="#7ecfa0">$ node --test tests/*.test.js</text>
+      <text x="80" y="470" fill="#e6e9ef"># tests 7</text>
+      <text x="80" y="512" fill="#e6e9ef"># pass 7</text>
+      <text x="80" y="554" fill="#e6e9ef"># fail 0</text>
+    </g>
+  </g>
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+    <text x="700" y="470" fill="#d98c6a" font-size="30">Every check got better.</text>
+    <text x="700" y="512" fill="#d98c6a" font-size="30">The money is no longer</text>
+    <text x="700" y="554" fill="#d98c6a" font-size="30">checked by anything.</text>
+  </g>
+</svg>
