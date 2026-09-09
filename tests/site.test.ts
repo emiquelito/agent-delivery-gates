@@ -80,6 +80,7 @@ function decodeEntities(text: string): string {
 
 let outDir = "";
 let html = "";
+let privacy = "";
 let robots = "";
 let sitemap = "";
 
@@ -99,6 +100,7 @@ before(() => {
   const result = runBuild(BUILD, join(outDir, "dist"));
   assert.equal(result.status, 0, `the site build failed: ${result.stderr}`);
   html = readFileSync(join(outDir, "dist", "index.html"), "utf8");
+  privacy = readFileSync(join(outDir, "dist", "privacy", "index.html"), "utf8");
   robots = readFileSync(join(outDir, "dist", "robots.txt"), "utf8");
   sitemap = readFileSync(join(outDir, "dist", "sitemap.xml"), "utf8");
 });
@@ -1283,4 +1285,70 @@ test("every text colour clears 4.5:1 on every background it can land on", () => 
     `only ${checked} pairs were measured, so this test proves less than it reads`,
   );
   assert.ok(checked >= 15, "no palette was measured at all");
+});
+
+// A page in the sitemap that the build never writes is a 404 handed to a
+// crawler, and a page the build writes that the sitemap never names is a page
+// found only by following a link. Reading the sitemap and the output directory
+// against each other catches both, and neither side is written down here.
+test("the sitemap names every page the build writes, and no page it does not", () => {
+  const listed = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)]
+    .map((m) => decodeEntities(m[1]))
+    .sort();
+  assert.ok(listed.length >= 2, `the sitemap names ${listed.length} page(s), so this proves little`);
+
+  const dist = join(outDir, "dist");
+  const built: string[] = [];
+  const walk = (dir: string, prefix: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(join(dir, entry.name), `${prefix}${entry.name}/`);
+      else if (entry.name === "index.html") built.push(prefix);
+    }
+  };
+  walk(dist, "");
+  // The front page is the bare site URL; every other index.html is its
+  // directory without the trailing slash, which is the address people type.
+  const addresses = built
+    .map((prefix) => (prefix === "" ? SITE_URL : SITE_URL + prefix.replace(/\/$/, "")))
+    .sort();
+  assert.deepEqual(addresses, listed, "the sitemap and the built pages disagree");
+});
+
+test("the privacy page is a real page, linked from the front page", () => {
+  const url = [...sitemap.matchAll(/<loc>([^<]+)<\/loc>/g)]
+    .map((m) => decodeEntities(m[1]))
+    .find((loc) => loc.endsWith("/privacy"));
+  assert.ok(url, "the sitemap names no privacy page");
+
+  // Its canonical has to be the address the sitemap gives out, or the two send
+  // a crawler to different places for the same page.
+  const canonical = /<link rel="canonical" href="([^"]+)">/.exec(privacy);
+  assert.ok(canonical, "the privacy page has no canonical link");
+  assert.equal(decodeEntities(canonical[1]), url, "the canonical and the sitemap disagree");
+
+  assert.match(privacy, /<meta name="robots" content="index/, "the privacy page asks not to be indexed");
+  assert.ok(html.includes(`href="${url}"`), "the front page does not link to the privacy page");
+
+  // It carries the same stylesheet as the front page, so every palette and
+  // layout test in this file covers it too.
+  const styleOf = (page: string) => /<style>([\s\S]*?)<\/style>/.exec(page)![1];
+  assert.equal(styleOf(privacy), styleOf(html), "the privacy page has a stylesheet of its own");
+});
+
+// The page's whole claim is that nothing leaves the machine, and a page making
+// that claim while pulling a font or a script from somewhere else would be the
+// exact failure this project is about.
+test("no page requests anything from another host", () => {
+  for (const [name, page] of [["front page", html], ["privacy page", privacy]] as Array<[string, string]>) {
+    const fetched = [...page.matchAll(/(?:src|href)="(https?:\/\/[^"]+)"/g)].map((m) => m[1]);
+    const rel = [...page.matchAll(/<link rel="([^"]+)"[^>]*href="(https?:\/\/[^"]+)"/g)];
+    // A <link> that is a canonical or an alternate is an address, not a fetch.
+    const fetchedByLink = rel.filter(([, kind]) => !["canonical", "alternate"].includes(kind));
+    for (const url of [...fetchedByLink.map((m) => m[2])]) {
+      assert.ok(url.startsWith(SITE_URL), `${name} loads ${url} from another host`);
+    }
+    assert.ok(fetched.length > 0, `${name} has no links at all, so this proves nothing`);
+    assert.doesNotMatch(page, /<script(?![^>]*type="application\/ld\+json")/, `${name} carries a script`);
+    assert.doesNotMatch(page, /<img\b/, `${name} carries an image element`);
+  }
 });

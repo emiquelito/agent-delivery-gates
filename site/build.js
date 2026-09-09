@@ -471,119 +471,9 @@ function renderCards() {
   ).join("\n");
 }
 
-function renderPage(rules, tally, examples, commands) {
-  const faq = faqEntries(rules, tally);
-  const checkList = commands.checks.map((name) => `<code>${escapeHtml(name)}</code>`).join(", ");
-  const title = `${PACKAGE_NAME}: proof obligations for an AI coding agent's delivery report`;
-  const socialUrl = SITE_URL + SOCIAL_IMAGE;
-  const socialAlt =
-    "A terminal showing seven passing tests, beside the note that every check got better while the" +
-    " money is no longer checked by anything.";
-
-  const jsonLd = {
-    "@context": "https://schema.org",
-    "@graph": [
-      {
-        "@type": "SoftwareSourceCode",
-        "@id": SITE_URL + "#software",
-        name: PACKAGE_NAME,
-        alternateName: "Agent delivery gates",
-        description: DESCRIPTION,
-        url: SITE_URL,
-        codeRepository: REPO_URL,
-        programmingLanguage: ["TypeScript", "JavaScript", "Shell"],
-        runtimePlatform: "Node.js 22.18 or newer",
-        license: "https://www.apache.org/licenses/LICENSE-2.0",
-        author: { "@type": "Person", name: AUTHOR },
-        maintainer: { "@type": "Person", name: AUTHOR },
-        image: socialUrl,
-        keywords: [
-          "AI coding agent",
-          "delivery gate",
-          "code review",
-          "git hooks",
-          "test integrity",
-          "MCP server",
-        ],
-        // No applicationCategory or operatingSystem here. Both are properties
-        // of SoftwareApplication, and this node is SoftwareSourceCode, which
-        // is a CreativeWork and not a SoftwareApplication.
-        isAccessibleForFree: true,
-      },
-      {
-        "@type": "FAQPage",
-        "@id": SITE_URL + "#faq",
-        mainEntity: faq.map((item) => ({
-          "@type": "Question",
-          name: item.q,
-          acceptedAnswer: { "@type": "Answer", text: item.a },
-        })),
-      },
-    ],
-  };
-
-  // JSON.stringify leaves "<" alone, so a "</script>" inside any string would
-  // end the block early for an HTML parser while the JSON itself stays valid.
-  // Escaping every "<" as a \\u003c sequence is still the same JSON to a JSON
-  // parser and
-  // carries nothing an HTML parser can act on. Nothing read out of the records
-  // reaches this block today, which is why this is a guard and not a fix.
-  const jsonLdText = JSON.stringify(jsonLd, null, 2).replaceAll("<", "\\u003c");
-
-  const exampleItems = examples
-    .map(
-      (example) =>
-        `          <li><a href="${BLOB_URL}${escapeHtml(example.file)}">${escapeHtml(example.title)}</a></li>`,
-    )
-    .join("\n");
-
-  const faqItems = faq
-    .map(
-      (item) => `        <div class="qa">
-          <h3>${escapeHtml(item.q)}</h3>
-          <p>${escapeHtml(item.a)}</p>
-        </div>`,
-    )
-    .join("\n");
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title>
-<meta name="description" content="${escapeHtml(DESCRIPTION)}">
-<link rel="canonical" href="${SITE_URL}">
-<meta name="author" content="${escapeHtml(AUTHOR)}">
-<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
-<meta name="color-scheme" content="light dark">
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="${escapeHtml(PACKAGE_NAME)}">
-<meta property="og:url" content="${SITE_URL}">
-<meta property="og:title" content="${escapeHtml(title)}">
-<meta property="og:description" content="${escapeHtml(DESCRIPTION)}">
-<!-- The social image is an SVG. Producing a PNG here would mean adding an
-     image library, and this build has no dependencies by design; the same
-     rule that keeps the published package free of them applies to the page
-     that describes it. Crawlers read the SVG, but most social previewers,
-     X, Facebook, LinkedIn and Slack among them, reject SVG for a card image,
-     so the realistic outcome is a link with no preview image on any of them
-     while the card type still says summary_large_image. That is the trade
-     accepted here, not a small gap. -->
-<meta property="og:image" content="${socialUrl}">
-<meta property="og:image:type" content="image/svg+xml">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="${escapeHtml(socialAlt)}">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="${escapeHtml(title)}">
-<meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
-<meta name="twitter:image" content="${socialUrl}">
-<meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
-<meta name="theme-color" content="#2e2459">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%232e2459'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%236ee7b7' stroke-width='2' fill='none'/%3E%3C/svg%3E">
-<style>
-:root {
+// The one stylesheet, shared by every page the build writes. Inline, so the
+// page makes no request of its own and there is no asset to version.
+const STYLE = `:root {
   color-scheme: dark;
   /* One palette, on a dark purple ground, and no second one behind
      prefers-color-scheme. The page had a light scheme as the override, so a
@@ -727,7 +617,121 @@ img { max-width: 100%; height: auto; }
   .wrap { padding-top: 2.5rem; }
   main > article > section { padding-top: 3.5rem; }
   main > article > section + section { margin-top: 3.5rem; }
-}
+}`;
+
+function renderPage(rules, tally, examples, commands) {
+  const faq = faqEntries(rules, tally);
+  const checkList = commands.checks.map((name) => `<code>${escapeHtml(name)}</code>`).join(", ");
+  const title = `${PACKAGE_NAME}: proof obligations for an AI coding agent's delivery report`;
+  const socialUrl = SITE_URL + SOCIAL_IMAGE;
+  const socialAlt =
+    "A terminal showing seven passing tests, beside the note that every check got better while the" +
+    " money is no longer checked by anything.";
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareSourceCode",
+        "@id": SITE_URL + "#software",
+        name: PACKAGE_NAME,
+        alternateName: "Agent delivery gates",
+        description: DESCRIPTION,
+        url: SITE_URL,
+        codeRepository: REPO_URL,
+        programmingLanguage: ["TypeScript", "JavaScript", "Shell"],
+        runtimePlatform: "Node.js 22.18 or newer",
+        license: "https://www.apache.org/licenses/LICENSE-2.0",
+        author: { "@type": "Person", name: AUTHOR },
+        maintainer: { "@type": "Person", name: AUTHOR },
+        image: socialUrl,
+        keywords: [
+          "AI coding agent",
+          "delivery gate",
+          "code review",
+          "git hooks",
+          "test integrity",
+          "MCP server",
+        ],
+        // No applicationCategory or operatingSystem here. Both are properties
+        // of SoftwareApplication, and this node is SoftwareSourceCode, which
+        // is a CreativeWork and not a SoftwareApplication.
+        isAccessibleForFree: true,
+      },
+      {
+        "@type": "FAQPage",
+        "@id": SITE_URL + "#faq",
+        mainEntity: faq.map((item) => ({
+          "@type": "Question",
+          name: item.q,
+          acceptedAnswer: { "@type": "Answer", text: item.a },
+        })),
+      },
+    ],
+  };
+
+  // JSON.stringify leaves "<" alone, so a "</script>" inside any string would
+  // end the block early for an HTML parser while the JSON itself stays valid.
+  // Escaping every "<" as a \\u003c sequence is still the same JSON to a JSON
+  // parser and
+  // carries nothing an HTML parser can act on. Nothing read out of the records
+  // reaches this block today, which is why this is a guard and not a fix.
+  const jsonLdText = JSON.stringify(jsonLd, null, 2).replaceAll("<", "\\u003c");
+
+  const exampleItems = examples
+    .map(
+      (example) =>
+        `          <li><a href="${BLOB_URL}${escapeHtml(example.file)}">${escapeHtml(example.title)}</a></li>`,
+    )
+    .join("\n");
+
+  const faqItems = faq
+    .map(
+      (item) => `        <div class="qa">
+          <h3>${escapeHtml(item.q)}</h3>
+          <p>${escapeHtml(item.a)}</p>
+        </div>`,
+    )
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(DESCRIPTION)}">
+<link rel="canonical" href="${SITE_URL}">
+<meta name="author" content="${escapeHtml(AUTHOR)}">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${escapeHtml(PACKAGE_NAME)}">
+<meta property="og:url" content="${SITE_URL}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(DESCRIPTION)}">
+<!-- The social image is an SVG. Producing a PNG here would mean adding an
+     image library, and this build has no dependencies by design; the same
+     rule that keeps the published package free of them applies to the page
+     that describes it. Crawlers read the SVG, but most social previewers,
+     X, Facebook, LinkedIn and Slack among them, reject SVG for a card image,
+     so the realistic outcome is a link with no preview image on any of them
+     while the card type still says summary_large_image. That is the trade
+     accepted here, not a small gap. -->
+<meta property="og:image" content="${socialUrl}">
+<meta property="og:image:type" content="image/svg+xml">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${escapeHtml(socialAlt)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${escapeHtml(title)}">
+<meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
+<meta name="twitter:image" content="${socialUrl}">
+<meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
+<meta name="theme-color" content="#2e2459">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%232e2459'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%236ee7b7' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<style>
+${STYLE}
 </style>
 <script type="application/ld+json">
 ${jsonLdText}
@@ -882,9 +886,133 @@ ${faqItems}
 
 <footer>
   <p><a href="${REPO_URL}">${escapeHtml(PACKAGE_NAME)} on GitHub</a>. Apache 2.0. No analytics, no
-    trackers, no third-party requests from this page.</p>
+    trackers, no third-party requests from this page. <a href="${SITE_URL}privacy">Privacy</a>.</p>
   <p>This page is generated from the rule records and the gate tally in the
     repository, so its numbers move when the records move.</p>
+</footer>
+</div>
+</body>
+</html>
+`;
+}
+
+// A second page, at /privacy/, so the URL is agentgates.dev/privacy with no
+// extension. Every sentence on it is a statement about code in this repository
+// that a reader can go and check, which is the only kind worth publishing.
+function renderPrivacy() {
+  const title = `Privacy: ${PACKAGE_NAME}`;
+  const url = SITE_URL + "privacy";
+  const description =
+    "agent-delivery-gates collects nothing, sends nothing, and makes no network request." +
+    " Everything runs on your machine. This page says exactly what is written where, and" +
+    " what this website itself sees.";
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": url,
+    name: title,
+    description,
+    url,
+    isPartOf: { "@type": "WebSite", "@id": SITE_URL, name: PACKAGE_NAME },
+    publisher: { "@type": "Person", name: AUTHOR },
+  };
+  const jsonLdText = JSON.stringify(jsonLd, null, 2).replaceAll("<", "\\u003c");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(description)}">
+<link rel="canonical" href="${url}">
+<meta name="author" content="${escapeHtml(AUTHOR)}">
+<meta name="robots" content="index, follow">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="${escapeHtml(PACKAGE_NAME)}">
+<meta property="og:url" content="${url}">
+<meta property="og:title" content="${escapeHtml(title)}">
+<meta property="og:description" content="${escapeHtml(description)}">
+<meta name="theme-color" content="#2e2459">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%232e2459'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%236ee7b7' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<style>
+${STYLE}
+</style>
+<script type="application/ld+json">
+${jsonLdText}
+</script>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Privacy</h1>
+  <p class="lede">${escapeHtml(PACKAGE_NAME)} collects nothing, sends nothing, and makes no
+    network request of its own.</p>
+  <p class="cta"><a class="button" href="${SITE_URL}"><span>Back to the front page</span></a></p>
+</header>
+
+<main>
+  <article>
+    <section id="what-it-sends">
+      <h2>What the tools send</h2>
+      <p>Nothing. No shipped file under <code>src/</code> or <code>hooks/</code> opens a socket
+        or calls <code>fetch</code>. There is no telemetry, no analytics, no crash reporting, no
+        update check, and no API key to give it, because there is nothing to authenticate to.
+        The package has no runtime dependencies, so nothing arrives with it that could.</p>
+      <p>The git hooks, the command line tools and the MCP server all run as local processes on
+        your machine. The MCP server speaks stdio to whatever started it and does not listen on
+        a port.</p>
+    </section>
+
+    <section id="what-it-writes">
+      <h2>What the tools write</h2>
+      <p>Everything the gates record stays inside the repository you run them in, under
+        <code>.adg/</code>:</p>
+      <ul class="plain">
+        <li><code>.adg/test-diff.json</code>, the baseline recording what a repository already
+          held when the gates were adopted, so old work is not reported as new weakening.</li>
+        <li><code>.adg/prose-rules.txt</code> and <code>.adg/prose-baseline.txt</code>, used only
+          when the optional prose check is turned on.</li>
+        <li><code>.adg/induced/</code>, holding the failures an induced-failure run declares.</li>
+      </ul>
+      <p><code>adg init</code> also writes hook configuration into your project for whichever
+        agents you ask it to set up. Those files are yours, they are readable text, and they are
+        the only things the tools create.</p>
+      <p><code>adg census</code> checks out your own base commit into a scratch git worktree in
+        the system temporary directory and removes it when it is done. Nothing is copied out of
+        the repository, and nothing survives the run.</p>
+    </section>
+
+    <section id="this-website">
+      <h2>This website</h2>
+      <p>These pages are static files. They load no JavaScript, no fonts, no images from anywhere
+        else, and no analytics. They set no cookies and use no browser storage. Opening this page
+        makes exactly one request, for this page.</p>
+      <p>It is served by GitHub Pages. Like any web host, GitHub receives the request and can log
+        it, which is outside this project's control. GitHub's own privacy statement covers what it
+        does with that.</p>
+    </section>
+
+    <section id="npm">
+      <h2>Installing it</h2>
+      <p>Installing from npm is a request to npm, and npm sees it. That is true of every package
+        and has nothing to do with this one. After the install, the code does not go back.</p>
+    </section>
+
+    <section id="changes">
+      <h2>Questions and changes</h2>
+      <p>Every claim here is a claim about code you can read. If you find one that does not hold,
+        that is a bug, and <a href="${REPO_URL}/issues">an issue</a> is the place for it. Changes
+        to this page arrive the way everything else here does, as a commit in
+        <a href="${REPO_URL}">the repository</a>.</p>
+    </section>
+  </article>
+</main>
+
+<footer>
+  <p><a href="${REPO_URL}">${escapeHtml(PACKAGE_NAME)} on GitHub</a>. Apache 2.0. No analytics, no
+    trackers, no third-party requests from this page.</p>
 </footer>
 </div>
 </body>
@@ -931,15 +1059,26 @@ function renderRobots() {
   ].join("\n");
 }
 
+// Every page the build writes, with the priority the crawler should read it
+// at. A page missing from here is a page a crawler finds only by following a
+// link, which is how a second page stays unindexed without anyone noticing.
+const PAGES = [
+  { loc: SITE_URL, changefreq: "weekly", priority: "1.0" },
+  { loc: SITE_URL + "privacy", changefreq: "yearly", priority: "0.3" },
+];
+
 function renderSitemap(lastmod) {
+  const entries = PAGES.map(
+    (page) => `  <url>
+    <loc>${escapeXml(page.loc)}</loc>
+    <lastmod>${escapeXml(lastmod)}</lastmod>
+    <changefreq>${page.changefreq}</changefreq>
+    <priority>${page.priority}</priority>
+  </url>`,
+  ).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>${escapeXml(SITE_URL)}</loc>
-    <lastmod>${escapeXml(lastmod)}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>1.0</priority>
-  </url>
+${entries}
 </urlset>
 `;
 }
@@ -976,11 +1115,16 @@ function main() {
   const written = [];
   function write(name, contents) {
     const path = join(outDir, name);
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, contents, "utf8");
     written.push([name, Buffer.byteLength(contents, "utf8")]);
   }
 
   write("index.html", renderPage(rules, tally, examples, commands));
+  // A directory with its own index, so the address is /privacy and not
+  // /privacy.html. GitHub Pages serves it either way; the clean one is what
+  // goes in a form.
+  write(join("privacy", "index.html"), renderPrivacy());
   write("robots.txt", renderRobots());
   // The tally's last entry dates the content, which keeps a rebuild of
   // unchanged inputs byte for byte identical to the one before it.
