@@ -670,3 +670,165 @@ test("a timed-out mutation leaves no descendant running", () => {
     }
   });
 });
+
+// --- Ctrl-C leaves no descendant running (reviewer finding 1) ---------------
+
+// detached: true (added so the timeout could kill a whole process group)
+// also moves the command out of the terminal's foreground group, so a real
+// Ctrl-C, which the OS delivers only to the foreground group, no longer
+// reaches it at all. This proves the fix directly: a command whose worker
+// shares its own process group and ignores SIGTERM, so only a real group
+// kill removes it, and a SIGINT sent to the mutate process itself, exactly
+// what a terminal's Ctrl-C sends.
+
+const SIGINT_LEAK_RUN_MJS = `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const pidDir = process.argv[2];
+const here = dirname(fileURLToPath(import.meta.url));
+const worker = spawn(process.execPath, [join(here, "sigint-leak-worker.mjs")], { stdio: "ignore" });
+writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+worker.on("exit", (code) => process.exit(code ?? 0));
+`;
+
+const SIGINT_LEAK_WORKER_MJS = `process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+
+// recordedPids, isAlive, and waitForNoneAlive are already defined above for
+// the timed-out-mutation test and are reused here as-is.
+
+test("a real Ctrl-C (SIGINT) to the mutate process leaves no descendant running", async () => {
+  const dir = makeRepo({
+    "src/loop.mjs": "export function shouldContinue(seen) {\n  return seen < 1;\n}\n",
+    "sigint-run.mjs": SIGINT_LEAK_RUN_MJS,
+    "sigint-leak-worker.mjs": SIGINT_LEAK_WORKER_MJS,
+  });
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-mutate-sigint-pids-"));
+  try {
+    const child = spawn(
+      "node",
+      [CLI_PATH, "--paths", "src/loop.mjs", "--command", `node sigint-run.mjs ${pidDir}`],
+      { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const exited = new Promise<number | null>((resolveExit) => {
+      child.on("exit", (code) => resolveExit(code));
+    });
+    // The command spawns its worker unconditionally, on the very first call
+    // (the baseline), so waiting for the pid file is enough: a descendant
+    // is actually there by the time the SIGINT below is sent.
+    const recordDeadline = Date.now() + 10_000;
+    while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const pids = recordedPids(pidDir);
+    assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
+    child.kill("SIGINT");
+    // A bounded wait, not an unconditional await: if the fix were absent
+    // and mutate itself somehow never exited, this test must fail instead
+    // of hanging forever.
+    const exitCode = await Promise.race([
+      exited,
+      new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
+    ]);
+    if (exitCode === "timed-out") child.kill("SIGKILL");
+    const survivors = waitForNoneAlive(pids, 5_000);
+    assert.deepEqual(survivors, [], "a worker process outlived mutate after a real SIGINT");
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- the baseline run has its own timeout (reviewer finding 3) --------------
+
+test("a hung baseline run is timed out, reported plainly, and leaves no descendant", async () => {
+  const dir = makeRepo({
+    "src/loop.mjs": "export function shouldContinue(seen) {\n  return seen < 1;\n}\n",
+    "sigint-run.mjs": SIGINT_LEAK_RUN_MJS,
+    "sigint-leak-worker.mjs": SIGINT_LEAK_WORKER_MJS.replace("process.on(\"SIGTERM\", () => {});\n", ""),
+  });
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-mutate-baseline-timeout-pids-"));
+  try {
+    // The baseline is the very first run of the command, before any file
+    // is mutated, so this command hangs on the FIRST call already: it
+    // spawns a worker that never exits and never lets the baseline itself
+    // return. spawnSync's own timeout is only a safety net in case the fix
+    // is absent and --timeout 2 truly has no effect on the baseline: without
+    // it, this test would hang forever instead of failing red.
+    const spawned = spawnSync(
+      "node",
+      [CLI_PATH, "--paths", "src/loop.mjs", "--command", `node sigint-run.mjs ${pidDir}`, "--timeout", "2"],
+      { cwd: dir, encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" },
+    );
+    const result = { status: spawned.status, stdout: spawned.stdout, stderr: spawned.stderr };
+    // Collected and swept before any assertion, so a failing assertion
+    // (expected when this test is run red, against the unpatched code)
+    // never skips over cleaning up a leaked descendant.
+    const pids = recordedPids(pidDir);
+    const survivors = waitForNoneAlive(pids, 5_000);
+    assert.equal(result.status, 2, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stderr, /baseline run of .* did not finish within 2s/);
+    assert.doesNotMatch(result.stderr, /exit killed/, "a baseline timeout must not read as a plain failed exit");
+    assert.ok(pids.length > 0, `expected the baseline to spawn a worker; got: ${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(survivors, [], "a worker process outlived the timed-out baseline run");
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- mutate has an output ceiling, the same as induce and census (finding 2) --
+
+test("a mutation that floods stdout is killed well before its timeout, not let run unbounded", () => {
+  // shouldFlood(0) is false on the original `<` (0 < 0), so the baseline
+  // exits at once. Mutating `<` to `<=` makes it true (0 <= 0), and the
+  // mutated run floods stdout forever, through a real `yes` subprocess so
+  // the flood is not throttled by this Node process's own event loop.
+  // With no cap that run has nothing to stop it short of the timeout;
+  // with a cap it is killed within a couple of seconds of crossing it,
+  // long before a generous timeout fires.
+  const dir = makeRepo({
+    "src/gate.mjs": "export function shouldFlood(n) {\n  return n < 0;\n}\n",
+    "flood-run.mjs": `import { shouldFlood } from "./src/gate.mjs";
+import { spawnSync } from "node:child_process";
+if (shouldFlood(0)) {
+  spawnSync("yes", [], { stdio: "inherit" });
+} else {
+  process.exit(0);
+}
+`,
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, [
+      "--paths",
+      "src/gate.mjs",
+      "--command",
+      "node flood-run.mjs",
+      "--timeout",
+      "8",
+      "--format",
+      "json",
+    ]);
+    const report = JSON.parse(result.stdout) as {
+      results: Array<{ verdict: string; durationMs: number }>;
+    };
+    assert.equal(report.results.length, 1, result.stdout);
+    const [entry] = report.results;
+    assert.equal(entry.verdict, "killed", `expected the flood to be capped, not timed out: ${result.stdout}`);
+    assert.ok(
+      entry.durationMs < 4000,
+      `expected the output cap to kill the flood in a few seconds, not ride out the 8s timeout: took ${entry.durationMs}ms`,
+    );
+  });
+});

@@ -375,12 +375,27 @@ async function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: nu
   return runFromSteps(file, spec.claim, steps);
 }
 
+/** Reported on SIGINT/SIGTERM. induce writes to no file and owns no
+ * worktree, so unlike mutate and census it has nothing of its own to put
+ * back; it only needs to stop instead of quietly running the rest of the
+ * specs against a command spawnCommand already killed. spawnCommand's own
+ * listener (see src/spawn-command.ts) kills the command's whole process
+ * group before this one runs, because it is registered with
+ * prependListener; this one is what actually ends the run. */
+function onSignal(signal: string): never {
+  process.stderr.write(`\ninduce: interrupted by ${signal}\n`);
+  process.exit(2);
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(USAGE);
     process.exit(0);
   }
+
+  process.on("SIGINT", () => onSignal("SIGINT"));
+  process.on("SIGTERM", () => onSignal("SIGTERM"));
 
   const { paths, source, skipped } = resolveSpecPaths(args);
   const runs: SpecRun[] = [];

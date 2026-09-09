@@ -11,7 +11,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -807,4 +807,62 @@ test("a timed-out step leaves no descendant running", () => {
       rmSync(pidDir, { recursive: true, force: true });
     }
   });
+});
+
+// --- Ctrl-C leaves no descendant running (reviewer finding 1) ---------------
+
+// induce previously registered no signal handler of its own at all, so a
+// real Ctrl-C used Node's default action and killed only this process; the
+// step's command, put in its own process group so the timeout could kill
+// it as a whole, was never in the terminal's foreground group and so never
+// received it either. This proves the fix directly: a step whose command
+// spawns a worker sharing its own process group, and a real SIGINT sent to
+// the induce process itself, exactly what a terminal's Ctrl-C sends.
+
+test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running", async () => {
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-induce-sigint-pids-"));
+  const dir = makeProject(
+    {
+      "leak.json": {
+        claim: "test fixture: a step whose command spawns a worker that never returns",
+        inject: `node leak-run.mjs ${pidDir}`,
+        neutralize: "node -e \"process.exit(1)\"",
+      },
+    },
+    {
+      "leak-run.mjs": LEAK_RUN_MJS,
+      "leak-worker.mjs": LEAK_WORKER_MJS,
+    },
+  );
+  try {
+    const child = spawn("node", [CLI_PATH], { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const exited = new Promise<number | null>((resolveExit) => {
+      child.on("exit", (code) => resolveExit(code));
+    });
+    const recordDeadline = Date.now() + 10_000;
+    while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const pids = recordedPids(pidDir);
+    assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
+    child.kill("SIGINT");
+    const exitCode = await Promise.race([
+      exited,
+      new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
+    ]);
+    if (exitCode === "timed-out") child.kill("SIGKILL");
+    const survivors = waitForNoneAlive(pids, 5_000);
+    assert.deepEqual(survivors, [], "a worker process outlived induce after a real SIGINT");
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

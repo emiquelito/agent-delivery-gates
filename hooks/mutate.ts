@@ -57,6 +57,28 @@ import { resolveWithinRoot } from "../src/path-allowlist.ts";
 
 const DEFAULT_MAX = 25;
 
+/** How much output one run may print before Node kills it. mutate never
+ * reads stdout or stderr, but spawnCommand still buffers both in memory
+ * for the run's whole lifetime, and this tool runs the command once per
+ * mutation. With no cap that buffer is unbounded and repeats once per
+ * mutation attempted; the old spawnSync had an implicit 1 MB cap, so this
+ * is the same size induce and census already use, kept consistent across
+ * all three instead of picking a fourth number. */
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/** Bounds the baseline run when the caller gave no --timeout. The
+ * per-mutation default (baselineMs * 3 + 10s, below) is derived from how
+ * long the baseline took, so the baseline itself cannot use that formula:
+ * there is no prior duration yet to derive it from. An explicit --timeout
+ * still applies to the baseline the same way it applies to every
+ * mutation, since the caller asked for that same bound on "any single
+ * run"; only the no-flag case needs a stand-in. Ten minutes is generous
+ * enough not to fail an ordinary slow suite while still bounding a
+ * baseline that hangs, so a run this tool cannot interrupt itself does
+ * not depend entirely on an external kill.
+ */
+const DEFAULT_BASELINE_TIMEOUT_MS = 10 * 60 * 1000;
+
 const USAGE = `Usage: mutate [--rev REV] [--range A..B] [--staged] [--paths PATH...]
               [--command CMD] [--max N] [--timeout SECONDS] [--format text|json]
 
@@ -79,11 +101,14 @@ test read that line closely enough to fail.
                   report says how many were planned and how many attempted,
                   and says plainly when the two differ
   --timeout SECONDS  per-mutation timeout (default: three times the baseline
-                  run plus ten seconds). At the timeout, the command's
-                  whole process tree is killed, not just the command
-                  itself, so a worker process it started cannot outlive
-                  it. On Windows that kill is taskkill /t, which walks the
-                  same tree by a different name.
+                  run plus ten seconds). Also bounds the baseline run
+                  itself, which has no prior duration to derive a default
+                  from; with no --timeout the baseline gets a fixed ten
+                  minutes instead. At the timeout, the command's whole
+                  process tree is killed, not just the command itself, so
+                  a worker process it started cannot outlive it. On
+                  Windows that kill is taskkill /t, which walks the same
+                  tree by a different name.
   --format FORMAT "text" (default) or "json"
   --help          print this message and exit 0
 
@@ -402,7 +427,7 @@ function resolveCommand(args: ParsedArgs, repoRoot: string): string {
  * group, and a signal to the shell alone never reaches it, which is how a
  * timed-out mutation used to leave orphaned processes running. */
 async function runCommand(command: string, repoRoot: string, timeoutMs?: number): Promise<CommandRun> {
-  const result = await spawnCommand(command, { cwd: repoRoot, timeoutMs });
+  const result = await spawnCommand(command, { cwd: repoRoot, timeoutMs, maxBufferBytes: MAX_OUTPUT_BYTES });
   return { status: result.status, timedOut: result.timedOut, durationMs: result.durationMs };
 }
 
@@ -462,8 +487,23 @@ async function main(): Promise<void> {
   }
 
   // The baseline. A suite that is already red cannot tell anyone what a
-  // mutation did, so this is a hard stop, not a warning.
-  const baseline = await runCommand(command, repoRoot);
+  // mutation did, so this is a hard stop, not a warning. It needs its own
+  // timeout: the per-mutation default below is derived from how long the
+  // baseline took, so the baseline cannot use that formula, and with no
+  // timer at all nothing here would ever call the group kill if this run
+  // were killed while the baseline hung. An explicit --timeout bounds the
+  // baseline the same as every mutation; with none given,
+  // DEFAULT_BASELINE_TIMEOUT_MS stands in.
+  const baselineTimeoutMs =
+    args.timeoutSeconds !== undefined ? Math.round(args.timeoutSeconds * 1000) : DEFAULT_BASELINE_TIMEOUT_MS;
+  const baseline = await runCommand(command, repoRoot, baselineTimeoutMs);
+  if (baseline.timedOut) {
+    fail(
+      `the baseline run of '${command}' did not finish within ${baselineTimeoutMs / 1000}s, before anything was ` +
+        "mutated; a suite this tool cannot even measure once cannot judge a mutation. Pass --timeout to allow more " +
+        "time if the suite is legitimately this slow",
+    );
+  }
   if (baseline.status !== 0) {
     fail(
       `the baseline run of '${command}' failed (exit ${baseline.status ?? "killed"}) before anything was mutated; ` +

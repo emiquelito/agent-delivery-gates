@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -794,6 +794,66 @@ test("a timed-out run leaves no descendant running", () => {
     );
     const survivors = waitForNoneAlive(pids, 5_000);
     assert.deepEqual(survivors, [], "a worker process outlived the timed-out run");
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Ctrl-C leaves no descendant running (reviewer finding 1) ---------------
+
+// detached: true (added so the timeout could kill a whole process group)
+// also moves the command out of the terminal's foreground group, so a real
+// Ctrl-C, which the OS delivers only to the foreground group, no longer
+// reaches it at all. This proves the fix directly: a run whose command
+// spawns a worker sharing its own process group and never returns, and a
+// real SIGINT sent to the census process itself, exactly what a
+// terminal's Ctrl-C sends. No --timeout is given, so nothing but a real
+// SIGINT (and this fix) ever stops the hung run.
+
+test("a real Ctrl-C (SIGINT) to the census process leaves no descendant running", async () => {
+  const dir = makeRepo({
+    "leak-run.mjs": LEAK_RUN_MJS,
+    "leak-worker.mjs": LEAK_WORKER_MJS,
+    "README.md": "first\n",
+  });
+  const base = runGit(dir, ["rev-parse", "HEAD"]).trim();
+  writeFileSync(join(dir, "README.md"), "second\n");
+  runGit(dir, ["add", "."]);
+  runGit(dir, ["commit", "-q", "-m", "second"]);
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-sigint-pids-"));
+  try {
+    const child = spawn(
+      "node",
+      [CLI_PATH, "--base", base, "--command", `node leak-run.mjs ${pidDir}`, "--no-rerun"],
+      { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const exited = new Promise<number | null>((resolveExit) => {
+      child.on("exit", (code) => resolveExit(code));
+    });
+    const recordDeadline = Date.now() + 15_000;
+    while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const pids = recordedPids(pidDir);
+    assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
+    child.kill("SIGINT");
+    const exitCode = await Promise.race([
+      exited,
+      new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
+    ]);
+    if (exitCode === "timed-out") child.kill("SIGKILL");
+    const survivors = waitForNoneAlive(pids, 5_000);
+    assert.deepEqual(survivors, [], "a worker process outlived census after a real SIGINT");
+    assert.deepEqual(leftoverWorktrees(), [], "the temporary base worktree was not removed after the interrupt");
   } finally {
     rmSync(pidDir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });

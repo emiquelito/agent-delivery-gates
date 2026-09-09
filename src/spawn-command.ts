@@ -33,6 +33,32 @@
 // the same subtle bug was independently present in all three, and a
 // single audited kill path is easier to keep correct than three copies
 // free to drift back to it.
+//
+// A second leak, in the same form as the first, followed from the same
+// change: `detached: true` puts the command in a new process group so the
+// group can be killed at the timeout, but that also takes it out of the
+// terminal's foreground group. A real Ctrl-C sends SIGINT only to the
+// foreground group, so it now reaches this tool but never the command it
+// spawned, which is exactly the orphaning the timeout fix was written to
+// stop, just triggered a different way. This module is what creates the
+// detached group, so it is what owns tearing it down: while a command is
+// in flight, spawnCommand adds its own SIGINT/SIGTERM listener that kills
+// the whole group, registered with `prependListener` so it runs before
+// whatever handler the caller registered at startup (mutate restores
+// mutated files and calls process.exit; census removes its worktree and
+// does the same; either one, running first, would exit before the group
+// was ever signalled). The listener is added when the child starts and
+// removed the moment it settles, so a run of many sequential commands
+// (mutate's mutation loop, induce's specs) never accumulates listeners,
+// and a signal that arrives between commands falls through to the
+// caller's own handler exactly as before.
+//
+// Windows is unaffected by this: `detached` is false there already (see
+// below), so a command spawned there was never moved out of the console's
+// process group, and Ctrl-C's default propagation was never taken away by
+// this fix. The listener added here still fires on Windows and calls
+// killTree, but killTree's own Windows branch (taskkill /t) is idempotent
+// against a process that has already received Ctrl-C the ordinary way.
 
 import { spawn, execFile } from "node:child_process";
 import process from "node:process";
@@ -127,10 +153,27 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
       if (timer !== undefined) clearTimeout(timer);
     };
 
+    // A real Ctrl-C (or an external SIGTERM) reaches this tool's own
+    // process, not the detached group the command runs in. These two
+    // listeners are what makes that signal keep killing the group the way
+    // it used to before the group was detached. `prependListener` puts
+    // them ahead of any handler the caller registered earlier at startup,
+    // so the group is dead before that handler's own process.exit runs.
+    const onSignal = (): void => {
+      if (child.pid !== undefined) killTree(child.pid);
+    };
+    process.prependListener("SIGINT", onSignal);
+    process.prependListener("SIGTERM", onSignal);
+    const removeSignalListeners = (): void => {
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+    };
+
     const finish = (status: number | null, signal: NodeJS.Signals | null, spawnError?: string): void => {
       if (settled) return;
       settled = true;
       clearTimer();
+      removeSignalListeners();
       const result: SpawnCommandResult = {
         status,
         timedOut,
