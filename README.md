@@ -252,13 +252,29 @@ Needs a human gate, meaning no script can confirm it from the outside:
 | Works offline | Yes. |
 | Blocks | Yes. The hooks exit non-zero and stop the tool call or the commit. |
 | Needs an agent | No. Every check is a command with an exit code. |
+| Costs tokens | Not by itself. Inside an agent session, yes: see below. |
 
 **Does it use my model, my tokens, or my key?**
-None of them. These are ordinary programs. They run the same whether you drive
-them from Claude Code, Cursor, Codex, GitHub Copilot, a git hook, or a CI job
-with no agent anywhere. The one part that speaks to an agent is the MCP
-server, and that is a local subprocess on stdio that your client starts, not a
-service anyone hosts.
+No key, and no model call. These are ordinary programs, and run from a git
+hook or a CI job they cost nothing but time.
+
+Tokens are a different question, and the answer is yes when you run this the
+way most people will. Inside Claude Code, Cursor, Codex or Copilot, the agent
+runs the command and reads what it printed, and that output lands in the
+context you are paying for. A blocked tool call, a list of surviving
+mutations, a report on what did not settle: the agent reads all of it and
+often acts on it. That is the point, and it is not free.
+
+One command is more than reading. `induce` needs a spec naming the failure to
+cause and the handling to take away, and writing that for an unfamiliar
+codebase means finding the handler and working out how to break it. That is
+model work, and your agent does it.
+
+Which is the division worth understanding. A model is already in the loop; it
+is not inside the tool. The agent reads the code and proposes, and the tool
+runs it and judges, deterministically, with no opinion of its own. Putting a
+model inside would duplicate the agent already sitting there, and would trade
+the same answer every time for a longer one.
 
 **Then how does it catch things a model would catch?**
 It does not. It catches a different class. A model reads a diff and forms an
