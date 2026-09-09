@@ -1192,3 +1192,84 @@ test("the lede and the claims under it are one block, in one size and colour", (
     assert.match(rule, /font-size: clamp\(1\.2rem/, `${name} does not share the size`);
   }
 });
+
+// The column used to be 64rem wide with every block inside it capped at 46rem
+// and left-aligned, so the page carried a wide empty margin down the right and
+// nothing else. Nobody reading the stylesheet spots that; it only shows up on a
+// screen wide enough for the gap to open. The fix was to make the column the
+// measure, so this holds the column to that: outside a media query, no block
+// may be capped narrower than the column it sits in.
+test("no block is capped narrower than the column, which would push the page left", () => {
+  const css = pageCss(html);
+  const column = Number(/\.wrap \{[^}]*max-width: ([\d.]+)rem/.exec(css)![1]);
+  // Media queries are where a narrow cap is the point, so they are dropped
+  // first. The card row breaks out wider than the column and is not a cap.
+  const outside = css.replace(/@media[^{]*\{[\s\S]*?\}\s*\}/g, "");
+  const capped: string[] = [];
+  for (const rule of outside.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const selector = rule[1].trim();
+    if (selector.startsWith(".wrap ") || selector === ".wrap" || selector.startsWith(":root")) continue;
+    for (const cap of rule[2].matchAll(/max-width:\s*([\d.]+)rem/g)) {
+      if (Number(cap[1]) < column) capped.push(`${selector} at ${cap[1]}rem`);
+    }
+  }
+  assert.deepEqual(
+    capped,
+    [],
+    `the column is ${column}rem but these are capped narrower, so they sit against its left edge: ${capped.join("; ")}`,
+  );
+  assert.match(
+    css,
+    /\.wrap \{[^}]*margin: 0 auto/,
+    "the column is not centred, so the whole page hangs off one side",
+  );
+});
+
+/** Relative luminance of a `#rrggbb` colour, per WCAG 2. */
+function luminance(hex: string): number {
+  const channels = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const linear = channels.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+/** Contrast ratio between two `#rrggbb` colours, per WCAG 2. */
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+// Every text colour on this page is picked against a background, and the page
+// has changed background twice. Reading the ratios out of the stylesheet keeps
+// the check honest when the next colour lands, so a palette that no longer
+// reads fails here and not on somebody's screen.
+test("every text colour clears 4.5:1 on every background it can land on", () => {
+  const css = pageCss(html);
+  const palettes: Array<[string, string]> = [
+    ["default", /:root \{([\s\S]*?)\}/.exec(css)![1]],
+    ["other scheme", /@media \(prefers-color-scheme: (?:dark|light)\) \{\s*:root \{([\s\S]*?)\}/.exec(css)![1]],
+  ];
+  // --rule is a hairline and never text, so it is not held to a text bar.
+  const textTokens = ["--fg", "--muted", "--link", "--accent", "--warn"];
+  const grounds = ["--bg", "--code-bg", "--card-bg"];
+  let checked = 0;
+  for (const [scheme, block] of palettes) {
+    const colour = new Map(
+      [...block.matchAll(/(--[a-z-]+)\s*:\s*(#[0-9a-fA-F]{6})\s*;/g)].map((m) => [m[1], m[2]]),
+    );
+    for (const name of grounds) {
+      const ground = colour.get(name);
+      assert.ok(ground, `${scheme} defines no ${name}`);
+      for (const token of textTokens) {
+        const text = colour.get(token);
+        assert.ok(text, `${scheme} defines no ${token}`);
+        const ratio = contrast(text, ground);
+        assert.ok(
+          ratio >= 4.5,
+          `${scheme}: ${token} ${text} on ${name} ${ground} is ${ratio.toFixed(2)}:1, under 4.5:1`,
+        );
+        checked += 1;
+      }
+    }
+  }
+  assert.equal(checked, 30, `only ${checked} pairs were measured, so this test proves less than it reads`);
+});

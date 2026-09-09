@@ -580,24 +580,25 @@ function renderPage(rules, tally, examples, commands) {
 <meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
 <meta name="twitter:image" content="${socialUrl}">
 <meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230b1c15'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%2319a974' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#0b7261" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230b7261'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%239bf4da' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: dark light;
-  /* Dark is the default here, and the greens are the ones the Rust site
-     carries: #137752, #19a974, #9eebcf. A page of #137752 is too saturated to
-     read a paragraph on, so the ground is that hue taken most of the way to
-     black and the saturated greens do the work they are good at, marking
-     edges and links. */
-  --bg: #0b1c15;
-  --fg: #e7f4ec;
-  --muted: #8fb3a3;
-  --rule: #1d4a39;
-  --code-bg: #10291f;
-  --card-bg: #102a20;
-  --link: #9eebcf;
-  --accent: #19a974;
-  --warn: #e8a37f;
+  /* Dark is the default here, on the green ground the Rust site carries.
+     Every colour below was measured against that ground: body text, muted
+     text, links and the tick all clear 4.5:1, and the two panel greens sit
+     far enough off it to read as panels. */
+  --bg: #0b7261;
+  --fg: #eefbf6;
+  --muted: #cbebe0;
+  --rule: #6fc0af;
+  --code-bg: #064c40;
+  --card-bg: #095f51;
+  --link: #c7f9e5;
+  --accent: #9bf4da;
+  --warn: #ffdcc4;
 }
 /* Every token above is redefined here, none of them dropped. A token defined
    in one scheme only reads as the other scheme's value, which is the kind of
@@ -625,13 +626,11 @@ body {
   font-size: 1.125rem;
   line-height: 1.65;
 }
-.wrap { max-width: 64rem; margin: 0 auto; padding: 3.5rem 1.1rem 6rem; }
-/* One measure for every run of prose, centred in the column. Without this
-   the narrow blocks sit against the left edge of a much wider column and
-   the page looks pushed to one side, which is what it did. */
-.wrap > header, .wrap > main > section > :not(.cards):not(.scroller):not(ul.rules),
-.wrap > footer { max-width: 46rem; margin-inline: auto; }
-header h1, header .lede, header .headline, header .cta { margin-inline: auto; }
+/* The column is the measure. Prose fills it edge to edge, so every block on
+   the page shares one left margin and one right margin and the whole thing is
+   centred by construction. The earlier attempt capped each block instead and
+   left them all hugging the left of a much wider column. */
+.wrap { max-width: 50rem; margin: 0 auto; padding: 3.5rem 1.1rem 6rem; }
 header { border-bottom: 3px solid var(--accent); padding-bottom: 2rem; }
 h1 { font-size: clamp(2.5rem, 6vw, 4rem); line-height: 1.05; margin: 0 0 1.2rem; letter-spacing: -.02em; }
 h2 { font-size: clamp(1.75rem, 3.2vw, 2.4rem); line-height: 1.2; letter-spacing: -.01em; margin: 0 0 1.4rem; }
@@ -640,14 +639,11 @@ h4 { font-size: 1.05rem; margin: 0 0 .3rem; }
 p { margin: 0 0 1.2rem; }
 a { color: var(--link); }
 a:hover { text-decoration: none; }
-.lede { color: var(--fg); font-size: clamp(1.2rem, 2.1vw, 1.45rem); line-height: 1.45; max-width: 46rem; }
+.lede { color: var(--fg); font-size: clamp(1.2rem, 2.1vw, 1.45rem); line-height: 1.45; }
 nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; padding: 0; margin: 2rem 0 0; }
 nav a { font-size: 1rem; }
 main > article > section { padding: 5rem 0 0; }
 main > article > section + section { border-top: 1px solid var(--rule); margin-top: 5rem; }
-section > p, section > div.qa, section > h2, section > h3, section > pre, section > ul, section > .scroller {
-  max-width: 46rem;
-}
 code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; }
 code { background: var(--code-bg); padding: .1em .3em; border-radius: 3px; }
 pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; border: 1px solid var(--rule); line-height: 1.5; }
@@ -668,7 +664,6 @@ ul.rules p { margin: 0 0 .4rem; }
   font-size: clamp(1.2rem, 2.1vw, 1.45rem);
   color: var(--fg);
   line-height: 1.5;
-  max-width: 46rem;
   margin: 1.6rem 0 0;
   padding: 0;
   list-style: none;
