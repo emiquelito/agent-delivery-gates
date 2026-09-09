@@ -20,6 +20,7 @@ pre-commit hook.
 agent-delivery-gates validate-report [--report PATH] [--prior PATH] [--format text|json]
 agent-delivery-gates test-diff [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
 agent-delivery-gates mutate [--rev REV] [--range A..B] [--staged] [--paths PATH...] [--command CMD] [--max N] [--timeout SECONDS] [--format text|json]
+agent-delivery-gates census [--base REF] [--command CMD] [--format text|json] [--format-in tap|junit] [--timeout SECONDS] [--no-rerun]
 agent-delivery-gates scan-prose [FILE...] [--rules PATH] [--require-rules] [--baseline PATH | --write-baseline PATH]
 agent-delivery-gates tally [--tally PATH] [--format text|json] [--check]
 agent-delivery-gates check
@@ -83,6 +84,54 @@ including a dirty tree, an unstaged change under `--staged`, a `--paths`
 target git ignores, a failing baseline, no command to run, or a selector
 that named nothing to mutate; `3` nothing survived, but at least one
 mutation never got a verdict, so part of the run is unmeasured.
+
+### census
+
+Runs the test suite at a base commit and at HEAD, compares the two
+censuses, and separately runs the test files this change touched against
+the base source. It answers two questions a green run cannot: did a test
+quietly stop running, and does a test added beside a fix actually fail
+without the fix.
+
+It reports a test that ran at the base commit and no longer runs
+(`disappeared`), a suite that runs fewer tests than it did
+(`count-dropped`), a test this change added that passes against the base
+source and so demonstrates nothing about the change
+(`not-red-before-green`), a test that went from pass to fail or back
+(`flipped`), and a test this change added that could not run at all
+against the base source (`errored-at-base`). That last one is an error,
+not a failure: a test that never loaded proves nothing, and it is never
+counted as red before green.
+
+The working tree is never touched. The base commit is checked out with
+`git worktree add --detach` into a temporary directory that is removed
+afterwards, including when the run fails; `git checkout`, `git stash`,
+and `git restore` are never run. It refuses to start on a dirty tree.
+
+A fresh worktree has no `node_modules`. When package.json and every
+lockfile are byte-identical between the base and HEAD, the main
+worktree's install is reused through a symlink. When they differ, this
+is exit 2: the base cannot be built comparably, and a base run that
+fails to start must never read as every test disappearing.
+
+Known limits, all of them real:
+
+- Identity is the file plus the test name, so a renamed test reads as one
+  test disappearing and another appearing.
+- Two to three full suite runs, plus one more per side when a
+  disagreement is re-checked for flakiness. This belongs in pre-push, in
+  CI, or in a Stop hook, never in a per-edit hook.
+- A flaky suite still produces noise after one re-run: a disagreement
+  that settles is dropped, one that keeps changing is not.
+- Only TAP and JUnit XML are read. A runner that writes JUnit XML to a
+  file has to be told to print it instead.
+
+Exit codes: `0` nothing found and everything was measured; `1` at least
+one finding; `2` could not run as asked, including a dirty tree, a base
+that cannot be resolved, a lockfile that differs between the base and
+HEAD, or output in neither format; `3` nothing found, but part of the run
+was unmeasured, such as a base run that could not be compared or a test
+that errored against the base source.
 
 ### scan-prose
 

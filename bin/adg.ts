@@ -50,6 +50,9 @@ Commands:
   test-diff [...]          separate a diff's source half from its test half
   mutate [...]             break the code in known ways and report what
                            the test suite failed to notice
+  census [...]             run the suite at a base commit and at HEAD, and
+                           report a test that stopped running or a new test
+                           that passes without the change
   tally [...]              read or check the gate tally log
   scan-prose [...]         scan text against configured prose rules
   check                    run the pre-publication checks
@@ -238,6 +241,9 @@ function main(): void {
       break;
     case "mutate":
       nodeTool("hooks/mutate.ts", rest);
+      break;
+    case "census":
+      nodeTool("hooks/census.ts", rest);
       break;
     case "tally":
       nodeTool("scripts/tally-report.ts", rest);

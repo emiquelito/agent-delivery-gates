@@ -268,6 +268,36 @@ Verified: `test-diff-separator --rev HEAD` against this repository's
 current HEAD printed the source diff, reported no test files changed,
 and exited 0.
 
+### census
+
+Runs the test suite at a base commit and at HEAD, compares the two
+censuses, and separately runs the test files the change touched against
+the base source. This is the mechanical part of `red-before-green` that a
+hook cannot carry: a test added beside a fix that passes against the old
+source demonstrates nothing about the fix, and a test that quietly
+stopped running leaves a green suite looking exactly as it did before.
+
+```
+census [--base REF] [--command CMD] [--format text|json] [--format-in tap|junit] [--timeout SECONDS] [--no-rerun]
+```
+
+The base commit is checked out into a temporary `git worktree`, removed
+afterwards; the working tree is never touched and a dirty tree is
+refused. A test that could not run at all against the base source is
+reported as an error, never as a red run.
+
+Exit codes: `0` nothing found and everything was measured; `1` at least
+one finding; `2` could not run as asked, including a dirty tree, an
+unresolvable base, a lockfile that differs between the base and HEAD, or
+output in neither TAP nor JUnit XML; `3` nothing found, but part of the
+run was unmeasured.
+
+Verified: against a scratch repository whose second commit fixed a
+discount function and added a test asserting only that the result was a
+number, `census` exited 1 and reported `not-red-before-green`. With the
+same fix and the test rewritten to assert the discounted value, it
+exited 0 and reported that test as red against the base source.
+
 ### Wiring them in without a hook system
 
 A pre-commit hook or a CI step can call either command directly and act
