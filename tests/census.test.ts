@@ -13,12 +13,16 @@ import {
   exitCodeFor,
   formatReportJson,
   formatReportText,
+  mergeCensusFindings,
+  mergeRedHalves,
   parseJUnit,
   parseResults,
   parseTap,
   resultsLookComplete,
   tapPlan,
   testKey,
+  type CompareResult,
+  type Finding,
   type ReportInput,
   type TestRecord,
 } from "../src/census.ts";
@@ -432,6 +436,130 @@ test("nothing found and nothing unmeasured is exit 0", () => {
   assert.equal(exitCodeFor({ findings: [], unmeasured: [] }), 0);
 });
 
+// --- two runs of the same comparison ---------------------------------------------
+
+// The rule these tests hold in place: a disagreement between the two runs is
+// a result nobody measured. Dropping it as flaky reported a result that could
+// not be measured as a result that is fine, which is the mistake this whole
+// repository opens with.
+
+function redCompare(redRun: TestRecord[] | null): CompareResult {
+  return compareCensus({ base: [pass("old")], head: [pass("old"), pass("new")], redRun });
+}
+
+test("a red-half result found on the first run and not the second did not settle", () => {
+  // First run: "new" passes against the base source, which is a finding.
+  // Second run: it fails there, which is clean. Neither answer is the answer.
+  const merged = mergeRedHalves(redCompare([pass("old"), pass("new")]), redCompare([pass("old"), fail_("new")]));
+  assert.equal(merged.unsettled, 1);
+  assert.deepEqual(merged.result.findings, []);
+  assert.deepEqual(merged.result.unmeasured.map((u) => u.kind), ["did-not-settle"]);
+  assert.deepEqual(merged.result.redAtBase, []);
+  assert.match(merged.result.unmeasured[0].detail, /did not settle between the two runs/);
+  assert.equal(exitCodeFor(merged.result), 3);
+});
+
+test("a red-half result found on the second run and not the first did not settle", () => {
+  const merged = mergeRedHalves(redCompare([pass("old"), fail_("new")]), redCompare([pass("old"), pass("new")]));
+  assert.equal(merged.unsettled, 1);
+  assert.deepEqual(merged.result.findings, []);
+  assert.deepEqual(merged.result.unmeasured.map((u) => u.kind), ["did-not-settle"]);
+  assert.deepEqual(merged.result.redAtBase, []);
+  assert.equal(exitCodeFor(merged.result), 3);
+});
+
+test("a red-half result both runs agree about is still a finding", () => {
+  const both = redCompare([pass("old"), pass("new")]);
+  const merged = mergeRedHalves(both, redCompare([pass("old"), pass("new")]));
+  assert.equal(merged.unsettled, 0);
+  assert.deepEqual(merged.result.findings.map((f) => f.kind), ["not-red-before-green"]);
+  assert.equal(exitCodeFor(merged.result), 1);
+});
+
+test("a red-half result neither run found is still clean", () => {
+  const merged = mergeRedHalves(redCompare([pass("old"), fail_("new")]), redCompare([pass("old"), fail_("new")]));
+  assert.equal(merged.unsettled, 0);
+  assert.deepEqual(merged.result.findings, []);
+  assert.deepEqual(merged.result.unmeasured, []);
+  assert.deepEqual(merged.result.redAtBase.map((t) => t.name), ["new"]);
+  assert.equal(exitCodeFor(merged.result), 0);
+});
+
+// Two unmeasured kinds are not one unmeasured kind. A test the first run
+// could not load and the second merely skipped was answered two ways.
+test("two different unmeasured verdicts about one test do not settle either", () => {
+  const first = redCompare([pass("old")]);
+  const second = redCompare([pass("old"), { file: "", name: "new", outcome: "skip" }]);
+  const merged = mergeRedHalves(first, second);
+  assert.equal(merged.unsettled, 1);
+  assert.deepEqual(merged.result.unmeasured.map((u) => u.kind), ["did-not-settle"]);
+});
+
+test("a red-half unmeasured verdict both runs agree about is kept as it was", () => {
+  const merged = mergeRedHalves(redCompare([pass("old")]), redCompare([pass("old")]));
+  assert.equal(merged.unsettled, 0);
+  assert.deepEqual(merged.result.unmeasured.map((u) => u.kind), ["errored-at-base"]);
+  assert.equal(exitCodeFor(merged.result), 3);
+});
+
+// A finding somewhere else does not become less of a finding because another
+// test disagreed with itself: exit 1 wins, and both are reported.
+test("a real finding beside an unsettled one keeps exit 1, and both are reported", () => {
+  const first = compareCensus({
+    base: [pass("old"), pass("gone")],
+    head: [pass("old"), pass("new")],
+    redRun: [pass("old"), pass("new")],
+  });
+  const second = compareCensus({
+    base: [pass("old"), pass("gone")],
+    head: [pass("old"), pass("new")],
+    redRun: [pass("old"), fail_("new")],
+  });
+  const merged = mergeRedHalves(first, second);
+  assert.equal(merged.unsettled, 1);
+  assert.deepEqual(merged.result.findings.map((f) => f.kind), ["disappeared"]);
+  assert.ok(merged.result.unmeasured.some((u) => u.kind === "did-not-settle"));
+  assert.equal(exitCodeFor(merged.result), 1);
+});
+
+const GONE: Finding = {
+  kind: "disappeared",
+  file: "",
+  name: "gone",
+  detail: "gone ran at the base commit and does not run at HEAD",
+};
+const FEWER: Finding = {
+  kind: "count-dropped",
+  file: "",
+  name: "",
+  detail: "the suite ran 2 tests at the base commit and 1 at HEAD, 1 fewer",
+};
+
+test("a census finding both runs reported is kept, and one only one run reported is not", () => {
+  const settled = mergeCensusFindings([GONE, FEWER], [GONE]);
+  assert.deepEqual(settled.findings.map((f) => f.kind), ["disappeared"]);
+  assert.deepEqual(settled.unsettled.map((u) => u.kind), ["did-not-settle"]);
+  assert.equal(settled.unsettled[0].name, "");
+  assert.match(settled.unsettled[0].detail, /one of the two runs reported that/);
+  assert.match(settled.unsettled[0].detail, /did not settle between the two runs/);
+});
+
+// The direction the old rule never even looked at. A finding the second run
+// reported and the first did not was silently discarded, because the merge
+// filtered the first run's list by what recurred.
+test("a census finding only the second run reported did not settle either", () => {
+  const settled = mergeCensusFindings([GONE], [GONE, FEWER]);
+  assert.deepEqual(settled.findings.map((f) => f.kind), ["disappeared"]);
+  assert.deepEqual(settled.unsettled.map((u) => u.kind), ["did-not-settle"]);
+  assert.match(settled.unsettled[0].detail, /1 fewer/);
+});
+
+test("two runs that agree about every census finding leave nothing unsettled", () => {
+  const settled = mergeCensusFindings([GONE, FEWER], [FEWER, GONE]);
+  assert.deepEqual(settled.findings.map((f) => f.kind), ["disappeared", "count-dropped"]);
+  assert.deepEqual(settled.unsettled, []);
+});
+
 // --- reporting -------------------------------------------------------------------
 
 function reportInput(overrides: Partial<ReportInput> = {}): ReportInput {
@@ -448,8 +576,7 @@ function reportInput(overrides: Partial<ReportInput> = {}): ReportInput {
     baseFormat: "tap",
     changedTestFiles: ["tests/order.test.js"],
     result,
-    flakesDropped: 0,
-    unmeasuredDropped: 0,
+    unsettled: 0,
     runs: 3,
     notes: [],
     ...overrides,
@@ -464,10 +591,15 @@ test("the text report names the finding, the base, and the command", () => {
   assert.match(text, /tests\/order\.test\.js/);
 });
 
-test("the text report says how many disagreements were dropped as flaky", () => {
-  const text = formatReportText(reportInput({ flakesDropped: 2 }));
-  assert.match(text, /2 finding\(s\) did not hold on a second run/);
-  assert.match(text, /truly flaky still produces noise/);
+// Nothing is dropped any more, so the count says what did happen: how many
+// results the two runs disagreed about. Wording that says findings were
+// dropped as flaky is wording that says a run cleared itself.
+test("the text report says how many results did not settle", () => {
+  const text = formatReportText(reportInput({ unsettled: 2 }));
+  assert.match(text, /2 result\(s\) did not settle between the two runs/);
+  assert.match(text, /none of these is reported as a finding and none of them is dropped/);
+  assert.doesNotMatch(text, /dropped as flaky/);
+  assert.doesNotMatch(text, /did not hold on a second run/);
 });
 
 // The closing line used to claim every added test was red whenever the two
@@ -497,20 +629,14 @@ test("a change that added no test says so instead of claiming every one was red"
   assert.match(text, /This change added no test/);
 });
 
-// An unmeasured item the second run measured was never a finding, and
-// counting it as "a finding that did not hold" said a run had found
-// something it never found.
-test("dropped unmeasured items are counted apart from dropped findings", () => {
-  const text = formatReportText(reportInput({ flakesDropped: 1, unmeasuredDropped: 2 }));
-  assert.match(text, /1 finding\(s\) did not hold on a second run/);
-  assert.match(text, /2 unmeasured item\(s\) were measured on a second run/);
-  assert.match(text, /None of these was a finding/);
-  const parsed = JSON.parse(formatReportJson(reportInput({ flakesDropped: 1, unmeasuredDropped: 2 }))) as {
-    flakesDropped: number;
-    unmeasuredDropped: number;
-  };
-  assert.equal(parsed.flakesDropped, 1);
-  assert.equal(parsed.unmeasuredDropped, 2);
+// The count belongs in the data too, so a caller reading json can tell a run
+// that measured everything from one that could not.
+test("the json report carries the count of results that did not settle", () => {
+  const parsed = JSON.parse(formatReportJson(reportInput({ unsettled: 3 }))) as { unsettled: number };
+  assert.equal(parsed.unsettled, 3);
+  const none = JSON.parse(formatReportJson(reportInput())) as { unsettled: number };
+  assert.equal(none.unsettled, 0);
+  assert.doesNotMatch(formatReportText(reportInput()), /did not settle/);
 });
 
 test("the json report carries the findings and the counts", () => {

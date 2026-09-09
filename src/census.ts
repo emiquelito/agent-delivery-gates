@@ -447,7 +447,8 @@ export type UnmeasuredKind =
   | "skipped-at-base"
   | "base-not-comparable"
   | "red-run-not-comparable"
-  | "identity-collision";
+  | "identity-collision"
+  | "did-not-settle";
 
 export interface Finding {
   kind: FindingKind;
@@ -671,6 +672,181 @@ function compareRedRun(redRun: TestRecord[] | null, appeared: TestRecord[] | nul
   return { findings, unmeasured, redAtBase };
 }
 
+// --- two runs of the same comparison ------------------------------------------
+
+/**
+ * The identity of one finding: what it says, about which test. Two runs of
+ * the same suite produce the same id for the same problem, which is what
+ * makes them comparable at all.
+ */
+export function findingId(item: Finding): string {
+  return `${item.kind}\n${item.file}\n${item.name}`;
+}
+
+/** The finding and unmeasured kinds the red-before-green half produces, and
+ * so the ones a second run of that half can disagree about. */
+export const RED_FINDING_KINDS: ReadonlySet<string> = new Set(["not-red-before-green"]);
+export const RED_UNMEASURED_KINDS: ReadonlySet<string> = new Set(["errored-at-base", "skipped-at-base"]);
+
+/**
+ * The rule both merges below follow, and the reason for it.
+ *
+ * A result the two runs agree about stands as it stands. A result they
+ * disagree about, in either direction, did not settle: this run watched the
+ * same question answered two ways and has no answer of its own. That is an
+ * unmeasured item, never a finding, because the problem was not established,
+ * and never dropped, because its absence was not established either.
+ *
+ * The earlier rule let the second run clear a first-run problem by seeing the
+ * test red against the base itself, and dropped the disagreement as flaky.
+ * That reads a result nobody could measure as a result that is fine, which is
+ * the same mistake as reading a suite that ran no tests as a suite that
+ * passed: the example this whole repository opens with.
+ */
+function didNotSettle(file: string, name: string, detail: string): Unmeasured {
+  return { kind: "did-not-settle", file, name, detail };
+}
+
+export interface SettledFindings {
+  /** The findings both runs reported. */
+  findings: Finding[];
+  /** One item per finding only one of the two runs reported. */
+  unsettled: Unmeasured[];
+}
+
+/**
+ * The census half over two runs: a test that stopped running, a dropped
+ * count, a flipped outcome. A finding both runs report is a finding. A
+ * finding one run reports and the other does not did not settle, whichever
+ * run reported it: a problem found only on the second run is no better
+ * established than one found only on the first.
+ */
+export function mergeCensusFindings(first: Finding[], second: Finding[]): SettledFindings {
+  const secondById = new Map(second.map((finding) => [findingId(finding), finding]));
+  const firstIds = new Set(first.map(findingId));
+  const findings: Finding[] = [];
+  const unsettled: Unmeasured[] = [];
+  for (const finding of first) {
+    if (secondById.has(findingId(finding))) findings.push(finding);
+    else unsettled.push(didNotSettle(finding.file, finding.name, onlyOneRunSaid(finding)));
+  }
+  for (const finding of second) {
+    if (!firstIds.has(findingId(finding))) {
+      unsettled.push(didNotSettle(finding.file, finding.name, onlyOneRunSaid(finding)));
+    }
+  }
+  return { findings, unsettled };
+}
+
+function onlyOneRunSaid(finding: Finding): string {
+  return (
+    `one of the two runs reported that ${finding.detail}, and the other did not, so this result did not settle ` +
+    "between the two runs and nothing here measures it"
+  );
+}
+
+interface RedVerdict {
+  /** How the two runs are compared: same tag, same result. */
+  tag: string;
+  /** How the report says it, in English. */
+  said: string;
+  finding: Finding | null;
+  unmeasured: Unmeasured | null;
+}
+
+const RED_VERDICT_WORDS: Record<string, string> = {
+  "not-red-before-green": "passing against the base source",
+  "errored-at-base": "unable to run against the base source at all",
+  "skipped-at-base": "skipped against the base source",
+  red: "failing against the base source",
+};
+
+function redVerdicts(result: CompareResult): Map<string, RedVerdict> {
+  const verdicts = new Map<string, RedVerdict>();
+  for (const finding of result.findings) {
+    if (!RED_FINDING_KINDS.has(finding.kind)) continue;
+    verdicts.set(testKey(finding), {
+      tag: finding.kind,
+      said: RED_VERDICT_WORDS[finding.kind] ?? finding.kind,
+      finding,
+      unmeasured: null,
+    });
+  }
+  for (const item of result.unmeasured) {
+    if (!RED_UNMEASURED_KINDS.has(item.kind)) continue;
+    verdicts.set(testKey(item), {
+      tag: item.kind,
+      said: RED_VERDICT_WORDS[item.kind] ?? item.kind,
+      finding: null,
+      unmeasured: item,
+    });
+  }
+  for (const test of result.redAtBase) {
+    verdicts.set(testKey(test), { tag: "red", said: RED_VERDICT_WORDS.red, finding: null, unmeasured: null });
+  }
+  return verdicts;
+}
+
+export interface MergedRed {
+  result: CompareResult;
+  /** How many tests the two runs disagreed about. */
+  unsettled: number;
+}
+
+/**
+ * The red-before-green half over two runs, one added test at a time. The two
+ * comparisons are given the same base and HEAD censuses and differ only in
+ * the run against the base source, so both hold the same list of added tests.
+ *
+ * A test both runs call red is red. A test both runs call the same problem
+ * keeps that problem. A test the two runs call anything else did not settle,
+ * in either direction: a run that saw it pass against the base and a run that
+ * saw it fail there cannot both be right, and taking the kinder of the two is
+ * how a run launders a disagreement into a clean bill.
+ */
+export function mergeRedHalves(first: CompareResult, second: CompareResult): MergedRed {
+  const before = redVerdicts(first);
+  const after = redVerdicts(second);
+  const keptFindings: Finding[] = [];
+  const keptUnmeasured: Unmeasured[] = [];
+  const redAtBase: TestRecord[] = [];
+  let unsettled = 0;
+
+  const asRed: RedVerdict = { tag: "red", said: RED_VERDICT_WORDS.red, finding: null, unmeasured: null };
+  for (const test of first.appeared) {
+    const key = testKey(test);
+    const firstVerdict = before.get(key) ?? asRed;
+    const secondVerdict = after.get(key) ?? asRed;
+    if (firstVerdict.tag !== secondVerdict.tag) {
+      unsettled++;
+      keptUnmeasured.push(
+        didNotSettle(
+          test.file,
+          test.name,
+          `${describe(test)} was ${firstVerdict.said} on the first run and ${secondVerdict.said} on the second, ` +
+            "so this result did not settle between the two runs and nothing here measures it",
+        ),
+      );
+      continue;
+    }
+    if (firstVerdict.finding !== null) keptFindings.push(firstVerdict.finding);
+    else if (firstVerdict.unmeasured !== null) keptUnmeasured.push(firstVerdict.unmeasured);
+    else redAtBase.push(test);
+  }
+
+  const otherFindings = first.findings.filter((finding) => !RED_FINDING_KINDS.has(finding.kind));
+  const otherUnmeasured = first.unmeasured.filter((item) => !RED_UNMEASURED_KINDS.has(item.kind));
+  return {
+    result: {
+      ...first,
+      findings: [...otherFindings, ...keptFindings],
+      unmeasured: [...otherUnmeasured, ...keptUnmeasured],
+      redAtBase,
+    },
+    unsettled,
+  };
+}
+
 /**
  * Exit code for a finished comparison:
  *   0  nothing found and everything was measured
@@ -697,12 +873,10 @@ export interface ReportInput {
   baseFormat: ResultFormat | null;
   changedTestFiles: string[];
   result: CompareResult;
-  /** Findings that did not hold on a second run, and so were dropped. */
-  flakesDropped: number;
-  /** Unmeasured items the second run did measure, and so were dropped.
-   * These were never findings, and counting them as findings that did not
-   * hold said a run had found something it never found. */
-  unmeasuredDropped: number;
+  /** How many results the two runs disagreed about. Each one is in
+   * `result.unmeasured` as a did-not-settle item: nothing is dropped, so
+   * there is no count of dropped things to report. */
+  unsettled: number;
   /** How many times the whole suite ran, including any re-run. */
   runs: number;
   notes: string[];
@@ -737,17 +911,12 @@ export function formatReportText(input: ReportInput): string {
     `${result.findings.length} finding(s), ${result.unmeasured.length} unmeasured, ${result.appeared.length} test(s) added, ${result.redAtBase.length} of those red against the base source`,
   );
 
-  if (input.flakesDropped > 0) {
+  if (input.unsettled > 0) {
     lines.push("");
     lines.push(
-      `${input.flakesDropped} finding(s) did not hold on a second run and were dropped as flaky. A suite that is truly flaky still produces noise here: one re-run drops the disagreements that settle, not the ones that keep changing.`,
-    );
-  }
-
-  if (input.unmeasuredDropped > 0) {
-    lines.push("");
-    lines.push(
-      `${input.unmeasuredDropped} unmeasured item(s) were measured on a second run and are not reported here. None of these was a finding.`,
+      `${input.unsettled} result(s) did not settle between the two runs and are listed below as unmeasured. A run ` +
+        "that answered the same question two ways established neither the problem nor its absence, so none of " +
+        "these is reported as a finding and none of them is dropped.",
     );
   }
 
@@ -814,8 +983,7 @@ export function formatReportJson(input: ReportInput): string {
       },
       changedTestFiles: input.changedTestFiles,
       runs: input.runs,
-      flakesDropped: input.flakesDropped,
-      unmeasuredDropped: input.unmeasuredDropped,
+      unsettled: input.unsettled,
       findings: input.result.findings,
       unmeasured: input.result.unmeasured,
       redAtBase: input.result.redAtBase,

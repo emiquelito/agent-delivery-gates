@@ -53,12 +53,15 @@ import {
   exitCodeFor,
   formatReportJson,
   formatReportText,
+  findingId,
+  mergeCensusFindings,
+  mergeRedHalves,
   parseResults,
   resultsLookComplete,
   tapPlan,
-  testKey,
+  RED_FINDING_KINDS,
+  RED_UNMEASURED_KINDS,
   type CompareResult,
-  type Finding,
   type ResultFormat,
   type TestRecord,
   type Unmeasured,
@@ -85,7 +88,7 @@ the base source.
                   neither format is exit 2, never "no tests found"
   --timeout SECONDS  kill any single run after this long. A run that timed
                   out is unreadable, not empty
-  --no-rerun      do not re-run to check a disagreement for flakiness
+  --no-rerun      do not re-run to check whether a disagreement settles
   --help          print this message and exit 0
 
 What it reports:
@@ -98,6 +101,9 @@ What it reports:
                         against the base source, usually a missing import.
                         That is an error, not a red run, and it is never
                         counted as red-before-green satisfied
+  did-not-settle        the two runs of the same check said different things
+                        about one test. Neither the problem nor its absence
+                        was established, so the result is unmeasured
 
 The base worktree and its dependencies:
   The base commit is checked out with \`git worktree add --detach\` into a
@@ -117,12 +123,16 @@ Known limits, all of them real:
     under a name another file already uses is then never checked against
     the base source, and the run says so as an identity-collision it could
     not measure.
-  - Three to six full suite runs: HEAD, the base, this change's tests
+  - Two to six full suite runs: HEAD, the base, this change's tests
     against the base source, and a re-run of any of those when a
-    disagreement is re-checked for flakiness. This belongs in pre-push, in
-    CI, or in a Stop hook, never in a per-edit hook.
-  - A flaky suite still produces noise after one re-run: a disagreement
-    that settles is dropped, one that keeps changing is not.
+    disagreement is re-checked. This belongs in pre-push, in CI, or in a
+    Stop hook, never in a per-edit hook.
+  - A suite that disagrees with itself is reported, not smoothed over. When
+    the two runs say different things about one test, in either direction,
+    the result is unmeasured and the run exits 3: it is not a finding,
+    because the problem was not established, and it is not dropped, because
+    its absence was not established either. A flaky suite therefore keeps
+    producing exit 3 here until it is fixed.
   - Only TAP and JUnit XML are read. A runner that writes JUnit XML to a
     file has to be told to print it instead, as pytest does with
     \`--junitxml=/dev/stdout\`.
@@ -145,8 +155,9 @@ Exit codes:
      between the base and HEAD, output in neither TAP nor JUnit XML, or a
      tree left dirty afterwards
   3  nothing found, but part of the run was unmeasured: a base run that
-     could not be compared, a test that errored against the base source,
-     or a result subset that could not be read
+     could not be compared, a test that errored against the base source, a
+     result the two runs did not agree about, or a result subset that could
+     not be read
 `;
 
 /** Lockfiles checked for a byte-identical match between the base and HEAD.
@@ -648,14 +659,7 @@ function copyTestFilesInto(repoRoot: string, worktreeDir: string, paths: string[
   }
 }
 
-// --- flake re-checking -----------------------------------------------------------
-
-function findingId(item: Finding): string {
-  return `${item.kind}\n${item.file}\n${item.name}`;
-}
-
-const RED_FINDING_KINDS = new Set(["not-red-before-green"]);
-const RED_UNMEASURED_KINDS = new Set(["errored-at-base", "skipped-at-base"]);
+// --- the re-run --------------------------------------------------------------
 
 /**
  * Whether a census that parsed cleanly is still no census at all: it holds
@@ -667,102 +671,13 @@ const RED_UNMEASURED_KINDS = new Set(["errored-at-base", "skipped-at-base"]);
  * that collected nothing used to make every finding from the first run look
  * like a disagreement that settled, so the whole report was dropped as flaky
  * and the command exited 0. That made the default mode less safe than
- * --no-rerun, which is the opposite of what a re-run is for.
+ * --no-rerun, which is the opposite of what a re-run is for. A re-run that
+ * collected nothing is unreadable, which is not the same as a re-run that
+ * disagreed: it is not evidence of anything, so it settles nothing and
+ * unsettles nothing either.
  */
 function heldNoTests(tests: TestRecord[], comparedWith: number): boolean {
   return tests.length === 0 && comparedWith > 0;
-}
-
-interface RedVerdicts {
-  findings: Map<string, Finding>;
-  unmeasured: Map<string, Unmeasured>;
-  red: Set<string>;
-}
-
-/** What one comparison said about each test this change added: a finding, an
- * unmeasured item, or red against the base source. */
-function redVerdicts(result: CompareResult): RedVerdicts {
-  const findings = new Map<string, Finding>();
-  for (const finding of result.findings) {
-    if (RED_FINDING_KINDS.has(finding.kind)) findings.set(testKey(finding), finding);
-  }
-  const unmeasured = new Map<string, Unmeasured>();
-  for (const item of result.unmeasured) {
-    if (RED_UNMEASURED_KINDS.has(item.kind)) unmeasured.set(testKey(item), item);
-  }
-  return { findings, unmeasured, red: new Set(result.redAtBase.map(testKey)) };
-}
-
-interface MergedRed {
-  result: CompareResult;
-  findingsDropped: number;
-  unmeasuredDropped: number;
-}
-
-/**
- * Merges what two runs of this change's tests against the base source said,
- * one test at a time. One rule decides it: the second run may clear a problem
- * only by seeing the test red against the base itself. Every other
- * disagreement takes the worse of the two verdicts, where a finding is worse
- * than an unmeasured item and an unmeasured item is worse than a red run.
- *
- * Filtering the first run's list by what recurred did only half of that. A
- * test the first run called skipped-at-base and the second called
- * not-red-before-green matched neither list and vanished from both, so a real
- * finding came out as exit 0 under a closing line claiming every added test
- * had been red. Nothing a second run reveals may be dropped for having been
- * revealed second.
- */
-function mergeRedHalves(first: CompareResult, second: CompareResult): MergedRed {
-  const before = redVerdicts(first);
-  const after = redVerdicts(second);
-  const keptFindings: Finding[] = [];
-  const keptUnmeasured: Unmeasured[] = [];
-  const redAtBase: TestRecord[] = [];
-  let findingsDropped = 0;
-  let unmeasuredDropped = 0;
-
-  for (const test of first.appeared) {
-    const key = testKey(test);
-    const firstFinding = before.findings.get(key);
-    const firstUnmeasured = before.unmeasured.get(key);
-    const secondFinding = after.findings.get(key);
-    const secondUnmeasured = after.unmeasured.get(key);
-
-    if (after.red.has(key)) {
-      // The re-run watched this test fail against the base source. That is
-      // the one thing that clears a first-run problem, and it is the flake
-      // allowance this command documents.
-      if (firstFinding !== undefined) findingsDropped++;
-      if (firstUnmeasured !== undefined) unmeasuredDropped++;
-      redAtBase.push(test);
-      continue;
-    }
-    const finding = firstFinding ?? secondFinding;
-    if (finding !== undefined) {
-      keptFindings.push(finding);
-      continue;
-    }
-    const item = firstUnmeasured ?? secondUnmeasured;
-    if (item !== undefined) {
-      keptUnmeasured.push(item);
-      continue;
-    }
-    redAtBase.push(test);
-  }
-
-  const otherFindings = first.findings.filter((finding) => !RED_FINDING_KINDS.has(finding.kind));
-  const otherUnmeasured = first.unmeasured.filter((item) => !RED_UNMEASURED_KINDS.has(item.kind));
-  return {
-    result: {
-      ...first,
-      findings: [...otherFindings, ...keptFindings],
-      unmeasured: [...otherUnmeasured, ...keptUnmeasured],
-      redAtBase,
-    },
-    findingsDropped,
-    unmeasuredDropped,
-  };
 }
 
 // --- main -------------------------------------------------------------------------
@@ -883,9 +798,8 @@ async function main(): Promise<void> {
     // or the base run's re-run would be measuring the new tests.
     const censusResult = compareCensus({ base: baseTests, head: headRun.tests, redRun: null });
     let runs = 2;
-    let flakesDropped = 0;
-    let unmeasuredDropped = 0;
-    let confirmedCensus: Set<string> | null = null;
+    let unsettled = 0;
+    let censusSettlement: { held: Set<string>; unsettled: Unmeasured[] } | null = null;
 
     if (args.rerun && censusResult.findings.length > 0 && baseTests !== null) {
       await new Promise((tick) => setImmediate(tick));
@@ -911,10 +825,9 @@ async function main(): Promise<void> {
         );
       } else {
         const second = compareCensus({ base: baseAgain.tests, head: headAgain.tests, redRun: null });
-        const held = new Set(second.findings.map(findingId));
-        const kept = censusResult.findings.filter((finding) => held.has(findingId(finding)));
-        flakesDropped += censusResult.findings.length - kept.length;
-        confirmedCensus = new Set(kept.map(findingId));
+        const settled = mergeCensusFindings(censusResult.findings, second.findings);
+        unsettled += settled.unsettled.length;
+        censusSettlement = { held: new Set(settled.findings.map(findingId)), unsettled: settled.unsettled };
       }
     }
 
@@ -963,17 +876,19 @@ async function main(): Promise<void> {
         const second = compareCensus({ base: baseTests, head: headRun.tests, redRun: redAgain.tests });
         const merged = mergeRedHalves(result, second);
         result = merged.result;
-        flakesDropped += merged.findingsDropped;
-        unmeasuredDropped += merged.unmeasuredDropped;
+        unsettled += merged.unsettled;
       }
     }
 
-    if (confirmedCensus !== null) {
-      const held = confirmedCensus;
+    if (censusSettlement !== null) {
+      // A census finding both runs reported stands. One only a single run
+      // reported is a did-not-settle item, so it leaves the findings and
+      // joins the unmeasured list, where it costs exit 3 and never exit 0.
+      const settlement = censusSettlement;
       const kept = result.findings.filter(
-        (finding) => RED_FINDING_KINDS.has(finding.kind) || held.has(findingId(finding)),
+        (finding) => RED_FINDING_KINDS.has(finding.kind) || settlement.held.has(findingId(finding)),
       );
-      result = { ...result, findings: kept };
+      result = { ...result, findings: kept, unmeasured: [...result.unmeasured, ...settlement.unsettled] };
     }
 
     if (testFiles.length === 0) {
@@ -992,8 +907,7 @@ async function main(): Promise<void> {
       baseFormat: baseTests === null ? null : baseRun.format,
       changedTestFiles: testFiles,
       result,
-      flakesDropped,
-      unmeasuredDropped,
+      unsettled,
       runs,
       notes,
     };

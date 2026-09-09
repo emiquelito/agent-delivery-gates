@@ -300,6 +300,12 @@ afterwards; the working tree is never touched and a dirty tree is
 refused. A test that could not run at all against the base source is
 reported as an error, never as a red run.
 
+A disagreement is re-run once. When the two runs say different things
+about one test, in either direction, the result is `did-not-settle`:
+unmeasured, exit 3. Nothing is dropped for failing to hold twice, and
+nothing is taken as found for holding once. A result this command could
+not measure is never reported as a clean one.
+
 Exit codes: `0` nothing found and everything was measured; `1` at least
 one finding; `2` could not run as asked, including a dirty tree, an
 unresolvable base, a lockfile that differs between the base and HEAD, or

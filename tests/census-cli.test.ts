@@ -194,15 +194,17 @@ test("the feature is on", () => { assert.equal(feature(), "on"); });
   rmSync(dir, { recursive: true, force: true });
 });
 
-// --- flakes ---------------------------------------------------------------------
+// --- a suite that disagrees with itself --------------------------------------
 
 // A disagreement is re-run once before it is reported. The test below is
 // flaky on purpose and in one direction only: against the base source it
 // passes on its first run and fails afterwards, driven by a counter in a
 // file outside the repository. The first red run therefore says
-// "not-red-before-green" and the re-run says otherwise, so the finding is
-// dropped and counted.
-test("a finding that does not hold on a re-run is dropped as flaky", () => {
+// "not-red-before-green" and the re-run says the test was red there. The two
+// runs answered the same question two ways, so nothing was measured: the
+// result is unmeasured and the run exits 3. It used to be dropped as flaky
+// and exit 0, which reported a result nobody could measure as a clean one.
+test("a result the two runs disagree about is unmeasured and exit 3, never dropped", () => {
   const state = join(mkdtempSync(join(tmpdir(), "adg-census-flake-")), "count");
   const dir = makeRepo(
     {
@@ -229,9 +231,14 @@ test("the value was raised", () => {
     },
   );
   const result = runCli(dir, ["--command", SUITE], { ADG_FLAKE_STATE: state });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /1 finding\(s\) did not hold on a second run/);
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /1 result\(s\) did not settle between the two runs/);
+  assert.match(result.stdout, /did-not-settle/);
+  assert.match(result.stdout, /the value was raised was passing against the base source on the first run/);
+  assert.match(result.stdout, /part of this run was never measured/);
   assert.doesNotMatch(result.stdout, /not-red-before-green/);
+  assert.doesNotMatch(result.stdout, /dropped as flaky/);
+  assert.doesNotMatch(result.stdout, /Red before green/);
   rmSync(dir, { recursive: true, force: true });
   rmSync(dirname(state), { recursive: true, force: true });
 });
@@ -451,6 +458,10 @@ test("a base re-run that collected nothing is unreadable, never evidence of flak
   assert.match(result.stdout, /count-dropped/);
   assert.match(result.stdout, /The base re-run printed readable output but held no tests at all/);
   assert.doesNotMatch(result.stdout, /did not hold on a second run/);
+  // A re-run that collected nothing is not a re-run that disagreed. It is
+  // evidence of nothing, so it settles nothing and unsettles nothing.
+  assert.doesNotMatch(result.stdout, /did not settle/);
+  assert.doesNotMatch(result.stdout, /did-not-settle/);
   rmSync(dir, { recursive: true, force: true });
   rmSync(stateDir, { recursive: true, force: true });
 });
@@ -458,11 +469,13 @@ test("a base re-run that collected nothing is unreadable, never evidence of flak
 // --- two runs that disagree about the same test ---------------------------------
 
 // The re-check used to filter the first run's lists by what recurred, so a
-// test the first run called skipped against the base source and the second
-// called passing against it matched neither list and vanished from both. Exit
-// 0, under a closing line claiming every added test had been red. A
-// disagreement now takes the worse of the two verdicts.
-test("a disagreement between two red runs widens to the worse verdict", () => {
+// test the first run called unable to run against the base source and the
+// second called passing against it matched neither list and vanished from
+// both. Exit 0, under a closing line claiming every added test had been red.
+// Then it took the worse of the two verdicts, which reported a problem the
+// run had not established. Neither run is now believed over the other: two
+// answers to one question is no answer, so the result is unmeasured.
+test("two red runs that answer the same question two ways measure nothing", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-state-"));
   const state = join(stateDir, "count");
   const dir = makeRepo(
@@ -482,10 +495,49 @@ test("a disagreement between two red runs widens to the worse verdict", () => {
     "elif [ \"$n\" = 2 ]; then printf 'TAP version 13\\nok 1 - old\\n1..1\\n'; " +
     "else printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; fi; fi";
   const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
-  assert.equal(result.status, 1, result.stdout + result.stderr);
-  assert.match(result.stdout, /not-red-before-green/);
-  assert.match(result.stdout, /added passes against the base source/);
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /did-not-settle/);
+  assert.match(
+    result.stdout,
+    /added was unable to run against the base source at all on the first run and passing against the base source on the second/,
+  );
+  assert.match(result.stdout, /1 result\(s\) did not settle between the two runs/);
+  assert.doesNotMatch(result.stdout, /not-red-before-green/);
   assert.doesNotMatch(result.stdout, /every test this change added was red/);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+// A test that disagreed with itself does not make a finding elsewhere any
+// less of a finding. Exit 1 wins over exit 3, and both are printed: the run
+// says what it found and, apart from that, what it could not measure.
+test("a real finding beside an unsettled result is exit 1, and both are reported", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-state-"));
+  const state = join(stateDir, "count");
+  const dir = makeRepo(
+    { "tests/a.test.mjs": `${HEADER}test("old", () => {});\n` },
+    {
+      marker: "head only\n",
+      "tests/a.test.mjs": `${HEADER}test("old", () => {});\ntest("added", () => {});\n`,
+    },
+  );
+  // HEAD holds "old" and "added". The base holds "old" and "gone" on both of
+  // its census runs, so "gone" disappeared and stays a finding. The two runs
+  // against the base source then disagree about "added": passing on the
+  // first, failing on the second.
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; else " +
+    'n=$(cat "$ADG_BASE_STATE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ADG_BASE_STATE"; ' +
+    "if [ \"$n\" -le 2 ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - gone\\n1..2\\n'; " +
+    "elif [ \"$n\" = 3 ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; " +
+    "else printf 'TAP version 13\\nok 1 - old\\nnot ok 2 - added\\n1..2\\n'; fi; fi";
+  const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /disappeared: a test stopped running/);
+  assert.match(result.stdout, /gone ran at the base commit and does not run at HEAD/);
+  assert.match(result.stdout, /did-not-settle/);
+  assert.match(result.stdout, /1 result\(s\) did not settle between the two runs/);
+  assert.match(result.stdout, /Suite runs: 6/);
   rmSync(dir, { recursive: true, force: true });
   rmSync(stateDir, { recursive: true, force: true });
 });
@@ -636,8 +688,9 @@ test("--help prints the known limits and exits 0", () => {
   assert.match(result.stdout, /renamed test therefore/);
   assert.match(result.stdout, /never in a per-edit hook/);
   assert.match(result.stdout, /Only TAP and JUnit XML/);
-  assert.match(result.stdout, /flaky suite still produces noise/);
-  assert.match(result.stdout, /Three to six full suite runs/);
+  assert.match(result.stdout, /A suite that disagrees with itself is reported, not smoothed over/);
+  assert.match(result.stdout, /producing exit 3 here until it is fixed/);
+  assert.match(result.stdout, /Two to six full suite runs/);
   assert.match(result.stdout, /writes into your real install and can corrupt it/);
   assert.match(result.stdout, /node_modules is gitignored/);
   assert.match(result.stdout, /share one identity/);

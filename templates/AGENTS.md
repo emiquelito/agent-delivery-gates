@@ -131,12 +131,16 @@ Known limits, all of them real:
   name another file already uses is then never checked against the base
   source, and the run reports an `identity-collision` it could not
   measure.
-- Three to six full suite runs: HEAD, the base, this change's tests
+- Two to six full suite runs: HEAD, the base, this change's tests
   against the base source, and a re-run of any of those when a
-  disagreement is re-checked for flakiness. This belongs in pre-push, in
-  CI, or in a Stop hook, never in a per-edit hook.
-- A flaky suite still produces noise after one re-run: a disagreement
-  that settles is dropped, one that keeps changing is not.
+  disagreement is re-checked. This belongs in pre-push, in CI, or in a
+  Stop hook, never in a per-edit hook.
+- A suite that disagrees with itself is reported, not smoothed over. When
+  the two runs say different things about one test, in either direction,
+  the result is `did-not-settle`: unmeasured, exit 3. It is not a finding,
+  because the problem was not established, and it is not dropped, because
+  its absence was not established either. A flaky suite therefore keeps
+  producing exit 3 here until it is fixed.
 - Only TAP and JUnit XML are read. A runner that writes JUnit XML to a
   file has to be told to print it instead.
 
@@ -144,8 +148,9 @@ Exit codes: `0` nothing found and everything was measured; `1` at least
 one finding; `2` could not run as asked, including a dirty tree, a base
 that cannot be resolved, a lockfile that differs between the base and
 HEAD, or output in neither format; `3` nothing found, but part of the run
-was unmeasured, such as a base run that could not be compared or a test
-that errored against the base source.
+was unmeasured, such as a base run that could not be compared, a test
+that errored against the base source, or a result the two runs did not
+agree about.
 
 ### induce
 
