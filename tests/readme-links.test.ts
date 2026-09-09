@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -64,27 +64,20 @@ test("every worked example on disk is listed in the README", () => {
   }
 });
 
-// The README prints a snapshot of the gate tally. It has drifted twice: once
-// eleven entries behind, once eight. Nothing checked it either time, because
-// a stale number is still a number and reads fine. This is that check.
-test("the tally figures in the README match the tally record", () => {
-  const report = execFileSync("node", [join(ROOT, "scripts", "tally-report.ts")], {
-    cwd: ROOT,
-    encoding: "utf8",
-  });
-  const total = report.match(/total entries: (\d+)/)![1];
-  const range = report.match(/date range: (\S+) to (\S+)/)!;
-  const counts = [...report.matchAll(/^ {2}([a-z-]+): (\d+)$/gm)].map(
-    (m) => `${m[1]}: ${m[2]}`,
+// The README's tally figures are written by scripts/refresh-readme-tally.ts
+// from docs/gate-tally.md. This runs that script in --check mode instead of
+// comparing the numbers a second way: a check that recomputes what it is
+// checking can only agree with it, which is what expected-value-derived-apart
+// is about. The script is the one implementation; this asserts it was run.
+test("the tally figures in the README are what the script would write", () => {
+  const result = spawnSync(
+    "node",
+    [join(ROOT, "scripts", "refresh-readme-tally.ts"), "--check"],
+    { cwd: ROOT, encoding: "utf8" },
   );
-
-  const claimed = README.match(/build: (\d+) entries, dated ([\d-]+) to ([\d-]+)/);
-  assert.ok(claimed, "the README states no tally total");
-  assert.equal(claimed[1], total, "the README's entry count is out of date");
-  assert.equal(claimed[2], range[1], "the README's first date is out of date");
-  assert.equal(claimed[3], range[2], "the README's last date is out of date");
-
-  for (const line of counts) {
-    assert.ok(README.includes(line), `the README does not carry the count '${line}'`);
-  }
+  assert.equal(
+    result.status,
+    0,
+    `README.md and docs/gate-tally.md disagree. ${result.stdout}${result.stderr}`,
+  );
 });

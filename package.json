@@ -50,7 +50,7 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/bin/adg.js",
     "prepare": "npm run build",
     "prepack": "npm run build",
-    "verify": "tsc --noEmit && node --test tests/*.test.ts && scripts/scan-prose.sh && node scripts/tally-report.ts --check"
+    "verify": "tsc --noEmit && node --test tests/*.test.ts && scripts/scan-prose.sh && node scripts/tally-report.ts --check && node scripts/refresh-readme-tally.ts --check"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",

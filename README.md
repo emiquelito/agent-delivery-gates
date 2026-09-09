@@ -166,6 +166,7 @@ hardest:
   from is what caught the overclaim, in the file most likely to be read.
 
 Running `agent-delivery-gates tally` counts entries per rule. As of this
+<!-- tally:start -->
 build: 98 entries, dated 2026-09-07 to 2026-09-09, five with no automated
 test behind them because someone read the situation and wrote it down
 instead.
@@ -186,6 +187,7 @@ red-before-green: 1
 artifact-inputs-reproducible: 0
 builder-reviewer-separation: 0
 ```
+<!-- tally:end -->
 
 A zero does not mean a rule was unnecessary. It means the work stayed
 clean on that rule for the life of this build, or nothing looked closely
