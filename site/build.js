@@ -580,34 +580,40 @@ function renderPage(rules, tally, examples, commands) {
 <meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
 <meta name="twitter:image" content="${socialUrl}">
 <meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%2312161c'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%234c9f70' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230b1c15'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%2319a974' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 <style>
 :root {
-  color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #1b1f24;
-  --muted: #5b6672;
-  --rule: #d9dee4;
-  --code-bg: #f4f6f8;
-  --card-bg: #fbfcfd;
-  --link: #1f6f4a;
-  --accent: #4c9f70;
-  --warn: #b04f36;
+  color-scheme: dark light;
+  /* Dark is the default here, and the greens are the ones the Rust site
+     carries: #137752, #19a974, #9eebcf. A page of #137752 is too saturated to
+     read a paragraph on, so the ground is that hue taken most of the way to
+     black and the saturated greens do the work they are good at, marking
+     edges and links. */
+  --bg: #0b1c15;
+  --fg: #e7f4ec;
+  --muted: #8fb3a3;
+  --rule: #1d4a39;
+  --code-bg: #10291f;
+  --card-bg: #102a20;
+  --link: #9eebcf;
+  --accent: #19a974;
+  --warn: #e8a37f;
 }
 /* Every token above is redefined here, none of them dropped. A token defined
-   in one scheme only reads as the light value on a dark page, which is the
-   kind of contrast failure nobody sees until someone else opens the page. */
-@media (prefers-color-scheme: dark) {
+   in one scheme only reads as the other scheme's value, which is the kind of
+   contrast failure nobody sees until someone else opens the page. Light is
+   the override now: a reader who has asked their system for light gets it. */
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #12161c;
-    --fg: #e6e9ef;
-    --muted: #9aa4b2;
-    --rule: #2a313a;
-    --code-bg: #1b212a;
-    --card-bg: #171d25;
-    --link: #7ecfa0;
-    --accent: #4c9f70;
-    --warn: #e08b6f;
+    --bg: #ffffff;
+    --fg: #1b1f24;
+    --muted: #5b6672;
+    --rule: #d9dee4;
+    --code-bg: #f4f6f8;
+    --card-bg: #fbfcfd;
+    --link: #137752;
+    --accent: #137752;
+    --warn: #b04f36;
   }
 }
 * { box-sizing: border-box; }
@@ -620,6 +626,12 @@ body {
   line-height: 1.65;
 }
 .wrap { max-width: 64rem; margin: 0 auto; padding: 3.5rem 1.1rem 6rem; }
+/* One measure for every run of prose, centred in the column. Without this
+   the narrow blocks sit against the left edge of a much wider column and
+   the page looks pushed to one side, which is what it did. */
+.wrap > header, .wrap > main > section > :not(.cards):not(.scroller):not(ul.rules),
+.wrap > footer { max-width: 46rem; margin-inline: auto; }
+header h1, header .lede, header .headline, header .cta { margin-inline: auto; }
 header { border-bottom: 3px solid var(--accent); padding-bottom: 2rem; }
 h1 { font-size: clamp(2.5rem, 6vw, 4rem); line-height: 1.05; margin: 0 0 1.2rem; letter-spacing: -.02em; }
 h2 { font-size: clamp(1.75rem, 3.2vw, 2.4rem); line-height: 1.2; letter-spacing: -.01em; margin: 0 0 1.4rem; }

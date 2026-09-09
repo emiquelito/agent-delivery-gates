@@ -1101,10 +1101,13 @@ test("the page has a wide column and a fluid first heading", () => {
 // running one theme ever sees.
 test("both colour schemes define every token the page uses", () => {
   const css = pageCss(html);
+  // Which scheme is the default and which is the override is a design choice
+  // that has already changed once. What must hold either way is that both
+  // define every token, so this reads whichever pair is there.
   const light = /:root \{([\s\S]*?)\}/.exec(css);
-  assert.ok(light, "the page defines no light palette");
-  const dark = /@media \(prefers-color-scheme: dark\) \{\s*:root \{([\s\S]*?)\}/.exec(css);
-  assert.ok(dark, "the page defines no dark palette");
+  assert.ok(light, "the page defines no default palette");
+  const dark = /@media \(prefers-color-scheme: (?:dark|light)\) \{\s*:root \{([\s\S]*?)\}/.exec(css);
+  assert.ok(dark, "the page defines no second palette for the other scheme");
 
   const defined = (block: string) =>
     new Set([...block.matchAll(/(--[a-z-]+)\s*:/g)].map((m) => m[1]));
@@ -1114,8 +1117,8 @@ test("both colour schemes define every token the page uses", () => {
   assert.ok(used.size >= 6, "the page uses almost no colour tokens, so this test proves nothing");
 
   for (const token of used) {
-    assert.ok(inLight.has(token), `${token} is used but the light palette never defines it`);
-    assert.ok(inDark.has(token), `${token} is used but the dark palette never defines it`);
+    assert.ok(inLight.has(token), `${token} is used but the default palette never defines it`);
+    assert.ok(inDark.has(token), `${token} is used but the other scheme never defines it`);
   }
   assert.deepEqual([...inLight].sort(), [...inDark].sort(), "the two palettes define different tokens");
 
