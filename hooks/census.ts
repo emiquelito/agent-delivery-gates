@@ -54,6 +54,9 @@ import {
   formatReportJson,
   formatReportText,
   parseResults,
+  resultsLookComplete,
+  tapPlan,
+  testKey,
   type CompareResult,
   type Finding,
   type ResultFormat,
@@ -108,8 +111,14 @@ The base worktree and its dependencies:
 
 Known limits, all of them real:
   - Identity is the file plus the test name. A renamed test therefore
-    reads as one test disappearing and another appearing.
-  - Two to three full suite runs, plus one more per side when a
+    reads as one test disappearing and another appearing. Two tests that
+    share both halves share one identity, which happens whenever the runner
+    names no file, as node's TAP does not for a passing test. A test added
+    under a name another file already uses is then never checked against
+    the base source, and the run says so as an identity-collision it could
+    not measure.
+  - Three to six full suite runs: HEAD, the base, this change's tests
+    against the base source, and a re-run of any of those when a
     disagreement is re-checked for flakiness. This belongs in pre-push, in
     CI, or in a Stop hook, never in a per-edit hook.
   - A flaky suite still produces noise after one re-run: a disagreement
@@ -121,8 +130,12 @@ Known limits, all of them real:
     that writes into its own repository leaves the tree dirty, and that is
     exit 2 at the end of the run.
   - The reused node_modules is the main worktree's own directory, through
-    a symlink. A suite that writes into node_modules would write into the
-    real one.
+    a symlink, not a copy. A suite that writes into node_modules during the
+    base run writes into your real install and can corrupt it, and the
+    end-of-run tree check cannot see that: node_modules is gitignored, so
+    nothing that happens inside it shows up as a dirty tree. Point
+    --command at a runner that does not write there, or do not run this
+    command over a suite that does.
 
 Exit codes:
   0  nothing found and everything was measured
@@ -354,6 +367,10 @@ interface RunOutput {
   stderr: string;
   status: number | null;
   timedOut: boolean;
+  /** Why the run never completed, when spawnSync itself could not finish
+   * it. A maxBuffer overflow arrives here as ENOBUFS, and the output kept
+   * up to that point is a truncated census, not a small suite. */
+  failure: string | null;
 }
 
 function runCommand(command: string, cwd: string, timeoutMs?: number): RunOutput {
@@ -367,11 +384,26 @@ function runCommand(command: string, cwd: string, timeoutMs?: number): RunOutput
     killSignal: "SIGKILL",
     maxBuffer: 64 * 1024 * 1024,
   });
+  const error = result.error as NodeJS.ErrnoException | undefined;
   const timedOut =
     timeoutMs !== undefined &&
-    ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
-      (result.status === null && result.signal !== null));
-  return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", status: result.status, timedOut };
+    (error?.code === "ETIMEDOUT" || (result.status === null && result.signal !== null));
+  let failure: string | null = null;
+  if (!timedOut && error !== undefined) {
+    failure =
+      error.code === "ENOBUFS"
+        ? "the run printed more output than this tool will hold, so its results were cut off part way through"
+        : `the run could not be completed (${error.code ?? error.message})`;
+  } else if (!timedOut && result.status === null && result.signal !== null) {
+    failure = `the run was killed by ${result.signal} before it finished printing`;
+  }
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    status: result.status,
+    timedOut,
+    failure,
+  };
 }
 
 interface RunCensus {
@@ -397,11 +429,57 @@ function runAndParse(
   if (run.timedOut) {
     return { error: `the run in ${cwd} was killed at the timeout, so its results were never printed` };
   }
+  // A run spawnSync could not finish is exactly as unreadable as one that
+  // timed out. ENOBUFS is the one that bites: the output up to the overflow
+  // parses cleanly, and the tests that never got printed then read as tests
+  // that appeared at HEAD.
+  if (run.failure !== null) return { error: `${run.failure} (in ${cwd})` };
   const first = parseResults(run.stdout, args.formatIn);
-  if (!("error" in first)) return { format: first.format, tests: first.tests };
-  const both = parseResults(`${run.stdout}\n${run.stderr}`, args.formatIn);
-  if (!("error" in both)) return { format: both.format, tests: both.tests };
+  if (!("error" in first)) return checkComplete(run, run.stdout, first.format, first.tests, cwd);
+  const joined = `${run.stdout}\n${run.stderr}`;
+  const both = parseResults(joined, args.formatIn);
+  if (!("error" in both)) return checkComplete(run, joined, both.format, both.tests, cwd);
   return { error: both.error };
+}
+
+/**
+ * The two ways output that parsed is still not a census.
+ *
+ * A TAP plan says how many results the run meant to print. Fewer than that
+ * means the run died mid-stream, and the tests it never reached would
+ * otherwise read as tests appearing at HEAD, with the red-before-green run
+ * then finding them all passing. That is a false accusation built out of a
+ * crash, and this is the check that stops it.
+ *
+ * A run that exited non-zero having printed neither a plan nor a summary
+ * never got to the end of its own output either. A failing suite prints
+ * both, so this refuses the crash and not the red run.
+ */
+function checkComplete(
+  run: RunOutput,
+  text: string,
+  format: ResultFormat,
+  tests: TestRecord[],
+  cwd: string,
+): RunCensus | { error: string } {
+  if (format === "tap") {
+    const plan = tapPlan(text);
+    if (plan !== null && plan.printed !== plan.planned) {
+      return {
+        error:
+          `the run in ${cwd} printed a TAP plan of ${plan.planned} result(s) but ${plan.printed} of them, so its ` +
+          "output stops part way through and is not a census of the suite",
+      };
+    }
+  }
+  if (run.status !== 0 && !resultsLookComplete(text, format)) {
+    return {
+      error:
+        `the run in ${cwd} exited ${run.status === null ? "without a status" : String(run.status)} without printing ` +
+        "a plan or a summary, so it never finished printing its results",
+    };
+  }
+  return { format, tests };
 }
 
 // --- the temporary base worktree ------------------------------------------------
@@ -576,12 +654,116 @@ function findingId(item: Finding): string {
   return `${item.kind}\n${item.file}\n${item.name}`;
 }
 
-function unmeasuredId(item: Unmeasured): string {
-  return `${item.kind}\n${item.file}\n${item.name}`;
-}
-
 const RED_FINDING_KINDS = new Set(["not-red-before-green"]);
 const RED_UNMEASURED_KINDS = new Set(["errored-at-base", "skipped-at-base"]);
+
+/**
+ * Whether a census that parsed cleanly is still no census at all: it holds
+ * no test while the run it is compared with holds some. A base like that did
+ * not really run, and comparing against it reports every test as new and
+ * hands a clean bill to a suite that lost tests.
+ *
+ * Every base run goes through this, the first one and every re-run. A re-run
+ * that collected nothing used to make every finding from the first run look
+ * like a disagreement that settled, so the whole report was dropped as flaky
+ * and the command exited 0. That made the default mode less safe than
+ * --no-rerun, which is the opposite of what a re-run is for.
+ */
+function heldNoTests(tests: TestRecord[], comparedWith: number): boolean {
+  return tests.length === 0 && comparedWith > 0;
+}
+
+interface RedVerdicts {
+  findings: Map<string, Finding>;
+  unmeasured: Map<string, Unmeasured>;
+  red: Set<string>;
+}
+
+/** What one comparison said about each test this change added: a finding, an
+ * unmeasured item, or red against the base source. */
+function redVerdicts(result: CompareResult): RedVerdicts {
+  const findings = new Map<string, Finding>();
+  for (const finding of result.findings) {
+    if (RED_FINDING_KINDS.has(finding.kind)) findings.set(testKey(finding), finding);
+  }
+  const unmeasured = new Map<string, Unmeasured>();
+  for (const item of result.unmeasured) {
+    if (RED_UNMEASURED_KINDS.has(item.kind)) unmeasured.set(testKey(item), item);
+  }
+  return { findings, unmeasured, red: new Set(result.redAtBase.map(testKey)) };
+}
+
+interface MergedRed {
+  result: CompareResult;
+  findingsDropped: number;
+  unmeasuredDropped: number;
+}
+
+/**
+ * Merges what two runs of this change's tests against the base source said,
+ * one test at a time. One rule decides it: the second run may clear a problem
+ * only by seeing the test red against the base itself. Every other
+ * disagreement takes the worse of the two verdicts, where a finding is worse
+ * than an unmeasured item and an unmeasured item is worse than a red run.
+ *
+ * Filtering the first run's list by what recurred did only half of that. A
+ * test the first run called skipped-at-base and the second called
+ * not-red-before-green matched neither list and vanished from both, so a real
+ * finding came out as exit 0 under a closing line claiming every added test
+ * had been red. Nothing a second run reveals may be dropped for having been
+ * revealed second.
+ */
+function mergeRedHalves(first: CompareResult, second: CompareResult): MergedRed {
+  const before = redVerdicts(first);
+  const after = redVerdicts(second);
+  const keptFindings: Finding[] = [];
+  const keptUnmeasured: Unmeasured[] = [];
+  const redAtBase: TestRecord[] = [];
+  let findingsDropped = 0;
+  let unmeasuredDropped = 0;
+
+  for (const test of first.appeared) {
+    const key = testKey(test);
+    const firstFinding = before.findings.get(key);
+    const firstUnmeasured = before.unmeasured.get(key);
+    const secondFinding = after.findings.get(key);
+    const secondUnmeasured = after.unmeasured.get(key);
+
+    if (after.red.has(key)) {
+      // The re-run watched this test fail against the base source. That is
+      // the one thing that clears a first-run problem, and it is the flake
+      // allowance this command documents.
+      if (firstFinding !== undefined) findingsDropped++;
+      if (firstUnmeasured !== undefined) unmeasuredDropped++;
+      redAtBase.push(test);
+      continue;
+    }
+    const finding = firstFinding ?? secondFinding;
+    if (finding !== undefined) {
+      keptFindings.push(finding);
+      continue;
+    }
+    const item = firstUnmeasured ?? secondUnmeasured;
+    if (item !== undefined) {
+      keptUnmeasured.push(item);
+      continue;
+    }
+    redAtBase.push(test);
+  }
+
+  const otherFindings = first.findings.filter((finding) => !RED_FINDING_KINDS.has(finding.kind));
+  const otherUnmeasured = first.unmeasured.filter((item) => !RED_UNMEASURED_KINDS.has(item.kind));
+  return {
+    result: {
+      ...first,
+      findings: [...otherFindings, ...keptFindings],
+      unmeasured: [...otherUnmeasured, ...keptUnmeasured],
+      redAtBase,
+    },
+    findingsDropped,
+    unmeasuredDropped,
+  };
+}
 
 // --- main -------------------------------------------------------------------------
 
@@ -687,7 +869,7 @@ async function main(): Promise<void> {
     // at HEAD as new and, worse, would hand a clean bill to a suite that
     // lost tests. So the base census is dropped and said to be dropped.
     let baseTests: TestRecord[] | null = baseRun.tests;
-    if (baseRun.tests.length === 0 && headRun.tests.length > 0) {
+    if (heldNoTests(baseRun.tests, headRun.tests.length)) {
       baseTests = null;
       notes.push(
         "The base run printed readable output but held no tests at all, while HEAD held " +
@@ -702,6 +884,7 @@ async function main(): Promise<void> {
     const censusResult = compareCensus({ base: baseTests, head: headRun.tests, redRun: null });
     let runs = 2;
     let flakesDropped = 0;
+    let unmeasuredDropped = 0;
     let confirmedCensus: Set<string> | null = null;
 
     if (args.rerun && censusResult.findings.length > 0 && baseTests !== null) {
@@ -714,6 +897,17 @@ async function main(): Promise<void> {
         notes.push(
           "A re-run meant to check a disagreement for flakiness could not be read, so every finding below is " +
             "reported as it stood on the first run.",
+        );
+      } else if (heldNoTests(baseAgain.tests, headAgain.tests.length) || heldNoTests(baseAgain.tests, baseTests.length)) {
+        // The same guard the first base run gets. Without it an empty base
+        // re-run is a census of nothing, every finding from the first run
+        // fails to recur against it, and the whole report is dropped as
+        // flaky. That is a run erasing its own findings, so the re-run is
+        // called unreadable instead, which it is.
+        notes.push(
+          "The base re-run printed readable output but held no tests at all, so it was treated as a re-run that " +
+            "could not be read and not as evidence that anything below is flaky. Every finding is reported as it " +
+            "stood on the first run.",
         );
       } else {
         const second = compareCensus({ base: baseAgain.tests, head: headAgain.tests, redRun: null });
@@ -759,19 +953,18 @@ async function main(): Promise<void> {
           "A re-run of this change's tests against the base source could not be read, so the red-before-green " +
             "results below are reported as they stood on the first run.",
         );
+      } else if (redTests !== null && redAgain.tests.length === 0 && redTests.length > 0) {
+        notes.push(
+          "The re-run of this change's tests against the base source printed readable output but held no tests at " +
+            "all, so it was treated as a re-run that could not be read. The red-before-green results below are " +
+            "reported as they stood on the first run.",
+        );
       } else {
         const second = compareCensus({ base: baseTests, head: headRun.tests, redRun: redAgain.tests });
-        const heldFindings = new Set(second.findings.map(findingId));
-        const heldUnmeasured = new Set(second.unmeasured.map(unmeasuredId));
-        const keptFindings = result.findings.filter(
-          (finding) => !RED_FINDING_KINDS.has(finding.kind) || heldFindings.has(findingId(finding)),
-        );
-        const keptUnmeasured = result.unmeasured.filter(
-          (item) => !RED_UNMEASURED_KINDS.has(item.kind) || heldUnmeasured.has(unmeasuredId(item)),
-        );
-        flakesDropped +=
-          result.findings.length - keptFindings.length + (result.unmeasured.length - keptUnmeasured.length);
-        result = { ...result, findings: keptFindings, unmeasured: keptUnmeasured };
+        const merged = mergeRedHalves(result, second);
+        result = merged.result;
+        flakesDropped += merged.findingsDropped;
+        unmeasuredDropped += merged.unmeasuredDropped;
       }
     }
 
@@ -800,6 +993,7 @@ async function main(): Promise<void> {
       changedTestFiles: testFiles,
       result,
       flakesDropped,
+      unmeasuredDropped,
       runs,
       notes,
     };

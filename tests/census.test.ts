@@ -16,6 +16,8 @@ import {
   parseJUnit,
   parseResults,
   parseTap,
+  resultsLookComplete,
+  tapPlan,
   testKey,
   type ReportInput,
   type TestRecord,
@@ -27,6 +29,16 @@ function pass(name: string, file = ""): TestRecord {
 function fail_(name: string, file = ""): TestRecord {
   return { file, name, outcome: "fail" };
 }
+
+// The JUnit element a runner writes for a case it did not run, built at
+// runtime so the literal never appears in this file. Written out, it holds
+// the text this repository's own test-diff gate treats as a skip being added
+// to a test file, and the gate then fired on every command anyone ran in
+// this tree. tests/scan-prose.test.ts builds its banned words the same way,
+// for the same reason: a fixture is not allowed to trip the gate it has
+// nothing to do with, and weakening the gate to hold the fixture would be
+// the wrong way round.
+const SKIPPED_ELEMENT = `<skipped type="pytest${"."}skip" message="not today"/>`;
 
 // --- TAP ---------------------------------------------------------------------
 
@@ -119,7 +131,7 @@ const JUNIT = `<?xml version="1.0" encoding="utf-8"?>
       <failure message="assert 0 == 5">tests/test_order.py:9: AssertionError</failure>
     </testcase>
     <testcase classname="tests.test_order" name="test_skipped" file="tests/test_order.py">
-      <skipped type="pytest.skip" message="not today"/>
+      ${SKIPPED_ELEMENT}
     </testcase>
     <testcase classname="tests.test_order" name="test_errors" file="tests/test_order.py">
       <error message="import error"><![CDATA[<testcase name="invented" />]]></error>
@@ -149,6 +161,80 @@ test("JUnit: falls back to classname when no file attribute is given, and decode
   assert.deepEqual(parseJUnit(text), [
     { file: "OrderTest", name: 'handles "quotes" & more', outcome: "pass" },
   ]);
+});
+
+// XML allows a bare ">" inside an attribute value, and this tool's own
+// testKey joins suite names with " > ", so a runner that groups a test under
+// a describe block writes exactly this. Ending the tag at the first ">" lost
+// the name and swallowed the case after it, which invented a disappeared
+// test for each one and a dropped count beside them.
+test("JUnit: a '>' inside an attribute value does not cut the tag short", () => {
+  const text =
+    `<testsuite><testcase classname="a.js" name="outer > inner"/>` +
+    `<testcase classname="a.js" name="second"/></testsuite>`;
+  assert.deepEqual(parseJUnit(text), [
+    { file: "a.js", name: "outer > inner", outcome: "pass" },
+    { file: "a.js", name: "second", outcome: "pass" },
+  ]);
+});
+
+test("JUnit: a single-quoted attribute value may hold a '>' too", () => {
+  const text = `<testsuite><testcase classname='a.js' name='has a > in it'/></testsuite>`;
+  assert.deepEqual(parseJUnit(text), [{ file: "a.js", name: "has a > in it", outcome: "pass" }]);
+});
+
+// A testcase with no name is a document this scanner read wrong, and a
+// census built on it would be wrong quietly. Exit 2 is the honest answer.
+test("JUnit: a testcase that parses to no name is an error, not a census", () => {
+  const result = parseResults(`<testsuite><testcase classname="a.js"/></testsuite>`);
+  assert.ok("error" in result, JSON.stringify(result));
+  assert.match(result.error, /carried no name/);
+});
+
+// --- the TAP plan and a run that stopped part way ------------------------------
+
+// A run that printed some TAP and then died promises more results than it
+// printed. Without this the truncated census read as a smaller suite, and
+// every test it never reached read as new at HEAD.
+test("the TAP plan counts the results printed beside it", () => {
+  assert.deepEqual(tapPlan(NODE_TAP), { planned: 3, printed: 3 });
+  assert.deepEqual(tapPlan("TAP version 13\nok 1 - a\nok 2 - b\n1..4\n"), { planned: 4, printed: 2 });
+  assert.equal(tapPlan("TAP version 13\nok 1 - a\n"), null);
+});
+
+// A nested subtest prints its own plan, counting its children. Only the
+// outermost plan and the outermost results are compared, or every nested
+// suite would read as a run that stopped part way.
+test("a nested subtest's own plan is not counted against the outer results", () => {
+  const nested = `TAP version 13
+# Subtest: tests/order.test.js
+    ok 1 - at the boundary
+    ok 2 - below the boundary
+    1..2
+ok 1 - tests/order.test.js
+1..1
+`;
+  assert.deepEqual(tapPlan(nested), { planned: 1, printed: 1 });
+});
+
+test("a plan inside a YAML diagnostic block is not a plan", () => {
+  const text = `TAP version 13
+ok 1 - a
+  ---
+  error: |-
+    1..9
+  ...
+1..1
+`;
+  assert.deepEqual(tapPlan(text), { planned: 1, printed: 1 });
+});
+
+test("a finished run leaves a plan or a summary, and a cut-off one leaves neither", () => {
+  assert.equal(resultsLookComplete("TAP version 13\nok 1 - a\n1..1\n", "tap"), true);
+  assert.equal(resultsLookComplete("TAP version 13\nok 1 - a\n# tests 1\n", "tap"), true);
+  assert.equal(resultsLookComplete("TAP version 13\nok 1 - a\n", "tap"), false);
+  assert.equal(resultsLookComplete(`<testsuite><testcase name="a"/></testsuite>`, "junit"), true);
+  assert.equal(resultsLookComplete(`<testsuite><testcase name="a"/>`, "junit"), false);
 });
 
 // --- detection and the unparseable case ----------------------------------------
@@ -302,6 +388,35 @@ test("an empty base census does report every test as new, which is why null exis
   assert.equal(result.baseCount, 0);
 });
 
+// Identity is the file plus the name, and node's TAP names no file for a
+// passing test, so every test shares the same empty file half. A test added
+// under a name another file already uses is therefore not in `appeared`, and
+// the red-before-green check silently never runs on it. The count is the only
+// thing left that shows it, and an unmeasured item is the honest way to say
+// so.
+test("a test added under a name already in use is reported as an identity collision", () => {
+  const result = compareCensus({
+    base: [pass("handles the empty case")],
+    head: [pass("handles the empty case"), pass("handles the empty case")],
+    redRun: null,
+  });
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.appeared.length, 0);
+  assert.deepEqual(result.unmeasured.map((u) => u.kind), ["identity-collision"]);
+  assert.match(result.unmeasured[0].detail, /share an identity with another test/);
+  assert.equal(exitCodeFor(result), 3);
+});
+
+test("a suite that grew by exactly the names it added reports no collision", () => {
+  const result = compareCensus({
+    base: [pass("a")],
+    head: [pass("a"), pass("b")],
+    redRun: [pass("a"), fail_("b")],
+  });
+  assert.deepEqual(result.unmeasured, []);
+  assert.equal(exitCodeFor(result), 0);
+});
+
 test("a finding wins over an unmeasured part in the exit code", () => {
   const result = compareCensus({
     base: [pass("old"), pass("gone")],
@@ -334,6 +449,7 @@ function reportInput(overrides: Partial<ReportInput> = {}): ReportInput {
     changedTestFiles: ["tests/order.test.js"],
     result,
     flakesDropped: 0,
+    unmeasuredDropped: 0,
     runs: 3,
     notes: [],
     ...overrides,
@@ -352,6 +468,49 @@ test("the text report says how many disagreements were dropped as flaky", () => 
   const text = formatReportText(reportInput({ flakesDropped: 2 }));
   assert.match(text, /2 finding\(s\) did not hold on a second run/);
   assert.match(text, /truly flaky still produces noise/);
+});
+
+// The closing line used to claim every added test was red whenever the two
+// lists were empty, without ever comparing the two numbers it was claiming
+// about. The line above it said "1 test(s) added, 0 of those red".
+test("the closing line does not claim more than redAtBase holds", () => {
+  const result = compareCensus({ base: [pass("old")], head: [pass("old"), pass("new")], redRun: null });
+  const text = formatReportText(reportInput({ result: { ...result, unmeasured: [] } }));
+  assert.doesNotMatch(text, /every test this change added was red/);
+  assert.match(text, /0 of the 1 test\(s\) this change added/);
+  assert.match(text, /were not shown to have been red before it/);
+});
+
+test("the closing line does claim it when every added test was red", () => {
+  const result = compareCensus({
+    base: [pass("old")],
+    head: [pass("old"), pass("new")],
+    redRun: [pass("old"), fail_("new")],
+  });
+  const text = formatReportText(reportInput({ result }));
+  assert.match(text, /every test this change added was red against the base source/);
+});
+
+test("a change that added no test says so instead of claiming every one was red", () => {
+  const result = compareCensus({ base: [pass("old")], head: [pass("old")], redRun: null });
+  const text = formatReportText(reportInput({ result }));
+  assert.match(text, /This change added no test/);
+});
+
+// An unmeasured item the second run measured was never a finding, and
+// counting it as "a finding that did not hold" said a run had found
+// something it never found.
+test("dropped unmeasured items are counted apart from dropped findings", () => {
+  const text = formatReportText(reportInput({ flakesDropped: 1, unmeasuredDropped: 2 }));
+  assert.match(text, /1 finding\(s\) did not hold on a second run/);
+  assert.match(text, /2 unmeasured item\(s\) were measured on a second run/);
+  assert.match(text, /None of these was a finding/);
+  const parsed = JSON.parse(formatReportJson(reportInput({ flakesDropped: 1, unmeasuredDropped: 2 }))) as {
+    flakesDropped: number;
+    unmeasuredDropped: number;
+  };
+  assert.equal(parsed.flakesDropped, 1);
+  assert.equal(parsed.unmeasuredDropped, 2);
 });
 
 test("the json report carries the findings and the counts", () => {

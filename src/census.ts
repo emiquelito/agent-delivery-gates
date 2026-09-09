@@ -97,6 +97,17 @@ export function parseResults(text: string, forced?: ResultFormat): ParsedResults
   }
   const format = forced ?? detected;
   const tests = format === "tap" ? parseTap(text) : parseJUnit(text);
+  // A testcase with no name is not a test this tool can identify, and a
+  // record with an empty name would silently take part in the comparison as
+  // if it were one. Every writer of this format names its cases, so a
+  // nameless one means the scanner read the document wrong. Exit 2 is the
+  // honest answer; a census built on it would not be.
+  if (format === "junit" && tests.some((test) => test.name === "")) {
+    return {
+      error:
+        "a <testcase> element carried no name, so these results could not be read as a census of tests",
+    };
+  }
   return { format, tests };
 }
 
@@ -221,6 +232,75 @@ function toRecord(item: PathRecord): TestRecord {
   return { file: "", name: item.path.join(" > "), outcome: item.outcome };
 }
 
+/** A TAP plan line at the outermost level, with the count it promises and
+ * the number of results printed beside it. */
+export interface TapPlan {
+  planned: number;
+  printed: number;
+}
+
+const TAP_PLAN_LINE = /^(\d+)\.\.(\d+)[ \t]*$/;
+
+/**
+ * The outermost TAP plan and the outermost results, or null when the output
+ * carries no plan at all. Only unindented lines count: a nested subtest
+ * prints its own plan, and that plan counts the subtest's children, not the
+ * file's own results.
+ *
+ * The caller compares the two numbers. A run that printed some TAP and then
+ * died mid-stream promises more results than it printed, and the difference
+ * is the only trace it leaves. Without this check that truncated census read
+ * as a smaller suite, which read as tests appearing at HEAD.
+ */
+export function tapPlan(text: string): TapPlan | null {
+  let planned = 0;
+  let printed = 0;
+  let seenPlan = false;
+  let inYaml = false;
+  let yamlIndent = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    const indent = countIndent(line);
+    const trimmed = line.trim();
+    if (inYaml) {
+      if (trimmed === "..." && indent <= yamlIndent) inYaml = false;
+      continue;
+    }
+    if (trimmed === "---") {
+      inYaml = true;
+      yamlIndent = indent;
+      continue;
+    }
+    if (indent > 0 || trimmed.startsWith("#")) continue;
+    const plan = TAP_PLAN_LINE.exec(line);
+    if (plan !== null) {
+      seenPlan = true;
+      const from = Number(plan[1]);
+      const to = Number(plan[2]);
+      if (to >= from) planned += to - from + 1;
+      continue;
+    }
+    if (TAP_RESULT.test(line)) printed++;
+  }
+  return seenPlan ? { planned, printed } : null;
+}
+
+const TAP_SUMMARY = /^[ \t]*#[ \t]*(tests|pass|fail|failed|ok)\b/im;
+const JUNIT_CLOSE = /<\/testsuites?>|<testsuites?\b[^<>]*\/>/;
+
+/**
+ * Whether the output carries the mark a finished run leaves: a plan or a
+ * summary line for TAP, a closing suite element for JUnit. A run that exited
+ * non-zero without one of these did not finish printing, so what it did
+ * print is part of a census and not a census. The caller treats that as a
+ * run it could not compare, never as a suite that lost the rest of its
+ * tests.
+ */
+export function resultsLookComplete(text: string, format: ResultFormat): boolean {
+  if (format === "junit") return JUNIT_CLOSE.test(text);
+  return tapPlan(text) !== null || TAP_SUMMARY.test(text);
+}
+
 // --- JUnit XML ----------------------------------------------------------------
 
 /**
@@ -248,7 +328,7 @@ export function parseJUnit(text: string): TestRecord[] {
       index = start + 1;
       continue;
     }
-    const tagEnd = cleaned.indexOf(">", start);
+    const tagEnd = findTagEnd(cleaned, start);
     if (tagEnd === -1) break;
     const tag = cleaned.slice(start, tagEnd + 1);
     const selfClosing = cleaned[tagEnd - 1] === "/";
@@ -268,6 +348,32 @@ export function parseJUnit(text: string): TestRecord[] {
     });
   }
   return records;
+}
+
+/**
+ * The index of the ">" that ends the tag opened at `start`, with quoted
+ * attribute values stepped over. XML allows a bare ">" inside an attribute
+ * value, and this tool's own testKey joins suite names with " > ", so a
+ * runner writing name="outer > inner" is ordinary input and not a curiosity.
+ * Ending the tag at the first ">" cut such a tag in half, lost the name, and
+ * swallowed the testcase after it, which invented a disappeared test for
+ * every one of them.
+ */
+function findTagEnd(text: string, start: number): number {
+  let quote: string | null = null;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ">") return i;
+  }
+  return -1;
 }
 
 /** A skipped case wins over a failure: a writer that records both means the
@@ -340,7 +446,8 @@ export type UnmeasuredKind =
   | "errored-at-base"
   | "skipped-at-base"
   | "base-not-comparable"
-  | "red-run-not-comparable";
+  | "red-run-not-comparable"
+  | "identity-collision";
 
 export interface Finding {
   kind: FindingKind;
@@ -464,11 +571,32 @@ export function compareCensus(input: CompareInput): CompareResult {
   }
 
   const appeared = head.filter((test) => !baseByKey.has(testKey(test)));
+  const unmeasured: Unmeasured[] = [];
+  // Identity is the file plus the name, and a runner that names no file
+  // gives every test the same empty file half. Two tests that share a name
+  // then share a key, so a test added under a name another file already used
+  // is not in `appeared` and the red-before-green check never runs on it.
+  // The count is the one thing that still shows it: HEAD grew by more tests
+  // than there are names the base did not hold. That difference cannot be
+  // measured, and saying so is the whole of what this tool can honestly do
+  // with it.
+  const uncounted = head.length - base.length - appeared.length;
+  if (uncounted > 0) {
+    unmeasured.push({
+      kind: "identity-collision",
+      file: "",
+      name: "",
+      detail:
+        `HEAD ran ${head.length} tests to the base commit's ${base.length}, but only ${appeared.length} of them ` +
+        `carries a file and name the base census did not already hold. ${uncounted} test(s) share an identity with ` +
+        "another test, so the red-before-green check could not be run on every test this change added",
+    });
+  }
   const red = compareRedRun(input.redRun, appeared);
 
   return {
     findings: [...findings, ...red.findings],
-    unmeasured: red.unmeasured,
+    unmeasured: [...unmeasured, ...red.unmeasured],
     appeared,
     redAtBase: red.redAtBase,
     baseCount: base.length,
@@ -571,6 +699,10 @@ export interface ReportInput {
   result: CompareResult;
   /** Findings that did not hold on a second run, and so were dropped. */
   flakesDropped: number;
+  /** Unmeasured items the second run did measure, and so were dropped.
+   * These were never findings, and counting them as findings that did not
+   * hold said a run had found something it never found. */
+  unmeasuredDropped: number;
   /** How many times the whole suite ran, including any re-run. */
   runs: number;
   notes: string[];
@@ -612,6 +744,13 @@ export function formatReportText(input: ReportInput): string {
     );
   }
 
+  if (input.unmeasuredDropped > 0) {
+    lines.push("");
+    lines.push(
+      `${input.unmeasuredDropped} unmeasured item(s) were measured on a second run and are not reported here. None of these was a finding.`,
+    );
+  }
+
   if (result.findings.length > 0) {
     lines.push("");
     lines.push(`Findings (${result.findings.length}):`);
@@ -648,8 +787,15 @@ export function formatReportText(input: ReportInput): string {
     lines.push("A finding here means the suite is claiming more than it measured.");
   } else if (result.unmeasured.length > 0) {
     lines.push("Nothing was found, but part of this run was never measured (exit 3), so it is not a clean result.");
-  } else {
+  } else if (result.appeared.length === 0) {
+    lines.push("No test disappeared and the count held. This change added no test, so none was run against the base source.");
+  } else if (result.redAtBase.length === result.appeared.length) {
     lines.push("No test disappeared, the count held, and every test this change added was red against the base source.");
+  } else {
+    lines.push(
+      `No test disappeared and the count held. ${result.redAtBase.length} of the ${result.appeared.length} test(s) this change added ` +
+        "were red against the base source; the rest were not shown to have been red before it.",
+    );
   }
   return lines.join("\n");
 }
@@ -669,6 +815,7 @@ export function formatReportJson(input: ReportInput): string {
       changedTestFiles: input.changedTestFiles,
       runs: input.runs,
       flakesDropped: input.flakesDropped,
+      unmeasuredDropped: input.unmeasuredDropped,
       findings: input.result.findings,
       unmeasured: input.result.unmeasured,
       redAtBase: input.result.redAtBase,

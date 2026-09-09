@@ -343,6 +343,207 @@ test("a base run holding no tests is unmeasured, not every test disappearing", (
   rmSync(dir, { recursive: true, force: true });
 });
 
+// --- a base run that stopped part way ---------------------------------------
+
+// The failure this command exists to keep out, in its quietest form. A base
+// run that prints some TAP and then dies leaves a truncated census, the tests
+// it never reached read as new at HEAD, and the red-before-green run (which
+// copies the fixed test files in, so it no longer dies) sees them all pass.
+// That reported four tests as proving nothing while the count line printed
+// the tell. A run that did not finish printing is a run that cannot be
+// compared, and this is where that is decided.
+test("a base run that printed fewer results than its plan is exit 2, not a smaller suite", () => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    marker: "head only\n",
+  });
+  // The base worktree has no marker, so it takes the truncated branch: a
+  // plan promising six results and two printed before the crash.
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
+    "else printf '1..6\\nok 1 - alpha\\nok 2 - beta\\n'; exit 1; fi";
+  const result = runCli(dir, ["--command", command]);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /the run at the base commit could not be read/);
+  assert.match(result.stderr, /printed a TAP plan of 6 result\(s\) but 2 of them/);
+  assert.doesNotMatch(result.stdout + result.stderr, /disappeared/);
+  assert.doesNotMatch(result.stdout + result.stderr, /not-red-before-green/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a base run that died before printing a plan or a summary is exit 2", () => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    marker: "head only\n",
+  });
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
+    "else printf 'TAP version 13\\nok 1 - alpha\\n'; exit 1; fi";
+  const result = runCli(dir, ["--command", command]);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /without printing a plan or a summary/);
+  assert.doesNotMatch(result.stdout + result.stderr, /disappeared/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// A run the operating system took away is unreadable for the same reason a
+// timed-out one is: spawnSync reports how it ended, and what was printed
+// before it ended is part of a census and not a census. A maxBuffer overflow
+// arrives the same way, as an ENOBUFS on the same field.
+test("a base run killed part way through is exit 2, not a smaller suite", () => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    marker: "head only\n",
+  });
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
+    "else printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; kill -9 $$; fi";
+  // The base prints a whole plan and is then killed, so nothing in the text
+  // says anything is wrong with it. How the run ended is the only thing left
+  // that does, and without it this reads as a clean exit 0.
+  const result = runCli(dir, ["--command", command]);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /the run at the base commit could not be read/);
+  assert.match(result.stderr, /killed by SIGKILL/);
+  assert.doesNotMatch(result.stdout + result.stderr, /disappeared/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// The other half of the same rule: a suite that fails is not a suite that
+// crashed. A failing run exits non-zero and still prints its plan, and
+// refusing that would make every red base run unreadable.
+test("a base run that failed but finished printing is still compared", () => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    marker: "head only\n",
+  });
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
+    "else printf 'TAP version 13\\nnot ok 1 - alpha\\nok 2 - beta\\n1..2\\n'; exit 1; fi";
+  const result = runCli(dir, ["--command", command]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /flipped/);
+  assert.match(result.stdout, /2 at the base/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- a base re-run that collected nothing --------------------------------------
+
+// The re-run is there to drop a disagreement that does not hold. A base
+// re-run that collects nothing holds no test to disagree with, so every
+// finding from the first run failed to recur and the whole report was dropped
+// as flaky: exit 0, with a line saying two findings had been dropped. That
+// made the default less safe than --no-rerun. The re-run now goes through the
+// same guard the first base run does.
+test("a base re-run that collected nothing is unreadable, never evidence of flakiness", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-state-"));
+  const state = join(stateDir, "count");
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    marker: "head only\n",
+  });
+  // HEAD holds one test. The base holds two on its first run and none on its
+  // second, which is a base that did not really run the second time.
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\n1..1\\n'; else " +
+    'n=$(cat "$ADG_BASE_STATE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ADG_BASE_STATE"; ' +
+    "if [ \"$n\" = 1 ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
+    "else printf 'TAP version 13\\n1..0\\n'; fi; fi";
+  const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /disappeared: a test stopped running/);
+  assert.match(result.stdout, /beta ran at the base commit and does not run at HEAD/);
+  assert.match(result.stdout, /count-dropped/);
+  assert.match(result.stdout, /The base re-run printed readable output but held no tests at all/);
+  assert.doesNotMatch(result.stdout, /did not hold on a second run/);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+// --- two runs that disagree about the same test ---------------------------------
+
+// The re-check used to filter the first run's lists by what recurred, so a
+// test the first run called skipped against the base source and the second
+// called passing against it matched neither list and vanished from both. Exit
+// 0, under a closing line claiming every added test had been red. A
+// disagreement now takes the worse of the two verdicts.
+test("a disagreement between two red runs widens to the worse verdict", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-state-"));
+  const state = join(stateDir, "count");
+  const dir = makeRepo(
+    { "tests/a.test.mjs": `${HEADER}test("old", () => {});\n` },
+    {
+      marker: "head only\n",
+      "tests/a.test.mjs": `${HEADER}test("old", () => {});\ntest("added", () => {});\n`,
+    },
+  );
+  // In the base worktree: the census run holds only "old"; the first red run
+  // reports "added" as never having run; the re-run reports it passing, which
+  // is a finding and must not be lost for having been found second.
+  const command =
+    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; else " +
+    'n=$(cat "$ADG_BASE_STATE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ADG_BASE_STATE"; ' +
+    "if [ \"$n\" = 1 ]; then printf 'TAP version 13\\nok 1 - old\\n1..1\\n'; " +
+    "elif [ \"$n\" = 2 ]; then printf 'TAP version 13\\nok 1 - old\\n1..1\\n'; " +
+    "else printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; fi; fi";
+  const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /not-red-before-green/);
+  assert.match(result.stdout, /added passes against the base source/);
+  assert.doesNotMatch(result.stdout, /every test this change added was red/);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+// --- two tests that share an identity ---------------------------------------------
+
+// Node's TAP names no file for a passing test, so identity is the name alone
+// and a new test named like an existing one in another file is invisible: it
+// is not in `appeared`, and the red-before-green check never runs on it. The
+// count is the only thing left that shows it.
+test("a test added under a name another file already uses is an identity collision", () => {
+  const dir = makeRepo(
+    { "tests/a.test.mjs": `${HEADER}test("handles it", () => {});\n` },
+    { "tests/b.test.mjs": `${HEADER}test("handles it", () => {});\n` },
+  );
+  const result = runCli(dir, ["--command", SUITE]);
+  assert.equal(result.status, 3, result.stdout + result.stderr);
+  assert.match(result.stdout, /identity-collision/);
+  assert.match(result.stdout, /1 at the base, 2 at HEAD/);
+  assert.match(result.stdout, /share an identity with another test/);
+  assert.doesNotMatch(result.stdout, /every test this change added was red/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- a '>' inside a JUnit attribute value, end to end -------------------------------
+
+// A runner that groups a test under a describe block writes name="outer >
+// inner". Cutting the tag at the first ">" lost the name and swallowed the
+// case after it, which invented two disappeared tests and a dropped count for
+// a change that had done nothing of the sort.
+test("a '>' in a JUnit test name invents nothing", () => {
+  const suite = (name: string) => `<testsuite name="s" tests="2">
+  <testcase classname="a.js" name="${name}"/>
+  <testcase classname="a.js" name="second"/>
+</testsuite>
+`;
+  // A bare ">" inside an attribute value, which XML allows and which is what
+  // a runner writes when it joins a describe block to the test under it.
+  const dir = makeRepo({ "results.xml": suite("plain") }, { "results.xml": suite("outer > inner") });
+  const result = runCli(dir, ["--command", "cat results.xml"]);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stdout, /2 at the base, 2 at HEAD/);
+  assert.match(result.stdout, /a\.js :: plain ran at the base commit/);
+  assert.doesNotMatch(result.stdout, /count-dropped/);
+  assert.doesNotMatch(result.stdout, /a\.js :: second ran at the base commit/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a JUnit testcase with no name is exit 2, never a census", () => {
+  const dir = makeRepo({ "results.xml": `<testsuite><testcase classname="a.js"/></testsuite>\n` }, {
+    "notes.txt": "unchanged\n",
+  });
+  const result = runCli(dir, ["--command", "cat results.xml"]);
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /carried no name/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // --- the worktree ------------------------------------------------------------------
 
 test("the temporary worktree is removed even when the command fails", () => {
@@ -436,6 +637,10 @@ test("--help prints the known limits and exits 0", () => {
   assert.match(result.stdout, /never in a per-edit hook/);
   assert.match(result.stdout, /Only TAP and JUnit XML/);
   assert.match(result.stdout, /flaky suite still produces noise/);
+  assert.match(result.stdout, /Three to six full suite runs/);
+  assert.match(result.stdout, /writes into your real install and can corrupt it/);
+  assert.match(result.stdout, /node_modules is gitignored/);
+  assert.match(result.stdout, /share one identity/);
   rmSync(dir, { recursive: true, force: true });
 });
 
