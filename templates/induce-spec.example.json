@@ -1,0 +1,8 @@
+{
+  "claim": "A 503 from the quote service is retried three times and is never handed back to the caller as a quote.",
+  "baseline": "pytest tests/test_client.py -k happy_path -q",
+  "inject": "pytest tests/test_client.py -k retries_on_503 -q",
+  "neutralize": "ADG_RETRY_DISABLED=1 pytest tests/test_client.py -k retries_on_503 -q",
+  "timeout": 120,
+  "cwd": "."
+}

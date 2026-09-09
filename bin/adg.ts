@@ -53,6 +53,9 @@ Commands:
   census [...]             run the suite at a base commit and at HEAD, and
                            report a test that stopped running or a new test
                            that passes without the change
+  induce [...]             run a declared failure injection with the
+                           handling in place and again with it taken away,
+                           and report a check that passes either way
   tally [...]              read or check the gate tally log
   scan-prose [...]         scan text against configured prose rules
   check                    run the pre-publication checks
@@ -244,6 +247,9 @@ function main(): void {
       break;
     case "census":
       nodeTool("hooks/census.ts", rest);
+      break;
+    case "induce":
+      nodeTool("hooks/induce.ts", rest);
       break;
     case "tally":
       nodeTool("scripts/tally-report.ts", rest);

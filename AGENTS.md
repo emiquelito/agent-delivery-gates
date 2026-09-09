@@ -202,22 +202,33 @@ an actually separate agent session:
 - `builder-reviewer-separation`
 - `cross-cutting-audit`
 
+`induced-failure-required` gets a second line for the same reason. The
+hook reads report text: it asks that a robustness verb carry a durable
+evidence reference. Whether that evidence exercises the failure is what
+`agent-delivery-gates induce` answers, by running a declared injection
+with the handling present and again with it taken away. The two are
+separate commands and neither reads the other's input.
+
 One rule needs its own line, because a hook covers half of it and cannot
 cover the other half. `red-before-green` asks that every fix ship a test
 that was red before the fix and green after. A hook cannot confirm such a
 test exists. It can catch the opposite move, a fix reaching green by
 changing the tests, and that is what runs: on a commit touching existing
 test files, the test diff is reported apart from the source diff and
-seven checks name what was weakened. Whether the fix carried a
-red-before-green test stays with the report and the reviewer.
+seven checks name what was weakened. The other half now has a command
+behind it: `agent-delivery-gates census` runs the tests this change
+touched against the base source, and a test that passes there was never
+red. It is a command for pre-push or CI, not a hook, and it cannot supply
+a test that was never written, so the report and the reviewer still carry
+the rest.
 
 ## Running the checks outside Claude Code
 
-Both tools are plain command line programs with defined exit codes. They
-do not depend on any hook system to run; a hook system is only what makes
-them block a tool call in-loop before it happens, which needs a coding
-tool that supports hooks. Anywhere else, run them as a CI step or a git
-pre-commit hook and check the exit code.
+Every check here is a plain command line program with a defined exit
+code. None depends on a hook system to run; a hook system is only what
+makes one block a tool call in-loop before it happens, which needs a
+coding tool that supports hooks. Anywhere else, run them as a CI step or
+a git pre-commit hook and check the exit code.
 
 ### delivery-report-validator
 
@@ -298,15 +309,83 @@ number, `census` exited 1 and reported `not-red-before-green`. With the
 same fix and the test rewritten to assert the discounted value, it
 exited 0 and reported that test as red against the base source.
 
+### induce
+
+Runs a declared failure injection twice: once with the handling in place,
+where the check must pass, and once with the handling taken away, where
+the same check must fail. This is the other half of
+`induced-failure-required`, the half a text check cannot carry. That
+record ends by asking whether the check would still pass if the feature
+produced nothing; a spec's neutralize step is that question, run.
+
+```
+induce [--dir PATH] [--spec PATH]... [--timeout SECONDS] [--format text|json]
+```
+
+A spec is one JSON file per claim, in `.adg/induced/` by default. It
+carries `claim` (the sentence a report would make), `inject` (induce the
+failure with the handling present, expected to pass), `neutralize`
+(induce the same failure with the handling taken away, expected to fail),
+and optionally `baseline` (the happy path, run first), `timeout`
+(seconds), and `cwd`. Any other field is refused, and so is a spec with
+no `neutralize`: the control is not optional, and a run without one
+proves nothing. `templates/induce-spec.example.json` is a worked spec.
+
+The verdicts are `proven` (inject passed, neutralize failed),
+`handler-did-not-fire` (inject did not pass), `check-does-not-measure`
+(both passed, so the check would pass if the handling produced nothing),
+and `could-not-run` (a command could not be executed, a command timed
+out, the baseline was already failing, or the spec was malformed). A
+proven spec prints an evidence block naming the claim and both commands,
+which a delivery report can cite: `validate-report` asks a robustness
+claim to point at a commit, a path, or a command, and the inject command
+is that command.
+
+This command writes to no source file, so it has no clean-tree gate and
+needs none; `git checkout`, `git stash`, and `git restore` are never run
+from it.
+
+What it does not do:
+
+- It does not read a delivery report, and `validate-report` does not run
+  a spec. The two are separate checks on purpose.
+- It does not know whether the spec describes the failure a report means.
+- It cannot tell whether a spec is honest. A spec whose neutralize step
+  breaks something unrelated still reports `proven`.
+- A command exiting 126 or 127 is read as never having run, because a
+  neutralize step that was never runnable would otherwise look exactly
+  like a control that worked. A command that chooses to exit 127 on its
+  own is misread by that rule.
+
+Exit codes: `0` every spec proven; `1` at least one spec not proven; `2`
+could not run as asked, including no specs at all, a malformed spec, a
+spec with no `neutralize`, a command that could not be executed, or a
+failing baseline; `3` nothing failed, but at least one spec timed out and
+so was never measured.
+
+Verified: against a scratch Python project built from
+`docs/examples/07-a-retry-that-never-retries.md`, with a client that
+raises on a 503 and a copy of it that hands the 503 body back as a quote,
+`induce` exited 0 and reported `proven` for a check asserting that no
+quote file was written and that three calls went out. Pointed at the
+client without the handling, the same check gave exit 1 and
+`handler-did-not-fire`. With a check that asked only that the client had
+been called, it gave exit 1 and `check-does-not-measure`.
+
 ### Wiring them in without a hook system
 
-A pre-commit hook or a CI step can call either command directly and act
-on its exit code, for example:
+A pre-commit hook or a CI step can call any of them directly and act on
+the exit code, for example:
 
 ```
-delivery-report-validator --report delivery-report.md || exit 1
-test-diff-separator --staged || exit 1
+adg validate-report --report delivery-report.md || exit 1
+adg test-diff --staged || exit 1
+adg mutate --rev HEAD || exit 1
 ```
+
+`census` and `induce` run the whole suite several times over, so they
+belong in a pre-push hook or in CI, not on every commit.
+
 
 An agent that is not Claude Code, and so has no hook system of its own,
 still gets the same coverage by running these two commands itself before

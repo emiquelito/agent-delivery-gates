@@ -21,6 +21,7 @@ agent-delivery-gates validate-report [--report PATH] [--prior PATH] [--format te
 agent-delivery-gates test-diff [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json]
 agent-delivery-gates mutate [--rev REV] [--range A..B] [--staged] [--paths PATH...] [--command CMD] [--max N] [--timeout SECONDS] [--format text|json]
 agent-delivery-gates census [--base REF] [--command CMD] [--format text|json] [--format-in tap|junit] [--timeout SECONDS] [--no-rerun]
+agent-delivery-gates induce [--dir PATH] [--spec PATH]... [--timeout SECONDS] [--format text|json]
 agent-delivery-gates scan-prose [FILE...] [--rules PATH] [--require-rules] [--baseline PATH | --write-baseline PATH]
 agent-delivery-gates tally [--tally PATH] [--format text|json] [--check]
 agent-delivery-gates check
@@ -114,11 +115,24 @@ worktree's install is reused through a symlink. When they differ, this
 is exit 2: the base cannot be built comparably, and a base run that
 fails to start must never read as every test disappearing.
 
+That symlink points at your real install, not a copy of it. A suite that
+writes into `node_modules` during the base run writes into the one your
+own work uses and can corrupt it, and the end-of-run tree check cannot
+see it happen: `node_modules` is gitignored, so nothing written inside it
+shows up as a dirty tree. Point `--command` at a runner that does not
+write there, or do not run this command over a suite that does.
+
 Known limits, all of them real:
 
 - Identity is the file plus the test name, so a renamed test reads as one
-  test disappearing and another appearing.
-- Two to three full suite runs, plus one more per side when a
+  test disappearing and another appearing. Two tests that share both
+  halves share one identity, which happens whenever the runner names no
+  file, as node's TAP does not for a passing test. A test added under a
+  name another file already uses is then never checked against the base
+  source, and the run reports an `identity-collision` it could not
+  measure.
+- Three to six full suite runs: HEAD, the base, this change's tests
+  against the base source, and a re-run of any of those when a
   disagreement is re-checked for flakiness. This belongs in pre-push, in
   CI, or in a Stop hook, never in a per-edit hook.
 - A flaky suite still produces noise after one re-run: a disagreement
@@ -132,6 +146,54 @@ that cannot be resolved, a lockfile that differs between the base and
 HEAD, or output in neither format; `3` nothing found, but part of the run
 was unmeasured, such as a base run that could not be compared or a test
 that errored against the base source.
+
+### induce
+
+Runs a declared failure injection twice: once with the handling in place,
+where the check must pass, and once with the handling taken away, where
+the same check must fail. A check that passes both ways is not measuring
+the handling at all. It would pass if the feature produced nothing, which
+is the question `induced-failure-required` asks a reviewer to ask, made
+mechanical.
+
+A spec is one JSON file per claim, in `.adg/induced/` by default:
+`claim` (the sentence a report would make), `inject` (induce the failure
+with the handling present, expected to pass), `neutralize` (induce the
+same failure with the handling taken away, expected to fail), and
+optionally `baseline` (the happy path, run first), `timeout` (seconds),
+and `cwd`. Any other field is refused, and so is a spec with no
+`neutralize`: the control is not optional, and a run without one proves
+nothing.
+
+Verdicts: `proven` (inject passed, neutralize failed),
+`handler-did-not-fire` (inject did not pass), `check-does-not-measure`
+(both passed), and `could-not-run` (a command could not be executed, a
+command timed out, the baseline was already failing, or the spec was
+malformed). On a proven spec it prints an evidence block naming the claim
+and both commands, which is text a delivery report can cite:
+`validate-report` asks a robustness claim to point at a commit, a path,
+or a command, and the inject command is that command.
+
+It writes to no source file, so it needs no clean-tree gate and has none;
+`git checkout`, `git stash`, and `git restore` are never run from it.
+
+What it does not do:
+
+- It does not read a delivery report, and `validate-report` does not run
+  a spec. The two are separate checks on purpose.
+- It does not know whether a spec describes the failure a report means.
+- It cannot tell whether a spec is honest. A spec whose neutralize step
+  breaks something unrelated still reports `proven`.
+- A command exiting 126 or 127 is read as never having run, because a
+  neutralize step that was never runnable would otherwise look exactly
+  like a control that worked. A command that chooses to exit 127 on its
+  own is misread by that rule.
+
+Exit codes: `0` every spec proven; `1` at least one spec not proven; `2`
+could not run as asked, including no specs at all, a malformed spec, a
+spec with no `neutralize`, a command that could not be executed, or a
+failing baseline; `3` nothing failed, but at least one spec timed out and
+so was never measured.
 
 ### scan-prose
 
