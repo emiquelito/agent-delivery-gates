@@ -580,26 +580,26 @@ function renderPage(rules, tally, examples, commands) {
 <meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
 <meta name="twitter:image" content="${socialUrl}">
 <meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
-<meta name="theme-color" content="#0b7261">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230b7261'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%239bf4da' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#2e2459">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%232e2459'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%236ee7b7' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: dark;
-  /* One palette, on the green ground the Rust site carries, and no second one
-     behind prefers-color-scheme. The page had a light scheme as the override,
-     so a reader whose machine is set to light never saw the green at all and
-     had no way to ask for it. Every colour below was measured against that
-     ground: body text, muted text, links and the tick all clear 4.5:1, and
-     the two panel greens sit far enough off it to read as panels. */
-  --bg: #0b7261;
-  --fg: #eefbf6;
-  --muted: #cbebe0;
-  --rule: #6fc0af;
-  --code-bg: #064c40;
-  --card-bg: #095f51;
-  --link: #c7f9e5;
-  --accent: #9bf4da;
-  --warn: #ffdcc4;
+  /* One palette, on a dark purple ground, and no second one behind
+     prefers-color-scheme. The page had a light scheme as the override, so a
+     reader whose machine is set to light never saw the theme at all and had
+     no way to ask for it. Every colour below was measured against that
+     ground: body text, muted text, links and the tick clear 4.5:1 on the
+     ground and on both panels, the worst of them at 5.31:1. */
+  --bg: #2e2459;
+  --fg: #ece9f7;
+  --muted: #b9b2d8;
+  --rule: #6a5ca8;
+  --code-bg: #1b1436;
+  --card-bg: #3d3179;
+  --link: #b8a9ff;
+  --accent: #6ee7b7;
+  --warn: #ffb4a2;
 }
 * { box-sizing: border-box; }
 body {
