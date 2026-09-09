@@ -1468,3 +1468,193 @@ test("exactly the two declared fixture files in this repository carry the marker
     "a file gained or lost the fixtures marker; a person has to decide whether that exemption is warranted",
   );
 });
+
+
+// --- Masking: a detector word inside a literal is not a signal ---------------
+//
+// Every pattern is tested against the line with its strings, templates,
+// regular expressions, and trailing comments blanked out (src/code-mask.ts).
+// A fixture string and a test's own name stop firing; real code does not.
+// The lines in the first block are real ones, taken from the false positives
+// this repository's own history produced before the mask went in.
+
+test("a detector word inside a fixture string is not a timeout change", () => {
+  const diff = oneFileDiff(
+    "tests/induce.test.ts",
+    ['    command: "pytest -k retries",'],
+    ['    command: "NO_RETRY=1 pytest -k retries",'],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("a detector word inside a regex literal is not a timeout change", () => {
+  const diff = oneFileDiff(
+    "tests/induce.test.ts",
+    ["      assert.doesNotMatch(text, /hit the timeout/);"],
+    ["      assert.doesNotMatch(killedText, /hit the timeout/);"],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("a detector word inside a test's own name is not a timeout change", () => {
+  const diff = oneFileDiff(
+    "tests/induce.test.ts",
+    ['test("could-not-run: a baseline that timed out keeps the reason", () => {'],
+    ['test("could-not-run: a baseline that timed out keeps the timeout reason and exit 3", () => {'],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("a skip written inside a fixture string is not a skip added", () => {
+  const diff = oneFileDiff(
+    "tests/census.test.ts",
+    [],
+    ['      <skipped type="pytest.skip" message="not today"/>'],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("a skip word inside a single quote, a double quote, a template, or a regex is ignored", () => {
+  const diff = oneFileDiff("tests/holder.test.ts", [], [
+    "  const a = 'it.skip me';",
+    '  const b = "it.skip me";',
+    "  const c = `it.skip me`;",
+    "  const d = /it\\.skip/;",
+  ]);
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("a skip word inside a template's ${...} expression is ignored too", () => {
+  // Pinned as the mask has it, not as it might be: a template literal is
+  // skipped whole, so an interpolated expression is blanked along with the
+  // text around it. A signal is lost there and none is invented.
+  const diff = oneFileDiff("tests/holder.test.ts", [], ["  const s = `${it.skip(1)}`;"]);
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("a real skip, a real assertion swap, and a real timeout change all still fire", () => {
+  const skip = oneFileDiff("tests/holder.test.ts", [], ['  it.skip("a real skip", () => {});']);
+  assert.deepEqual(signalIds(separateTestDiff(skip).signals), ["skip-added"]);
+
+  const swap = oneFileDiff(
+    "tests/holder.test.ts",
+    ["  assert.equal(shipping(two), 0);"],
+    ["  assert.ok(shipping(two));"],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(swap).signals), ["assertion-weakened"]);
+
+  const timeout = oneFileDiff("tests/holder.test.ts", ["  timeout: 5000,"], ["  timeout: 20000,"]);
+  assert.deepEqual(signalIds(separateTestDiff(timeout).signals), ["timeout-raised"]);
+});
+
+test("a signal reports the original line, never the masked one", () => {
+  const line = '  it.skip("a real skip", () => {});';
+  const signals = separateTestDiff(oneFileDiff("tests/holder.test.ts", [], [line])).signals;
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].line, line, "the reported line must carry the test's real name");
+});
+
+test("an assertion swap reports both original lines, strings and all", () => {
+  const gone = '  assert.equal(order.state, "shipped");';
+  const now = "  assert.ok(order.state);";
+  const signals = separateTestDiff(oneFileDiff("tests/holder.test.ts", [gone], [now])).signals;
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].line, `${gone.trim()}  ->  ${now.trim()}`);
+});
+
+test("a string that opened on an earlier line is not seen: the known limit", () => {
+  // The bound, recorded and not merely described. The middle line is string
+  // text in its real file, but the mask reads one line at a time and that
+  // line carries no backtick of its own, so the skip still fires. A test
+  // file where this is common wants the fixtures marker instead.
+  const diff = oneFileDiff("tests/holder.test.ts", [], [
+    "  const src = `",
+    '    it.skip("x");',
+    "  `;",
+  ]);
+  const signals = separateTestDiff(diff).signals;
+  assert.deepEqual(signalIds(signals), ["skip-added"]);
+  assert.equal(signals[0].line, '    it.skip("x");');
+});
+
+test("a Rust attribute is code, so the mask leaves the Rust marker paths alone", () => {
+  const diff = oneFileDiff("src/order.rs", [], [
+    "#[cfg(test)]",
+    "mod tests {",
+    "    #[test]",
+    "    fn totals() {",
+    "        assert_eq!(total(), 3);",
+    "        #[ignore]",
+    "    }",
+    "}",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(signalIds(result.signals).includes("skip-added"), "#[ignore] is an attribute, not a string");
+});
+
+test("a Rust marker written inside a string no longer classifies the file as a test", () => {
+  const diff = oneFileDiff("src/order.rs", [], ['    let hint = "assert_eq!(total, 3)";']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.testFiles, [], "a string mentioning a Rust assertion is not a test marker");
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("the whole-line comment check still runs on the raw line, before the mask", () => {
+  // A leading block comment makes the whole line a comment line here, as it
+  // did before the mask went in. Masking first would blank the comment away
+  // and leave a bare skip behind, so the order of the two checks is what
+  // this pins: comment check first, mask after.
+  const diff = oneFileDiff("tests/holder.test.ts", [], ['  /* setup */ it.skip("x", () => {});']);
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("the removed line of a weakening pair is judged on its masked half", () => {
+  // The removed line names a weak assertion inside a string. Read raw, that
+  // string makes the line look like it was already weak, and the pair is
+  // dropped before it can report. Read masked, it is the strong check it
+  // really is and the swap is reported.
+  const diff = oneFileDiff(
+    "tests/holder.test.ts",
+    ['  assert.equal(msg, "assert.ok(x)");'],
+    ["  assert.ok(msg);"],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), ["assertion-weakened"]);
+});
+
+test("the added line of a weakening pair is judged on its masked half", () => {
+  // Read raw, the added line's fixture string makes it look like a weaker
+  // assertion arrived to replace the removed one. Read masked, nothing
+  // weaker arrived and there is nothing to report.
+  const diff = oneFileDiff(
+    "tests/holder.test.ts",
+    ["  assert.equal(total, 3);"],
+    ['  assert.deepStrictEqual(log, ["assert.ok(x)"]);'],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), []);
+});
+
+test("the double-report guard on a changed value is judged on the masked half", () => {
+  // The guard drops an assertion-weakened report when the same edit already
+  // has a tolerance or timeout report of its own. Here the word "timeout" is
+  // only a string, no timeout signal is coming, and the guard must not fire.
+  const diff = oneFileDiff(
+    "tests/holder.test.ts",
+    ['  assert.equal(label, "timeout");'],
+    ['  assert.equal(label, "deadline");'],
+  );
+  assert.deepEqual(signalIds(separateTestDiff(diff).signals), ["assertion-weakened"]);
+});
+
+test("a #[cfg(test)] written inside a Rust string opens no test region", () => {
+  // Without the mask on this read, the string below opens a region, the
+  // string on the next line is taken for its `mod` opener, and the real
+  // #[ignore] that follows gets reported as a skip added to a test.
+  const diff = oneFileDiff("src/order.rs", [], [
+    '    let doc = "#[cfg(test)]";',
+    '    let opener = "mod tests {";',
+    "    #[ignore]",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.testFiles, []);
+  assert.deepEqual(signalIds(result.signals), []);
+});

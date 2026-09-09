@@ -11,6 +11,8 @@
 // what changed in the test files themselves, separately from the source
 // change that supposedly caused them to pass.
 
+import { maskNonCode } from "./code-mask.ts";
+
 export type SignalId =
   | "assertion-removed"
   | "assertion-weakened"
@@ -641,9 +643,36 @@ export function isImportLine(line: string): boolean {
   return IMPORT_LINE_RE.test(line);
 }
 
-/** Counts and collects the code lines in `lines` that match `re`. */
+/**
+ * Counts and collects the code lines in `lines` that match `re`.
+ *
+ * The pattern is tested against the line with every string, template,
+ * regular expression, and trailing comment blanked out (see
+ * src/code-mask.ts), because a detector word written inside a literal is
+ * fixture text or a test's own name, not a weakening of anything. The
+ * ORIGINAL line is what comes back and what gets reported: a person
+ * reading a signal has to see the real text, never a line with holes cut
+ * in it. A line whose code half is empty once masked matches nothing,
+ * which is the point.
+ *
+ * The whole-line comment and import checks run first, not instead: the
+ * mask knows the C-family comment forms only, and an import line is never
+ * an assertion whatever word it carries.
+ *
+ * KNOWN LIMIT: this masks one line at a time, so a string that opened on an
+ * earlier line is invisible to it. In
+ *
+ *     const xml = `
+ *       <skipped type="pytest.skip"/>
+ *     `;
+ *
+ * the middle line carries no quote of its own and reads as code, so its
+ * detector words still fire. A diff line is all this file ever holds, so
+ * there is no whole file to scan instead. For a test file where that is
+ * common, the fixture marker (FIXTURE_MARKER above) is the answer.
+ */
 function matching(lines: string[], re: RegExp): string[] {
-  return lines.filter((line) => !isCommentLine(line) && !isImportLine(line) && re.test(line));
+  return lines.filter((line) => !isCommentLine(line) && !isImportLine(line) && re.test(maskNonCode(line)));
 }
 
 // An assertion that stays in place but stops proving as much. The net-count
@@ -666,27 +695,39 @@ function blankLiterals(line: string): string {
     .trim();
 }
 
+/** One line kept twice: the text to test against, and the text to report. */
+interface MaskedLine {
+  raw: string;
+  masked: string;
+}
+
+function withMask(raw: string): MaskedLine {
+  return { raw, masked: maskNonCode(raw) };
+}
+
 /**
  * Two ways an assertion gets quieter without disappearing. A strong check is
  * swapped for a weaker one, or the same check keeps its form while the value
  * it expects changes, which is how a test gets edited to match a bug.
  */
 function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules): Signal[] {
-  const removed = matching(file.removedLines, rules.assertions);
-  const added = matching(file.addedLines, rules.assertions);
+  // Every pattern below is tested against the masked half of the line and
+  // reported from the raw half, for the reason given on `matching` above.
+  const removed = matching(file.removedLines, rules.assertions).map(withMask);
+  const added = matching(file.addedLines, rules.assertions).map(withMask);
   if (removed.length === 0 || added.length === 0) return [];
   const signals: Signal[] = [];
 
   for (const gone of removed) {
     for (const [strong, weak] of WEAKENING_PAIRS) {
-      if (!strong.test(gone) || weak.test(gone)) continue;
-      const swapped = added.find((line) => weak.test(line) && !strong.test(line));
+      if (!strong.test(gone.masked) || weak.test(gone.masked)) continue;
+      const swapped = added.find((line) => weak.test(line.masked) && !strong.test(line.masked));
       if (swapped === undefined) continue;
       signals.push({
         id: "assertion-weakened",
         severity: "high",
         file: file.path,
-        line: `${gone.trim()}  ->  ${swapped.trim()}`,
+        line: `${gone.raw.trim()}  ->  ${swapped.raw.trim()}`,
         message:
           "an assertion was replaced by one that proves less; confirm the check was not loosened to reach green",
       });
@@ -697,15 +738,15 @@ function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules): Sign
   for (const gone of removed) {
     // A changed tolerance or timeout is a changed literal too, and both have
     // their own signal. Reporting it twice for one edit adds nothing.
-    if (rules.tolerance.test(gone) || rules.timeout.test(gone)) continue;
-    const blanked = blankLiterals(gone);
-    const edited = added.find((line) => blankLiterals(line) === blanked && line.trim() !== gone.trim());
+    if (rules.tolerance.test(gone.masked) || rules.timeout.test(gone.masked)) continue;
+    const blanked = blankLiterals(gone.raw);
+    const edited = added.find((line) => blankLiterals(line.raw) === blanked && line.raw.trim() !== gone.raw.trim());
     if (edited === undefined) continue;
     signals.push({
       id: "assertion-weakened",
       severity: "high",
       file: file.path,
-      line: `${gone.trim()}  ->  ${edited.trim()}`,
+      line: `${gone.raw.trim()}  ->  ${edited.raw.trim()}`,
       message:
         "an assertion kept its form while the value it expects changed; confirm the test was not edited to match the behavior",
     });
@@ -943,9 +984,14 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
 const RUST_PATH_RE = /\.rs$/;
 const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_eq!|\bassert_ne!|\bassert!/;
 
+// Both reads below test the masked line, for the same reason every other
+// pattern in this file does: `let s = "assert!";` is a Rust string that
+// says nothing about whether this file holds tests. A Rust attribute is
+// code, so `#[cfg(test)]` and `#[test]` come through the mask untouched,
+// and so does `assert_eq!(total, 3)`.
 function hasRustTestMarker(file: RawFileDiff): boolean {
-  if (file.hunkHeadings.some((heading) => RUST_TEST_MARKER_RE.test(heading))) return true;
-  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(line.content));
+  if (file.hunkHeadings.some((heading) => RUST_TEST_MARKER_RE.test(maskNonCode(heading)))) return true;
+  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(maskNonCode(line.content)));
 }
 
 // Matches "#[cfg(test)]" and "#[cfg(all(test, feature = \"x\"))]" (or any
@@ -1045,7 +1091,7 @@ function cfgTestRegionMask(lines: DiffLine[]): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
   let i = 0;
   while (i < lines.length) {
-    if (!CFG_TEST_ATTR_RE.test(lines[i].content)) {
+    if (!CFG_TEST_ATTR_RE.test(maskNonCode(lines[i].content))) {
       i++;
       continue;
     }

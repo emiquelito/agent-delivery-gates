@@ -312,6 +312,27 @@ the text report directly above the signal count and in the JSON as
 was found: a clean run that skipped two files does not read the same as a
 clean run that skipped none.
 
+Every pattern is tested against the line with its strings, its template
+literals, its regular expressions, and any trailing comment blanked out,
+so a detector word written inside a fixture string or inside a test's own
+name is not read as a weakening. The line reported is always the original
+one and never the blanked copy: a person reading a signal has to see the
+real text.
+
+That blanking reads one line at a time, so a string opened on an earlier
+line is invisible to it. In
+
+```
+const xml = `
+  <skipped type="pytest.skip"/>
+`;
+```
+
+the middle line carries no quote of its own, so it reads as ordinary code
+and its detector words still fire. A diff line is all this check ever
+holds, so there is no whole file to read instead. For a test file where
+this is common, the fixtures marker above is the answer.
+
 Verified: `test-diff-separator --rev HEAD` against this repository's
 current HEAD printed the source diff, reported no test files changed,
 and exited 0.

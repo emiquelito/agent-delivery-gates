@@ -8,7 +8,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   applyMutation,
-  codeMask,
   exitCodeFor,
   formatReportText,
   hasMutableExtension,
@@ -148,14 +147,6 @@ test("an operator with no space on both sides is left alone", () => {
 test("a word containing true or false is not a boolean literal", () => {
   assert.deepEqual(mutationsFor("const isTrueish = value;"), []);
   assert.deepEqual(mutationsFor("const falsey = value;"), []);
-});
-
-test("codeMask marks string and comment characters as not code", () => {
-  const text = "a + 'b + c' // d + e";
-  const mask = codeMask(text);
-  assert.equal(mask[2], true, "the first plus is code");
-  assert.equal(mask[7], false, "the plus inside the string is not code");
-  assert.equal(mask[16], false, "the plus inside the comment is not code");
 });
 
 // --- which files -------------------------------------------------------------
