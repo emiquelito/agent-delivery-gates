@@ -855,3 +855,72 @@ test("the generator refuses a tally table with a gap in it", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+const NUMBER_WORDS_FOR_TEST = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+  "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+];
+function words(count: number): string {
+  return count < NUMBER_WORDS_FOR_TEST.length ? NUMBER_WORDS_FOR_TEST[count] : String(count);
+}
+
+// --- facts the page states in prose, held to the records ----------------------
+//
+// A mutation sweep over site/build.js left 22 of 51 mutations alive. Four were
+// real: the field check on a rule record, the separator-row test, and the two
+// counts the FAQ states in words. Nothing asserted any of them, so the page
+// could name the wrong number of hook-enforced rules and every test would
+// pass. These read the counts from the records by a route the generator does
+// not use, so agreeing with the generator is not enough to pass.
+
+test("the FAQ states the hook-enforced count the records hold", () => {
+  const rules = readRules();
+  const hookCount = rules.filter((r) => r.enforcement === "hook").length;
+  const enforcement = rules;
+  assert.ok(hookCount > 0 && hookCount < enforcement.length, "the fixture makes this test vacuous");
+  const sentence = `${words(hookCount)} of the ${words(enforcement.length)} are enforced by a hook`;
+  assert.ok(
+    html.toLowerCase().includes(sentence),
+    `the page does not say "${sentence}"`,
+  );
+});
+
+test("the FAQ states the number of rules sitting at zero", () => {
+  const ids = readRules().map((r) => r.id);
+  const tally = readTally(ids);
+  const zeroed = ids.filter((id) => (tally.counts.get(id) ?? 0) === 0).length;
+  assert.ok(
+    html.includes(`${words(zeroed).replace(/^./, (c) => c.toUpperCase())} of the rules sit at zero`),
+    `the page does not say ${words(zeroed)} rules sit at zero`,
+  );
+});
+
+test("a rule record missing a required field stops the build", () => {
+  for (const field of ["name", "claim_class", "severity", "enforcement"]) {
+    const dir = scratchProject();
+    try {
+      const path = join(dir, "rules", "red-before-green.json");
+      const record = JSON.parse(readFileSync(path, "utf8"));
+      delete record[field];
+      writeFileSync(path, JSON.stringify(record, null, 2));
+      const result = runBuild(join(dir, "site", "build.js"), join(dir, "dist"));
+      assert.equal(result.status, 2, `a record with no "${field}" built anyway`);
+      assert.match(result.stderr, new RegExp(`no usable "${field}"`));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a table whose separator row is not dashes is not read as a table", () => {
+  const dir = scratchProject();
+  try {
+    const path = join(dir, "docs", "gate-tally.md");
+    const text = readFileSync(path, "utf8");
+    writeFileSync(path, text.replace(/^\|[ :|-]+\|$/m, "| x | x | x | x | x |"));
+    const result = runBuild(join(dir, "site", "build.js"), join(dir, "dist"));
+    assert.equal(result.status, 2, "a table with no separator row was read as one");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

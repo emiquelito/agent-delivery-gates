@@ -122,6 +122,12 @@ function splitRow(line) {
 
 function isSeparatorRow(line) {
   const cells = splitRow(line);
+  // The length guard cannot fire today: String.split always returns at least
+  // one element, so splitRow never gives back an empty array. It is kept
+  // because every() on an empty array is true, and a future splitRow that
+  // could return one would read any line as a separator. A mutation sweep
+  // found this guard unreachable, which is a mutation that survives without
+  // naming a gap.
   return cells.length > 0 && cells.every((cell) => /^:?-{2,}:?$/.test(cell));
 }
 
