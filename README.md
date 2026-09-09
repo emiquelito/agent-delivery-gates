@@ -24,7 +24,7 @@ outside, and only one of them means anything.
 A rule system checks the code an agent wrote. Runtime guardrails check its
 inputs and tool calls while it works. Neither checks what the agent claims
 about its own work once the work is done, which is what this repository is
-for: [thirteen proof obligations](#the-thirteen-rules) for a delivery
+for: [fourteen proof obligations](#the-rules) for a delivery
 report, five of them checked by a hook on every commit, tooling that runs
 the same way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
 pre-commit hook with no agent at all, and [an MCP server](#the-mcp-server)
@@ -155,7 +155,7 @@ an agent had gone looking there. A folder an agent can read from is a
 folder it can write to, and a wrong write there would replicate to every
 device that folder syncs to, not just the one running the build.
 
-The rest of the thirteen rules generalize a pattern seen across more than
+The rest of the fourteen rules generalize a pattern seen across more than
 one build step, not a single recorded event. Only these two name one.
 
 Building this repository also produced its own record of what its gates
@@ -183,7 +183,7 @@ hardest:
   from is what caught the overclaim, in the file most likely to be read.
 
 Running `agent-delivery-gates tally` counts entries per rule. As of this
-build: 95 entries, dated 2026-09-07 to 2026-09-09, five with no automated
+build: 97 entries, dated 2026-09-07 to 2026-09-09, five with no automated
 test behind them because someone read the situation and wrote it down
 instead.
 
@@ -195,9 +195,10 @@ named-spec-files-fail-loud: 11
 commit-before-mutation: 5
 filesystem-allowlist: 5
 one-fail-loud-setup-script: 4
-coverage-as-gap-finder: 2
+coverage-as-gap-finder: 3
 standing-adversarial-self-review: 2
 test-diff-reported-apart: 2
+expected-value-derived-apart: 1
 red-before-green: 1
 artifact-inputs-reproducible: 0
 builder-reviewer-separation: 0
@@ -209,11 +210,11 @@ enough to catch anything on it yet, and the count alone cannot tell you
 which. Every tally entry names where to see the result, so any row can be
 checked instead of taken on trust.
 
-<a id="the-thirteen-rules"></a>
+<a id="the-rules"></a>
 
-## 📜 The thirteen rules
+## 📜 The fourteen rules
 
-All thirteen are recorded in `rules/`, one JSON file per rule, and
+All fourteen are recorded in `rules/`, one JSON file per rule, and
 described at length in `AGENTS.md`. Grouped by each record's own
 `enforcement` field:
 

@@ -1,0 +1,11 @@
+{
+  "id": "expected-value-derived-apart",
+  "name": "Expected value derived apart",
+  "claim_class": "A claim that something was checked: a test, an assertion, a gate, or a report stating that a page, a document, or a count agrees with the record behind it.",
+  "proof_obligation": "A check has to reach its expected value by a route the thing under test does not use. When the check and its subject compute the same answer the same way, the check can only ever agree, and it agrees just as readily when the shared route is wrong. Reading the source under test and writing an assertion is fine; copying its logic into the test is not. Recomputing a total with a second implementation is fine when the second one is simpler and independent, for example counting rows with a regular expression where the code walks a table; reimplementing the walk is not. This obligation is about where the expected value came from, not about how strongly it is asserted, so a suite can hold this rule and still be weak, or be strong and still break it. `adg mutate` catches part of it, since a check that restates its subject often dies under mutation, but only where an operator it knows about sits on the shared line; a shared control-flow statement is invisible to it. Whether the two routes are actually independent is a judgement a reviewer makes.",
+  "failure_mode": "A defect ships with its check green, because the check reproduces the defect. Nothing looks wrong: the assertion is specific, the test name describes real behaviour, and the suite passes. The check reports that it verified the subject when it only restated it, which is the same shortfall as a suite reporting success over tests that never ran.",
+  "origin_incident": "On 2026-09-08 the test that checks the generated site against the gate tally computed the entry total with a copy of the generator's own table parser, stopping rule included. A blank line inside the table ended both counts at the same place, so the page would have published sixteen entries against a record holding ninety, and the test agreed. The test file's own comment said it read the records independently of the generator.",
+  "severity": "high",
+  "enforcement": "prompt",
+  "emits": []
+}

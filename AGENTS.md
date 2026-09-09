@@ -8,12 +8,12 @@ run and a false claim can look identical from outside, and only one of
 them is true. The rules and tools here exist to tell the two apart.
 
 `CLAUDE.md` covers this repository's own conventions for building the
-project. This file exists so the thirteen rules are usable by an agent that
+project. This file exists so the fourteen rules are usable by an agent that
 is not Claude Code. The tools that carry the mechanical checks are
 ordinary command line programs, and they work the same way no matter what
 is calling them.
 
-## The thirteen rules
+## The fourteen rules
 
 Each rule below is a proof obligation: a kind of claim, and what evidence
 that claim needs before it counts as validated. The heading is the rule's
@@ -77,6 +77,21 @@ passed before the fix says nothing about whether the fix changed
 anything; without a red run first, a fix can ship next to a test that
 passed both before and after it, or with no dedicated test at all, and
 still get reported as proven.
+
+### expected-value-derived-apart
+
+Covers a claim that something was checked: a test, an assertion, a gate,
+or a report saying a page or a count agrees with the record behind it. The
+check has to reach its expected value by a route the thing under test does
+not use. When both compute the same answer the same way, the check can
+only agree, and it agrees just as readily when the shared route is wrong.
+Reading the code under test and writing an assertion is fine; copying its
+logic into the test is not. Recomputing a total with a simpler and
+separate implementation is fine; reimplementing the original is not.
+`adg mutate` catches part of this, because a check that restates its
+subject often dies under mutation, but only where an operator it knows
+sits on the shared line. A shared control-flow statement is invisible to
+it, which is how the incident behind this rule got through.
 
 ### test-diff-reported-apart
 
