@@ -1,22 +1,22 @@
 # agent-delivery-gates
 
-Green tests are never enough.
+**Because green tests are never enough.** 🔥
 
-This breaks your code in known ways and reports the breaks no test noticed. It
-runs a failure you declare, once with the handling in place and once with it
-taken away, and fails the claim when the check passes both times. It runs the
-tests a change added against the code from before the change, because a test
-that passes without the fix never showed anything. And it reads what an agent
-writes about its own work, and fails a claim with nothing behind it, against
-[fourteen proof obligations](#the-rules) for a delivery report.
+- ✅ Breaks your code on purpose and reports the breaks no test noticed.
+- ✅ Runs a change's new tests against the code from before it.
+- ✅ Induces the failure your report says is handled.
+- ✅ Git hook, CI step or MCP server. No API key, zero dependencies.
+
+It reads what an agent writes about its own work too, and fails a claim with
+nothing behind it, against [fourteen proof obligations](#the-rules) for a
+delivery report.
 
 Gates that check the work and the account of it, on the assumption that
-neither is owed the benefit of the doubt. Nothing leaves your machine, no API
-key is needed, and there are no runtime dependencies; the
+neither is owed the benefit of the doubt. Nothing leaves your machine, and the
 [questions](#questions) below have the rest. Five of the obligations are
 carried by a hook on every commit, the checks run the same way in Claude Code,
 Cursor, Codex, GitHub Copilot, CI, or a plain pre-commit hook with no agent at
-all, and there is [an MCP server](#the-mcp-server) for an agent that would
+all, and [the MCP server](#the-mcp-server) is there for an agent that would
 rather ask than be stopped.
 
 Seven worked examples, hardest first, each one run for real with the output it
