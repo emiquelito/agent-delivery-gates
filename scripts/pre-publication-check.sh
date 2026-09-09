@@ -25,12 +25,10 @@ set -euo pipefail
 # rest of this repo's tools do (see src/clean-tree-gate.ts). A leftover
 # GIT_DIR or GIT_WORK_TREE from the calling shell would point git at a
 # different tree than the one this script is meant to check.
-while IFS='=' read -r -d '' entry; do
-  name=${entry%%=*}
-  case "$name" in
-    GIT_*) unset "$name" ;;
-  esac
-done < <(env -0)
+# compgen -v lists variable NAMES and never reads a value, so a value
+# holding a newline cannot break the parse. It is a bash builtin present in
+# bash 3.2, which is what macOS ships, and needs no GNU env.
+for name in $(compgen -v GIT_); do unset "$name"; done
 
 die() {
   echo "pre-publication-check: $1" >&2
@@ -266,10 +264,16 @@ check_no_tracked_personal_data() {
 
 check_forbidden_names() {
   local id="6" name="no forbidden name appears in tracked files or in history"
+  # Every expansion of an array below is written ${a[@]+"${a[@]}"} and not
+  # "${a[@]}". Under set -u, bash before 4.4 treats an empty array expanded
+  # the second way as an unbound variable and aborts. macOS ships 3.2, and
+  # the empty case here is the ordinary one: no names configured is what the
+  # SKIP branch below is for, so the plain form aborted the whole run on a
+  # Mac before it could print that.
   local names=()
   if [ -n "${ADG_FORBIDDEN_NAMES:-}" ]; then
     IFS=',' read -r -a raw <<<"${ADG_FORBIDDEN_NAMES//$'\n'/,}"
-    for n in "${raw[@]}"; do
+    for n in ${raw[@]+"${raw[@]}"}; do
       n="${n#"${n%%[![:space:]]*}"}"
       n="${n%"${n##*[![:space:]]}"}"
       [ -n "$n" ] && names+=("$n")
@@ -286,7 +290,7 @@ check_forbidden_names() {
         '#'*) continue ;;
       esac
       IFS=',' read -r -a parts <<<"$line"
-      for n in "${parts[@]}"; do
+      for n in ${parts[@]+"${parts[@]}"}; do
         n="${n#"${n%%[![:space:]]*}"}"
         n="${n%"${n##*[![:space:]]}"}"
         [ -n "$n" ] && names+=("$n")
@@ -298,7 +302,7 @@ check_forbidden_names() {
   # example and proved nothing. That is worse than not running it, because it
   # prints PASS. It happened on the first real use of this script.
   local placeholders=""
-  for n in "${names[@]}"; do
+  for n in ${names[@]+"${names[@]}"}; do
     case "$(printf '%s' "$n" | tr '[:upper:]' '[:lower:]')" in
       your-*|your_*|my-*|my_*|a-client*|an-employer*|a-codename*|*example*|*placeholder*|*changeme*|*todo*|foo|bar|baz|name1|name2)
         placeholders="${placeholders:+$placeholders, }$n" ;;
@@ -316,7 +320,7 @@ check_forbidden_names() {
 
   local hit=""
   local where=""
-  for n in "${names[@]}"; do
+  for n in ${names[@]+"${names[@]}"}; do
     set +e
     git -C "$ROOT" grep -InF -- "$n" >"$tmpd/hit6" 2>"$tmpd/err6"
     local status=$?

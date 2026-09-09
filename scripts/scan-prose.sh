@@ -60,12 +60,43 @@
 #      --require-rules was not given)
 #   1  banned prose found
 #   2  the scan could not run as asked: bad path, git unavailable, a rules
-#      file that does not exist, an include cycle, or (with
-#      --require-rules) no rules configured
+#      file that does not exist, an include cycle, (with --require-rules)
+#      no rules configured, or a bash older than 4
+#
+# Requires bash 4 or newer. macOS ships bash 3.2 as /bin/bash; see the
+# version guard just below set -euo pipefail for what to do about that.
 #
 # Exit 2 matters: a checker that cannot read its input must never look the
 # same as a checker that read the input and found it clean.
 set -euo pipefail
+
+# --- bash version guard: begin ---
+# This script needs bash 4 or newer. The baseline tallies are associative
+# arrays (declare -A), the extension test folds case with ${x,,}, and the
+# tracked-file list is read with mapfile -d. None of the three exist in the
+# bash 3.2 that macOS still ships as /bin/bash.
+#
+# Refusing is deliberate. A scan that quietly dropped the baseline, or
+# quietly stopped folding case, would print a clean result having checked
+# less than it claims, which is the one thing every gate here exists to
+# prevent. Exit 2 is this script's code for "could not run as asked", and it
+# is kept distinct from 0 for exactly that reason.
+#
+# The next line is the only place the running version is read. Its trailing
+# marker is what tests/shell-portability.test.ts swaps out to drive this
+# guard at a version it cannot otherwise produce.
+bash_major=${BASH_VERSINFO[0]:-0} # adg-guard-version-source
+if [ "$bash_major" -lt 4 ]; then
+  echo "scan-prose: this script needs bash 4 or newer." >&2
+  echo "scan-prose: it is running under bash ${BASH_VERSION:-an unknown version} (major $bash_major)." >&2
+  echo "scan-prose: macOS ships bash 3.2 as /bin/bash. Install a newer bash with:" >&2
+  echo "scan-prose:     brew install bash" >&2
+  echo "scan-prose: then run this script under that bash, for example:" >&2
+  echo "scan-prose:     \"\$(brew --prefix)/bin/bash\" scripts/scan-prose.sh" >&2
+  echo "scan-prose: nothing was scanned, so this is exit 2 and not a clean run." >&2
+  exit 2
+fi
+# --- bash version guard: end ---
 
 die() {
   echo "scan-prose: $1" >&2

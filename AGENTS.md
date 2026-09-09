@@ -248,6 +248,25 @@ makes one block a tool call in-loop before it happens, which needs a
 coding tool that supports hooks. Anywhere else, run them as a CI step or
 a git pre-commit hook and check the exit code.
 
+### What shell they need
+
+The git hooks in `.githooks/` and `templates/`, the hook installed by
+`adg init`, and `scripts/pre-publication-check.sh` (`adg check`) all run
+on **bash 3.2 and BSD userland tools**, which is what macOS ships. They
+use no GNU-only tool and no bash 4 feature, so a fresh Mac clone needs
+nothing installed first.
+
+`scripts/scan-prose.sh` is the exception: it needs **bash 4 or newer**.
+Its baseline tallies are associative arrays, it folds case with `${x,,}`,
+and it reads the file list with `mapfile`. Under bash 3.2 it stops before
+scanning anything and exits `2`, printing the version it found and
+telling the reader to `brew install bash` and run it under that bash. It
+is exit `2` and not exit `0` for the reason exit `2` exists everywhere
+else here: a check that could not run must never read the same as a check
+that ran clean. `adg check` shells out to the prose scan, so on a Mac
+with only the system bash that one check of the eight reports a failure
+saying so, and the other seven still run.
+
 ### delivery-report-validator
 
 Checks a delivery report against `full-finding-list`,
