@@ -641,6 +641,10 @@ ul.rules p { margin: 0 0 .4rem; }
   gap: 1.6rem;
   width: min(76rem, calc(100vw - 2.2rem));
   margin-left: calc(50% - min(38rem, calc(50vw - 1.1rem)));
+  /* The row breaks out of the prose column, so the paragraph under it
+     needs room of its own to read as a new thought and not as a caption
+     on the cards. */
+  margin-bottom: 3.5rem;
 }
 .card {
   border: 1px solid var(--rule);
