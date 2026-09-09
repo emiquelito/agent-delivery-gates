@@ -21,6 +21,10 @@ the exact output they produced. Nothing here is paraphrased.
    Four tests become seven, all passing, and a customer starts paying for
    shipping. `test-diff` finds the weakened assertion, `mutate` finds that
    the new tests never held the feature.
+7. [A retry that never retries](07-a-retry-that-never-retries.md). An
+   idiomatic retry decorator that makes one call instead of three, and hands
+   a 503 body to the caller as though it were data. An induced 503 is what
+   tells the two versions apart.
 
 See the [README](../../README.md) for what these tools are and how they get
 wired into a project.

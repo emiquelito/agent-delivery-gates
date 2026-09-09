@@ -30,7 +30,7 @@ the same way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
 pre-commit hook with no agent at all, and [an MCP server](#the-mcp-server)
 for an agent that would rather ask than be stopped.
 
-Six worked examples, each run for real with the exact output it produced:
+Seven worked examples, each run for real with the exact output it produced:
 
 - **[A feature that shipped with nothing holding it](docs/examples/06-a-feature-with-nothing-holding-it.md)**:
   the cart above. One assertion in eighteen added lines was swapped for one
@@ -56,6 +56,11 @@ Six worked examples, each run for real with the exact output it produced:
 - **[Adopting the gates on a repository that already exists](docs/examples/05-adopting-on-an-existing-repository.md)**:
   `init` on a project with its own history, a baseline recording what is
   already there, then a clean commit and a caught one.
+- **[A retry that never retries](docs/examples/07-a-retry-that-never-retries.md)**:
+  a retry decorator with three attempts, backoff, and a timeout, approved by
+  everyone, that makes one call and returns the 503 body to the caller as
+  though it were a quote. An induced 503 is the only thing that tells the
+  broken version from the fixed one.
 
 ## 🚀 Quickstart
 
