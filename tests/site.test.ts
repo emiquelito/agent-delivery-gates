@@ -1141,3 +1141,27 @@ test("the card row cannot be widened by the output lines inside it", () => {
   const cardPre = style.match(/\.card pre\s*\{[^}]*\}/)![0];
   assert.match(cardPre, /overflow-x:\s*auto/, "a long output line has nowhere to go but outward");
 });
+
+// The headline carries the same sentences as the repository description and
+// the published package, so a reader arriving from either lands on words they
+// have already read. Three places holding one text is how text drifts, so the
+// test names the sentences and every place has to keep them.
+test("the headline says what the three commands do", () => {
+  for (const line of [
+    "Breaks your code on purpose and reports the breaks no test noticed.",
+    "Runs a change&#39;s new tests against the code from before it.",
+    "Induces the failure your report says is handled.",
+    "Git hook, CI step or MCP server. No API key, zero dependencies.",
+  ]) {
+    assert.ok(html.includes(line), `the headline does not carry "${line}"`);
+  }
+});
+
+test("a button near the top goes to the repository, with the mark inline", () => {
+  const header = html.match(/<header>[\s\S]*?<\/header>/)![1 - 1];
+  assert.match(header, /class="button"[^>]*href="https:\/\/github\.com\/[^"]+"/, "no button to the repository");
+  assert.match(header, /<svg class="ghmark"/, "the button has no mark");
+  // Inline, because the page fetches nothing from another host. An <img> or a
+  // background-image pointing at github.com would break that and this test.
+  assert.doesNotMatch(header, /<img[^>]+github/i, "the mark is fetched, not inline");
+});

@@ -167,22 +167,22 @@ hardest:
 
 Running `agent-delivery-gates tally` counts entries per rule. As of this
 <!-- tally:start -->
-build: 98 entries, dated 2026-09-07 to 2026-09-09, five with no automated
+build: 103 entries, dated 2026-09-07 to 2026-09-09, five with no automated
 test behind them because someone read the situation and wrote it down
 instead.
 
 ```
 induced-failure-required: 31
 full-finding-list: 19
-cross-cutting-audit: 13
+cross-cutting-audit: 14
 named-spec-files-fail-loud: 11
+filesystem-allowlist: 6
+one-fail-loud-setup-script: 6
 commit-before-mutation: 5
-filesystem-allowlist: 5
-one-fail-loud-setup-script: 4
 coverage-as-gap-finder: 3
 test-diff-reported-apart: 3
+expected-value-derived-apart: 2
 standing-adversarial-self-review: 2
-expected-value-derived-apart: 1
 red-before-green: 1
 artifact-inputs-reproducible: 0
 builder-reviewer-separation: 0

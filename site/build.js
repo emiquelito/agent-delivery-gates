@@ -47,11 +47,32 @@ const PACKAGE_NAME = "agent-delivery-gates";
 const SOCIAL_IMAGE = "social-card.svg";
 
 const TAGLINE =
-  "Rules that check what an AI coding agent claims about its own work, not just the code it wrote.";
+  "Delivery gates for AI coding agents, because green tests are not proof.";
+// The same sentences the repository and the published package carry, so a
+// reader arriving from either one lands on words they have already read.
+const HEADLINE = [
+  "Breaks your code on purpose and reports the breaks no test noticed.",
+  "Runs a change's new tests against the code from before it.",
+  "Induces the failure your report says is handled.",
+  "Git hook, CI step or MCP server. No API key, zero dependencies.",
+];
 const DESCRIPTION =
   "Proof obligations for an AI coding agent's delivery report. A green test run and a green run over" +
   " checks that cannot fail look the same from outside, and only one of them means anything." +
   " Runs as a git hook, in CI, or as a local MCP server, with no runtime dependencies.";
+
+// GitHub's own mark, inline because this page fetches nothing from another
+// host. A logo on a button that goes to GitHub is a signpost and not
+// decoration, which is why this is the one piece of artwork here.
+const GITHUB_MARK =
+  '<svg class="ghmark" viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" focusable="false">' +
+  '<path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38' +
+  ' 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53' +
+  '.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95' +
+  ' 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27' +
+  '1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95' +
+  '.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>' +
+  "</svg>";
 
 function fail(message) {
   process.stderr.write(`site build: ${message}\n`);
@@ -631,6 +652,28 @@ ul.rules p { margin: 0 0 .4rem; }
 /* The three cards. Wider than the prose column, and one across on a phone.
    The left margin centres the row on the page without a transform, so it
    stays put with images off and with JavaScript off. */
+.headline {
+  font-size: clamp(1.15rem, 2.1vw, 1.45rem);
+  line-height: 1.55;
+  max-width: 46rem;
+  margin: 1.6rem 0 0;
+}
+.cta { margin: 2rem 0 0; }
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .8rem 1.4rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--fg);
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+.button:hover, .button:focus-visible { border-color: var(--accent); }
+.ghmark { flex: 0 0 auto; }
 .cards {
   display: grid;
   /* minmax(0, ...) and not 1fr: a grid item's automatic minimum size is
@@ -658,7 +701,8 @@ ul.rules p { margin: 0 0 .4rem; }
 .card h3 { margin: .8rem 0 .6rem; font-size: 1.35rem; }
 .card p { margin: 0 0 1rem; }
 .card-cmd { font-size: .95rem; color: var(--muted); }
-.card pre { margin: auto 0 0; font-size: .82em; overflow-x: auto; }
+.card pre { margin: auto 0 0; font-size: .82em; overflow-x: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The output lines are real command output and are not reflowed, so a
    narrow card scrolls its own line instead of stretching to hold it. */
 @media (max-width: 60rem) {
@@ -689,6 +733,8 @@ ${jsonLdText}
 <header>
   <h1>${escapeHtml(PACKAGE_NAME)}</h1>
   <p class="lede">${escapeHtml(TAGLINE)}</p>
+  <p class="headline">${HEADLINE.map((line) => escapeHtml(line)).join("<br>")}</p>
+  <p class="cta"><a class="button" href="${REPO_URL}">${GITHUB_MARK}<span>View on GitHub</span></a></p>
   <nav aria-label="Sections of this page">
     <ul>
       <li><a href="#green-run">A green run that proves nothing</a></li>
