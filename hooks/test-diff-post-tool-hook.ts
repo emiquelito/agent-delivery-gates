@@ -18,6 +18,7 @@ import { readAllStdin } from "../src/hook-io.ts";
 import { execFileSync } from "node:child_process";
 import { readSync } from "node:fs";
 import { formatSignalText, separateTestDiff, type RuleSet } from "../src/test-diff-separator.ts";
+import { makeFileTextReader } from "../src/repo-file-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
 
 function block(message: string): never {
@@ -108,7 +109,11 @@ function main(): void {
     return;
   }
 
-  const result = separateTestDiff(diffText, { rules });
+  // The same reader the test-diff command uses, so a file carrying the
+  // fixtures marker is answered the same way by both. Without it this hook
+  // reported signals the command had already been told to leave alone.
+  const readFileText = repoRoot === undefined ? undefined : makeFileTextReader(repoRoot);
+  const result = separateTestDiff(diffText, { rules, readFileText });
   if (result.signals.length === 0) {
     process.exit(0);
   }
