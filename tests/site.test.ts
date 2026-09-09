@@ -942,3 +942,182 @@ test("a table whose separator row is not dashes is not read as a table", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- the three questions, the section order, and the type scale ---------------
+//
+// The page used to be one 46rem column of same-sized sections in the order of a
+// table of contents. What follows pins the three things that redesign turned
+// on: three cards quoting output the tools really print, a tally that makes its
+// case before the page asks anyone to install, and a scale with room in it.
+
+/** The body of every question card on the page. */
+function cardBlocks(page: string): string[] {
+  return [...page.matchAll(/<article class="card">([\s\S]*?)<\/article>/g)].map((m) => m[1]);
+}
+
+/** Each card's command name against the line of output it shows. */
+function cardOutputs(page: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const card of cardBlocks(page)) {
+    const command = /<p class="card-cmd"><code>adg ([a-z][a-z0-9-]*)<\/code><\/p>/.exec(card);
+    assert.ok(command, "a question card names no command");
+    const line = /<pre><code>([^<]+)<\/code><\/pre>/.exec(card);
+    assert.ok(line, `the ${command[1]} card shows no line of output`);
+    out.set(command[1], decodeEntities(line[1]).trim());
+  }
+  return out;
+}
+
+test("the page asks three questions, one card per command", () => {
+  const cards = cardBlocks(html);
+  assert.equal(cards.length, 3, `the page carries ${cards.length} question cards, not three`);
+
+  const outputs = cardOutputs(html);
+  assert.deepEqual(
+    [...outputs.keys()].sort(),
+    ["census", "induce", "mutate"],
+    "the three cards do not name mutate, census and induce",
+  );
+
+  // Every command a card names is one the tool really dispatches, read out of
+  // the command line entry point and not from the page.
+  const dispatched = new Set(userFacingSubcommands());
+  for (const name of outputs.keys()) {
+    assert.ok(dispatched.has(name), `a card names "${name}", which the tool does not dispatch`);
+  }
+
+  for (const card of cards) {
+    assert.match(card, /<h3>[^<]*\?<\/h3>/, "a question card's heading is not a question");
+  }
+  for (const [name, line] of outputs) {
+    assert.ok(line.length > 10, `the ${name} card's output line is too short to be a real one`);
+  }
+});
+
+// A card is only worth anything if its line of output is one the tool prints.
+// Each line is checked against the record it was taken from, by reading that
+// record here, so a line typed into the template out of nowhere fails.
+test("each card's line of output comes from a record in this repository", () => {
+  const outputs = cardOutputs(html);
+
+  const mutate = outputs.get("mutate")!;
+  const examples = readdirSync(join(ROOT, "docs", "examples"))
+    .filter((name) => /^\d+-.*\.md$/.test(name))
+    .map((name) => readFileSync(join(ROOT, "docs", "examples", name), "utf8"));
+  assert.ok(
+    examples.some((text) => text.includes(mutate)),
+    `no worked example ever printed "${mutate}"`,
+  );
+
+  // The census report prints "  <finding kind>: <title>", and both halves are
+  // written in the command's own source.
+  const censusLine = outputs.get("census")!;
+  const split = censusLine.indexOf(": ");
+  assert.ok(split > 0, `the census card's line "${censusLine}" is not a finding line`);
+  const source = readFileSync(join(ROOT, "src", "census.ts"), "utf8");
+  assert.ok(
+    source.includes(`"${censusLine.slice(0, split)}"`),
+    `census knows no finding called "${censusLine.slice(0, split)}"`,
+  );
+  assert.ok(
+    source.includes(censusLine.slice(split + 2)),
+    `census never prints "${censusLine.slice(split + 2)}"`,
+  );
+
+  // The induce report's header counts one verdict per name, and every name in
+  // it is a verdict that command really has.
+  const induceLine = outputs.get("induce")!;
+  const induceSource = readFileSync(join(ROOT, "src", "induce.ts"), "utf8");
+  const verdicts = induceLine.split(", ").map((part) => part.split(" ")[0]);
+  assert.ok(verdicts.length >= 3, `the induce card's line "${induceLine}" counts no verdicts`);
+  for (const verdict of verdicts) {
+    assert.ok(
+      induceSource.includes(`"${verdict}"`),
+      `induce has no verdict called "${verdict}"`,
+    );
+  }
+});
+
+// The order of the sections is the argument the page makes. The tally is the
+// only part of this page nobody else can claim, and it belongs before the
+// install block: nobody installs anything before they are convinced.
+test("the page argues before it asks anyone to install", () => {
+  function at(id: string): number {
+    const index = html.indexOf(`<section id="${id}">`);
+    assert.ok(index >= 0, `the page has no ${id} section`);
+    return index;
+  }
+  const order = ["green-run", "three-questions", "examples", "tally", "install", "where-it-runs", "rules", "questions"];
+  const positions = order.map(at);
+  assert.deepEqual(
+    positions,
+    [...positions].sort((a, b) => a - b),
+    `the sections do not run in the order ${order.join(", ")}`,
+  );
+  assert.ok(at("tally") < at("install"), "the page asks for an install before it makes its case");
+});
+
+/** The one stylesheet on the page. */
+function pageCss(page: string): string {
+  const match = /<style>([\s\S]*?)<\/style>/.exec(page);
+  assert.ok(match, "the page carries no stylesheet");
+  return match[1];
+}
+
+test("the page has a wide column and a fluid first heading", () => {
+  const css = pageCss(html);
+  const column = /\.wrap \{[^}]*max-width: ([\d.]+)rem/.exec(css);
+  assert.ok(column, "the content column has no max-width");
+  // 46rem was the old column, and the redesign is only real if it is wider.
+  assert.ok(
+    Number(column[1]) > 46,
+    `the content column is ${column[1]}rem, no wider than the 46rem it replaced`,
+  );
+
+  const h1 = /(?:^|\n)h1 \{[^}]*font-size: ([^;]+);/.exec(css);
+  assert.ok(h1, "h1 has no font size");
+  assert.match(h1[1], /^clamp\(/, `h1 is set to ${h1[1]}, which is not a fluid size`);
+  assert.match(h1[1], /vw/, `h1's size ${h1[1]} does not move with the viewport`);
+  // And the fluid size really is a step up from the 1.9rem it replaced.
+  const smallest = /clamp\(\s*([\d.]+)rem/.exec(h1[1]);
+  assert.ok(smallest && Number(smallest[1]) > 1.9, `h1 starts at ${smallest?.[1]}rem`);
+
+  // The cards are a grid, three across, and one across on a narrow screen.
+  assert.match(css, /\.cards \{[^}]*display: grid/, "the cards are not a grid");
+  assert.match(css, /\.cards \{[^}]*grid-template-columns: repeat\(3, 1fr\)/, "the cards are not three across");
+  assert.match(
+    css,
+    /@media \(max-width: \d+rem\) \{\s*\.cards \{[^}]*grid-template-columns: 1fr/,
+    "the cards never stack on a narrow screen",
+  );
+});
+
+// A colour token defined for one scheme only reads as the other scheme's value
+// on half the machines that open the page, which is the sort of thing nobody
+// running one theme ever sees.
+test("both colour schemes define every token the page uses", () => {
+  const css = pageCss(html);
+  const light = /:root \{([\s\S]*?)\}/.exec(css);
+  assert.ok(light, "the page defines no light palette");
+  const dark = /@media \(prefers-color-scheme: dark\) \{\s*:root \{([\s\S]*?)\}/.exec(css);
+  assert.ok(dark, "the page defines no dark palette");
+
+  const defined = (block: string) =>
+    new Set([...block.matchAll(/(--[a-z-]+)\s*:/g)].map((m) => m[1]));
+  const inLight = defined(light[1]);
+  const inDark = defined(dark[1]);
+  const used = new Set([...css.matchAll(/var\((--[a-z-]+)\)/g)].map((m) => m[1]));
+  assert.ok(used.size >= 6, "the page uses almost no colour tokens, so this test proves nothing");
+
+  for (const token of used) {
+    assert.ok(inLight.has(token), `${token} is used but the light palette never defines it`);
+    assert.ok(inDark.has(token), `${token} is used but the dark palette never defines it`);
+  }
+  assert.deepEqual([...inLight].sort(), [...inDark].sort(), "the two palettes define different tokens");
+
+  // And no colour is written straight into a rule, where neither scheme can
+  // move it.
+  const outside = css.replace(/:root \{[\s\S]*?\}/g, "");
+  const stray = [...outside.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((m) => m[0]);
+  assert.deepEqual(stray, [], `a colour is written into a rule instead of a token: ${stray.join(", ")}`);
+});

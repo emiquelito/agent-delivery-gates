@@ -397,6 +397,59 @@ function faqEntries(rules, tally) {
   ];
 }
 
+/**
+ * The three questions, one per command, each carrying a line the command
+ * really prints. The output lines are quoted, not invented, and each one says
+ * where it was taken from, because a page that invents a line of output is
+ * doing the thing this project exists to catch.
+ *
+ * `tests/site.test.ts` holds each line to its source: the mutate line has to
+ * appear verbatim in a worked example under `docs/examples/`, and the census
+ * and induce lines have to be built out of strings their formatters hold.
+ */
+const CARDS = [
+  {
+    command: "adg mutate",
+    question: "Would your tests notice if the code broke?",
+    blurb:
+      "It breaks the code in known ways, runs the suite against every break, and reports the breaks" +
+      " no test failed on.",
+    // docs/examples/06-a-feature-with-nothing-holding-it.md, the summary line
+    // of a real `mutate` run, printed by the formatter in src/mutate.ts.
+    output: "killed 2, survived 3, timeout 0, skipped 0",
+  },
+  {
+    command: "adg census",
+    question: "Did your new test ever actually fail?",
+    blurb:
+      "It runs the tests a change added against the code from before the change. One that passes there" +
+      " would have passed without the fix.",
+    // src/census.ts: the finding kind and the title its text report prints
+    // beside it, "  <kind>: <title>".
+    output: "not-red-before-green: passing against the base source",
+  },
+  {
+    command: "adg induce",
+    question: "Does your error handling actually run?",
+    blurb:
+      "It runs a failure you declare twice, once with the handling in place and once with it taken" +
+      " away, and fails the claim when the check passes both times.",
+    // src/induce.ts: the verdict counts its text report prints as a header.
+    output: "proven 0, handler-did-not-fire 0, check-does-not-measure 1, could-not-run 0",
+  },
+];
+
+function renderCards() {
+  return CARDS.map(
+    (card) => `      <article class="card">
+        <p class="card-cmd"><code>${escapeHtml(card.command)}</code></p>
+        <h3>${escapeHtml(card.question)}</h3>
+        <p>${escapeHtml(card.blurb)}</p>
+        <pre><code>${escapeHtml(card.output)}</code></pre>
+      </article>`,
+  ).join("\n");
+}
+
 function renderPage(rules, tally, examples, commands) {
   const faq = faqEntries(rules, tally);
   const checkList = commands.checks.map((name) => `<code>${escapeHtml(name)}</code>`).join(", ");
@@ -515,9 +568,14 @@ function renderPage(rules, tally, examples, commands) {
   --muted: #5b6672;
   --rule: #d9dee4;
   --code-bg: #f4f6f8;
+  --card-bg: #fbfcfd;
   --link: #1f6f4a;
   --accent: #4c9f70;
+  --warn: #b04f36;
 }
+/* Every token above is redefined here, none of them dropped. A token defined
+   in one scheme only reads as the light value on a dark page, which is the
+   kind of contrast failure nobody sees until someone else opens the page. */
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #12161c;
@@ -525,8 +583,10 @@ function renderPage(rules, tally, examples, commands) {
     --muted: #9aa4b2;
     --rule: #2a313a;
     --code-bg: #1b212a;
+    --card-bg: #171d25;
     --link: #7ecfa0;
     --accent: #4c9f70;
+    --warn: #e08b6f;
   }
 }
 * { box-sizing: border-box; }
@@ -534,41 +594,81 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 1.125rem;
+  line-height: 1.65;
 }
-.wrap { max-width: 46rem; margin: 0 auto; padding: 2rem 1.1rem 4rem; }
-header { border-bottom: 3px solid var(--accent); padding-bottom: 1rem; }
-h1 { font-size: 1.9rem; line-height: 1.25; margin: 0 0 .4rem; letter-spacing: -.01em; }
-h2 { font-size: 1.35rem; margin: 2.6rem 0 .6rem; padding-top: 1.4rem; border-top: 1px solid var(--rule); }
-h3 { font-size: 1.08rem; margin: 1.8rem 0 .4rem; }
-h4 { font-size: 1rem; margin: 0 0 .2rem; }
-p { margin: 0 0 1rem; }
+.wrap { max-width: 64rem; margin: 0 auto; padding: 3.5rem 1.1rem 6rem; }
+header { border-bottom: 3px solid var(--accent); padding-bottom: 2rem; }
+h1 { font-size: clamp(2.5rem, 6vw, 4rem); line-height: 1.05; margin: 0 0 1.2rem; letter-spacing: -.02em; }
+h2 { font-size: clamp(1.75rem, 3.2vw, 2.4rem); line-height: 1.2; letter-spacing: -.01em; margin: 0 0 1.4rem; }
+h3 { font-size: 1.3rem; line-height: 1.3; margin: 2.4rem 0 .6rem; }
+h4 { font-size: 1.05rem; margin: 0 0 .3rem; }
+p { margin: 0 0 1.2rem; }
 a { color: var(--link); }
 a:hover { text-decoration: none; }
-.lede { color: var(--muted); font-size: 1.1rem; }
-nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: .35rem 1rem; padding: 0; margin: 1rem 0 0; }
-nav a { font-size: .95rem; }
-code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+.lede { color: var(--muted); font-size: 1.35rem; line-height: 1.45; max-width: 44rem; }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; padding: 0; margin: 2rem 0 0; }
+nav a { font-size: 1rem; }
+main > article > section { padding: 5rem 0 0; }
+main > article > section + section { border-top: 1px solid var(--rule); margin-top: 5rem; }
+section > p, section > div.qa, section > h2, section > h3, section > pre, section > ul, section > .scroller {
+  max-width: 46rem;
+}
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; }
 code { background: var(--code-bg); padding: .1em .3em; border-radius: 3px; }
-pre { background: var(--code-bg); padding: .85rem 1rem; border-radius: 6px; overflow-x: auto; border: 1px solid var(--rule); }
+pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; border: 1px solid var(--rule); line-height: 1.5; }
 pre code { background: none; padding: 0; }
 ul.plain, ul.rules { list-style: none; padding: 0; }
-ul.rules > li { border: 1px solid var(--rule); border-radius: 6px; padding: .8rem 1rem; margin: 0 0 .7rem; }
-ul.rules p { margin: 0 0 .35rem; }
+ul.plain > li { margin: 0 0 .7rem; }
+ul.rules > li { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.2rem; margin: 0 0 .8rem; background: var(--card-bg); }
+ul.rules p { margin: 0 0 .4rem; }
 .rule-name { font-weight: 600; }
 .meta { color: var(--muted); font-size: .88rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
 .emits { color: var(--muted); font-size: .88rem; }
 .tag { border: 1px solid var(--rule); border-radius: 999px; padding: .05rem .55rem; }
-.sev-critical { border-color: #c05a3e; color: #c05a3e; }
-table { border-collapse: collapse; width: 100%; margin: 0 0 1rem; font-size: .95rem; }
-caption { text-align: left; color: var(--muted); font-size: .9rem; padding-bottom: .5rem; }
-th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.sev-critical { border-color: var(--warn); color: var(--warn); }
+/* The three cards. Wider than the prose column, and one across on a phone.
+   The left margin centres the row on the page without a transform, so it
+   stays put with images off and with JavaScript off. */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.6rem;
+  width: min(76rem, calc(100vw - 2.2rem));
+  margin-left: calc(50% - min(38rem, calc(50vw - 1.1rem)));
+}
+.card {
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--card-bg);
+  padding: 1.4rem 1.4rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+}
+.card h3 { margin: .8rem 0 .6rem; font-size: 1.35rem; }
+.card p { margin: 0 0 1rem; }
+.card-cmd { font-size: .95rem; color: var(--muted); }
+.card pre { margin: auto 0 0; font-size: .82em; }
+@media (max-width: 60rem) {
+  .cards { grid-template-columns: 1fr; width: auto; margin-left: 0; }
+}
+table { border-collapse: collapse; width: 100%; margin: 0 0 1.2rem; font-size: .95rem; }
+caption { text-align: left; color: var(--muted); font-size: .9rem; padding-bottom: .6rem; }
+th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
 td:last-child, th:last-child { text-align: left; }
 .scroller { overflow-x: auto; }
-.qa h3 { margin-bottom: .2rem; }
-footer { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .92rem; }
+.qa h3 { margin-bottom: .3rem; }
+footer { margin-top: 5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .95rem; }
 img { max-width: 100%; height: auto; }
-@media (max-width: 34rem) { body { font-size: 16px; } h1 { font-size: 1.55rem; } }
+@media (max-width: 34rem) {
+  body { font-size: 1.0625rem; }
+  .lede { font-size: 1.2rem; }
+  .wrap { padding-top: 2.5rem; }
+  main > article > section { padding-top: 3.5rem; }
+  main > article > section + section { margin-top: 3.5rem; }
+}
 </style>
 <script type="application/ld+json">
 ${jsonLdText}
@@ -582,11 +682,12 @@ ${jsonLdText}
   <nav aria-label="Sections of this page">
     <ul>
       <li><a href="#green-run">A green run that proves nothing</a></li>
+      <li><a href="#three-questions">Three questions</a></li>
       <li><a href="#examples">Worked examples</a></li>
+      <li><a href="#tally">What the gates caught here</a></li>
       <li><a href="#install">Install</a></li>
       <li><a href="#where-it-runs">Where it runs</a></li>
       <li><a href="#rules">The ${escapeHtml(words(rules.length))} rules</a></li>
-      <li><a href="#tally">The tally</a></li>
       <li><a href="#questions">Questions</a></li>
       <li><a href="${REPO_URL}">Source on GitHub</a></li>
     </ul>
@@ -603,30 +704,56 @@ ${jsonLdText}
 # tests 7
 # pass 7
 # fail 0</code></pre>
-      <p>Four tests became seven. Nothing failed. The feature works. Coverage went up.
-        A customer whose cart comes to exactly 50 has just started paying for
-        shipping, and the test that would have said so was edited, in the same
-        commit, until it could no longer fail.</p>
+      <p>Four tests became seven. Nothing failed. The feature works. A customer whose
+        cart comes to exactly 50 has just started paying for shipping, and the test
+        that would have said so was edited, in the same commit, until it could no
+        longer fail.</p>
       <p>Every check a project normally runs got better here, which is the point. A
         green run and a green run over checks that cannot fail look the same from
         outside, and only one of them means anything.</p>
-      <p>A rule system checks the code an agent wrote. Runtime guardrails check its
-        inputs and tool calls while it works. Neither checks what the agent claims
-        about its own work once the work is done, which is what this project is
-        for: <a href="#rules">${escapeHtml(words(rules.length))} proof obligations</a> for a delivery report,
-        ${escapeHtml(words(rules.filter((rule) => rule.enforcement === "hook").length))} of them checked by a hook on every commit, tooling that runs the
-        same way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
-        pre-commit hook with no agent at all, and an MCP server for an agent that
-        would rather ask than be stopped.</p>
+    </section>
+
+    <section id="three-questions">
+      <h2>Three questions a green run cannot answer</h2>
+      <p>Each one is a command with an exit code, and each answers by running
+        something and reporting what happened, never by reading a diff and forming
+        an opinion about it.</p>
+      <div class="cards">
+${renderCards()}
+      </div>
+      <p>A fourth question is what the agent then writes about the work. A rule system
+        checks the code an agent wrote, and runtime guardrails check its inputs and
+        tool calls while it works; neither checks the account of the work once the
+        work is done. That is
+        <a href="#rules">${escapeHtml(words(rules.length))} proof obligations</a> for a delivery report,
+        ${escapeHtml(words(rules.filter((rule) => rule.enforcement === "hook").length))} of them checked by a hook on every commit, running the same way in
+        Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain pre-commit hook
+        with no agent at all, and an MCP server for an agent that would rather ask
+        than be stopped.</p>
     </section>
 
     <section id="examples">
       <h2>${escapeHtml(words(examples.length).replace(/^./, (c) => c.toUpperCase()))} worked examples</h2>
-      <p>Each one run for real, with the exact output it produced. They open in the
-        repository on GitHub.</p>
+      <p>Hardest first. Each one run for real, with the exact output it produced.
+        They open in the repository on GitHub.</p>
       <ul class="plain">
 ${exampleItems}
       </ul>
+    </section>
+
+    <section id="tally">
+      <h2>What the gates caught here</h2>
+      <p>This repository ran its own gates while it was being built, and logged what
+        they caught in <a href="${BLOB_URL}docs/gate-tally.md">the gate tally</a> as the
+        work went: ${tally.total} entries, dated ${escapeHtml(tally.first)} to ${escapeHtml(tally.last)}. Each entry is dated
+        and says where to see the result, so any row can be opened instead of taken
+        on trust. It is a receipt, not a claim.</p>
+      <div class="scroller">
+${renderTallyTable(rules, tally)}
+      </div>
+      <p>A zero does not mean a rule was unnecessary. It means the work stayed clean
+        on that rule for the life of this build, or nothing looked closely enough to
+        catch anything on it yet, and the count alone cannot tell you which.</p>
     </section>
 
     <section id="install">
@@ -682,20 +809,6 @@ git config core.hooksPath .githooks</code></pre>
         <code>enforcement</code> field.</p>
 
 ${renderCatalog(rules, tally)}
-    </section>
-
-    <section id="tally">
-      <h2>What the gates caught here</h2>
-      <p>Building this project produced its own record of what its gates caught,
-        logged in <a href="${BLOB_URL}docs/gate-tally.md">the gate tally</a> as the work
-        went: ${tally.total} entries, dated ${escapeHtml(tally.first)} to ${escapeHtml(tally.last)}. Each entry says
-        where to see the result, so any row can be checked instead of taken on trust.</p>
-      <div class="scroller">
-${renderTallyTable(rules, tally)}
-      </div>
-      <p>A zero does not mean a rule was unnecessary. It means the work stayed clean
-        on that rule for the life of this build, or nothing looked closely enough to
-        catch anything on it yet, and the count alone cannot tell you which.</p>
     </section>
 
     <section id="questions">
