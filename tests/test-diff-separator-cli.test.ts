@@ -4,6 +4,10 @@
 //
 // Git fixtures live under a fresh directory in os.tmpdir() per test and are
 // removed afterward. Nothing here ever touches this repository's own tree.
+//
+// adg-test-diff: fixtures
+// This file holds diff text written to look like a weakening, so the CLI
+// can be run against it; the signals it trips are never real.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -607,5 +611,137 @@ test("a real git rename out of the test naming convention is reported", () => {
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stdout, /test-file-declassified/);
     assert.match(result.stdout, /widget\.test\.js -> widget\.helper\.js/);
+  });
+});
+
+
+// --- The fixtures marker: exempt files are named on every run ------------------
+//
+// Every test here reads the CLI's own stdout and exit code. A gate that
+// skips a file without saying so is the failure this project is built to
+// name, so the wording is asserted, not just the exit code.
+
+const MARKER_COMMENT = "// adg-test-diff: fixtures";
+
+/** A test file that trips skip-added, optionally carrying the marker. */
+function holderFile(marked: boolean): string {
+  const head = marked ? [MARKER_COMMENT, "// fixture text only."] : ["// ordinary test file."];
+  return [...head, "test('a', () => {});", "test.skip('b', () => {});", ""].join("\n");
+}
+
+function plainFile(marked: boolean): string {
+  const head = marked ? [MARKER_COMMENT, "// fixture text only."] : ["// ordinary test file."];
+  return [...head, "test('a', () => {});", ""].join("\n");
+}
+
+test("a marked file's signals are suppressed and the file is named, on a run with other signals", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/holder.test.ts", plainFile(true));
+    commitFile(dir, "tests/other.test.ts", plainFile(false));
+    writeFileSync(join(dir, "tests/holder.test.ts"), holderFile(true));
+    writeFileSync(join(dir, "tests/other.test.ts"), holderFile(false));
+    runGit(dir, ["commit", "-qam", "add skips to both"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /Exempt from signals \(1\), each carrying the "adg-test-diff: fixtures" marker:/);
+    assert.match(result.stdout, /^ {2}tests\/holder\.test\.ts$/m);
+    assert.match(result.stdout, /Signals \(1\):/);
+    assert.match(result.stdout, /skip-added high tests\/other\.test\.ts:/);
+    assert.doesNotMatch(result.stdout, /skip-added high tests\/holder\.test\.ts:/);
+  });
+});
+
+test("a clean run that skipped a file still names it, and says no signals were found", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/holder.test.ts", plainFile(true));
+    writeFileSync(join(dir, "tests/holder.test.ts"), holderFile(true));
+    runGit(dir, ["commit", "-qam", "add a skip"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Exempt from signals \(1\), each carrying the "adg-test-diff: fixtures" marker:/);
+    assert.match(result.stdout, /^ {2}tests\/holder\.test\.ts$/m);
+    assert.match(result.stdout, /Signals: none found\./);
+  });
+});
+
+test("a clean run that skipped nothing prints no exempt block at all", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/holder.test.ts", plainFile(false));
+    writeFileSync(join(dir, "tests/holder.test.ts"), plainFile(false).replace("test('a'", "test('a2'"));
+    runGit(dir, ["commit", "-qam", "rename a case"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /Exempt from signals/);
+    assert.match(result.stdout, /Signals: none found\./);
+  });
+});
+
+test("every skipped file is named, not just the first", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/one.test.ts", plainFile(true));
+    commitFile(dir, "tests/two.test.ts", plainFile(true));
+    writeFileSync(join(dir, "tests/one.test.ts"), holderFile(true));
+    writeFileSync(join(dir, "tests/two.test.ts"), holderFile(true));
+    runGit(dir, ["commit", "-qam", "add skips to both"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Exempt from signals \(2\)/);
+    assert.match(result.stdout, /^ {2}tests\/one\.test\.ts$/m);
+    assert.match(result.stdout, /^ {2}tests\/two\.test\.ts$/m);
+  });
+});
+
+test("--format json carries the skipped list and its count", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/holder.test.ts", plainFile(true));
+    commitFile(dir, "tests/other.test.ts", plainFile(false));
+    writeFileSync(join(dir, "tests/holder.test.ts"), holderFile(true));
+    writeFileSync(join(dir, "tests/other.test.ts"), holderFile(false));
+    runGit(dir, ["commit", "-qam", "add skips to both"]);
+
+    const result = runCli({ args: ["--rev", "HEAD", "--format", "json"], cwd: dir });
+    assert.equal(result.status, 1, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.deepEqual(parsed.exemptFiles, ["tests/holder.test.ts"]);
+    assert.equal(parsed.exemptCount, 1);
+    assert.deepEqual(
+      parsed.testFiles.map((f: { path: string }) => f.path).sort(),
+      ["tests/holder.test.ts", "tests/other.test.ts"],
+      "an exempt file is still reported in the test half",
+    );
+    assert.deepEqual(
+      parsed.signals.map((s: { file: string }) => s.file),
+      ["tests/other.test.ts"],
+    );
+  });
+});
+
+test("json on a run that skipped nothing carries an empty list and a zero count", () => {
+  withTempFile(CLEAN_DIFF, (path) => {
+    const result = runCli({ args: ["--diff", path, "--format", "json"] });
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.deepEqual(parsed.exemptFiles, []);
+    assert.equal(parsed.exemptCount, 0);
+  });
+});
+
+test("the marker is not honoured past the first 20 lines of a file", () => {
+  withTempRepo((dir) => {
+    const filler = Array.from({ length: 20 }, (_, i) => `const v${i} = ${i};`);
+    const late = [...filler, MARKER_COMMENT, "test('a', () => {});", ""].join("\n");
+    const lateWithSkip = [...filler, MARKER_COMMENT, "test('a', () => {});", "test.skip('b', () => {});", ""].join("\n");
+    commitFile(dir, "tests/late.test.ts", late);
+    writeFileSync(join(dir, "tests/late.test.ts"), lateWithSkip);
+    runGit(dir, ["commit", "-qam", "add a skip"]);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 1, result.stderr);
+    assert.doesNotMatch(result.stdout, /Exempt from signals/);
+    assert.match(result.stdout, /skip-added high tests\/late\.test\.ts:/);
   });
 });

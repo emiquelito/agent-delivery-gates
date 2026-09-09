@@ -268,6 +268,14 @@ export interface SeparateOptions {
    * never resolves a config path itself. Defaults to DEFAULT_RULES.
    */
   rules?: RuleSet;
+  /**
+   * Returns the current text of a file named in the diff, or undefined when
+   * it cannot be read. Used for one thing only: looking for the fixtures
+   * marker (see FIXTURE_MARKER above). This file does no I/O of its own, so
+   * a caller that supplies nothing gets no exemptions at all, which is the
+   * direction that reports more, never less.
+   */
+  readFileText?: (path: string) => string | undefined;
 }
 
 export interface SeparateResult {
@@ -279,6 +287,13 @@ export interface SeparateResult {
   testAdded: number;
   testRemoved: number;
   signalCount: number;
+  /**
+   * Every file whose signal checks were skipped because it carries the
+   * fixtures marker, in diff order. Reported on every run, found or not:
+   * a gate that quietly skips a file is the failure this project names.
+   */
+  exemptFiles: string[];
+  exemptCount: number;
 }
 
 /** Renders one signal as the CLI's text-format line: `id severity file: message`. */
@@ -306,6 +321,106 @@ function splitLines(text: string): string[] {
 export function isTestPath(path: string, extraPatterns: RegExp[] = []): boolean {
   if (DEFAULT_COMPILED.testPaths.test(path)) return true;
   return extraPatterns.some((pattern) => pattern.test(path));
+}
+
+// --- The fixtures marker: an in-file exemption -------------------------------
+//
+// A test file can exist to hold text that only looks like a weakening, so the
+// detector in this file can be tested against it. Two files in this
+// repository do exactly that, and every commit touching them reported signals
+// that were never real. Noise like that is what gets a gate switched off, and
+// a gate nobody runs catches nothing.
+//
+// The exemption is a marker comment inside the file it affects, never a list
+// of paths in a config file. An exemption written in the file appears in the
+// diff of the commit that grants it, so a reviewer watches it happen. A list
+// of paths can be extended far away from the code it silences, and grows
+// without anyone noticing.
+//
+// What the marker does: it suppresses signals for its own file. What it does
+// not do: it does not change classification. A marked file is still a test
+// file, is still counted in the test half, and keeps its added and removed
+// counts untouched. It never affects any other file. Every run names every
+// file it skipped, whether or not anything else was found, so a skipped file
+// is never quiet.
+
+/** The text a marker comment must carry, exactly. */
+export const FIXTURE_MARKER = "adg-test-diff: fixtures";
+
+/**
+ * How far into a file the marker may sit. Past this line it is not honoured,
+ * so an exemption cannot be buried at the bottom of a long file where nobody
+ * reading the top of it would know the file was exempt.
+ */
+export const FIXTURE_MARKER_HEAD_LINES = 20;
+
+/**
+ * The comment text on one line, given whether a block comment was already
+ * open when the line began. Everything outside a comment is dropped, and a
+ * quoted string never opens a comment, so a marker written in ordinary code
+ * or inside a string literal yields nothing here. Recognises `//`, `#`, and
+ * `/* ... *\/`, including a block that runs across lines, so the marker is
+ * not tied to one language.
+ */
+function commentTextOf(line: string, inBlock: boolean): { text: string; inBlock: boolean } {
+  let text = "";
+  let block = inBlock;
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    if (block) {
+      const end = line.indexOf("*/", i);
+      if (end === -1) {
+        text += line.slice(i);
+        return { text, inBlock: true };
+      }
+      text += line.slice(i, end);
+      i = end + 2;
+      block = false;
+      continue;
+    }
+    const ch = line[i];
+    if (ch === "/" && line[i + 1] === "/") {
+      text += line.slice(i + 2);
+      return { text, inBlock: false };
+    }
+    if (ch === "#") {
+      text += line.slice(i + 1);
+      return { text, inBlock: false };
+    }
+    if (ch === "/" && line[i + 1] === "*") {
+      block = true;
+      i += 2;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      let j = i + 1;
+      while (j < n && line[j] !== ch) {
+        if (line[j] === "\\") j++;
+        j++;
+      }
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return { text, inBlock: block };
+}
+
+/**
+ * True when the file's first FIXTURE_MARKER_HEAD_LINES lines carry the marker
+ * inside a comment. Both halves of that matter: a marker further
+ * down is not honoured, and a marker outside a comment is not honoured.
+ */
+export function hasFixtureMarker(fileText: string): boolean {
+  let inBlock = false;
+  const head = splitLines(fileText).slice(0, FIXTURE_MARKER_HEAD_LINES);
+  for (const line of head) {
+    const result = commentTextOf(line, inBlock);
+    if (result.text.includes(FIXTURE_MARKER)) return true;
+    inBlock = result.inBlock;
+  }
+  return false;
 }
 
 // --- Diff parsing -------------------------------------------------------------
@@ -984,11 +1099,19 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
   const sourceFiles: FileStats[] = [];
   const testFiles: FileStats[] = [];
   const signals: Signal[] = [];
+  const exemptFiles: string[] = [];
 
   let sourceAdded = 0;
   let sourceRemoved = 0;
   let testAdded = 0;
   let testRemoved = 0;
+
+  const readFileText = options.readFileText;
+  const carriesMarker = (path: string): boolean => {
+    if (readFileText === undefined) return false;
+    const text = readFileText(path);
+    return text !== undefined && hasFixtureMarker(text);
+  };
 
   for (const file of files) {
     const stats: FileStats = {
@@ -996,19 +1119,39 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
       added: file.addedLines.length,
       removed: file.removedLines.length,
     };
-    signals.push(...declassifiedTestSignals(file, rules.testPaths));
+    // Records the file as exempt the first time a check would have run
+    // against it, and answers whether that check should be skipped. Only
+    // called where signals would otherwise be produced, so an ordinary
+    // source file is never listed as skipped for a check it never faced.
+    let exempt = false;
+    const skipChecks = (): boolean => {
+      if (exempt) return true;
+      if (!carriesMarker(file.path)) return false;
+      exempt = true;
+      exemptFiles.push(file.path);
+      return true;
+    };
+
+    const declassified = declassifiedTestSignals(file, rules.testPaths);
+    // Classification is decided before the marker is ever read, and the
+    // marker never enters this decision: an exempt file is still a test
+    // file, still in the test half, with its own counts unchanged.
     if (rules.testPaths.test(file.path)) {
       testFiles.push(stats);
       testAdded += stats.added;
       testRemoved += stats.removed;
-      signals.push(...signalsForTestFile(file, rules));
+      if (!skipChecks()) {
+        signals.push(...declassified);
+        signals.push(...signalsForTestFile(file, rules));
+      }
     } else {
       sourceFiles.push(stats);
       sourceAdded += stats.added;
       sourceRemoved += stats.removed;
+      if (declassified.length > 0 && !skipChecks()) signals.push(...declassified);
       if (RUST_PATH_RE.test(file.path)) {
         if (hasRustTestMarker(file)) {
-          signals.push(...signalsForTestFile(file, rules));
+          if (!skipChecks()) signals.push(...signalsForTestFile(file, rules));
         } else {
           const mask = cfgTestRegionMask(file.lines);
           const regionAdded: string[] = [];
@@ -1018,7 +1161,7 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
             if (line.kind === "added") regionAdded.push(line.content);
             else if (line.kind === "removed") regionRemoved.push(line.content);
           });
-          if (regionAdded.length > 0 || regionRemoved.length > 0) {
+          if ((regionAdded.length > 0 || regionRemoved.length > 0) && !skipChecks()) {
             signals.push(
               ...signalsForTestFile(
                 {
@@ -1047,5 +1190,7 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
     testAdded,
     testRemoved,
     signalCount: signals.length,
+    exemptFiles,
+    exemptCount: exemptFiles.length,
   };
 }

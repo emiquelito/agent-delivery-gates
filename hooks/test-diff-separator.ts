@@ -14,9 +14,11 @@
 
 import process from "node:process";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import {
   classifyTestPath,
+  FIXTURE_MARKER,
   formatSignalText,
   separateTestDiff,
   type RuleSet,
@@ -50,6 +52,11 @@ Rules config, first match wins:
   2. ADG_TEST_DIFF_CONFIG in the environment
   3. .adg/test-diff.json in the repository root, if it exists
   4. the built-in defaults
+
+A test file whose first 20 lines carry "adg-test-diff: fixtures" inside a
+comment has its signal checks skipped: some files exist to hold text that
+only looks like a weakening. Such a file is still a test file with its own
+counts, and every run names every file it skipped.
 
 Exit codes:
   0  no test file changed, or none of the changed test files carry a signal
@@ -297,13 +304,66 @@ function widenContext(gitArgs: string[]): string[] {
  * quietly to the narrow diff's own result, never crash and never be
  * mistaken for "no signals".
  */
-function widerClassificationSignals(args: ParsedArgs, narrowDiffText: string, rules: RuleSet): Signal[] | undefined {
+function widerClassificationSignals(
+  args: ParsedArgs,
+  narrowDiffText: string,
+  rules: RuleSet,
+  readFileText: (path: string) => string | undefined,
+): Signal[] | undefined {
   const gitArgs = gitInvocationArgs(args);
   if (gitArgs === undefined) return undefined;
   if (!RUST_FILE_IN_DIFF_RE.test(narrowDiffText)) return undefined;
   const wideText = runGitAllowFail(widenContext(gitArgs));
   if (wideText === undefined) return undefined;
-  return separateTestDiff(wideText, { rules }).signals;
+  // Same reader, so a file exempt in the narrow run is exempt here too: the
+  // wide re-run must never reintroduce a signal the marker suppressed.
+  return separateTestDiff(wideText, { rules, readFileText }).signals;
+}
+
+// Only the head of a file is ever read: the marker has to sit within the
+// first 20 lines, so nothing past this is of any interest, and a large file
+// named in a diff should not be pulled into memory whole to check one line.
+const FILE_HEAD_BYTES = 64 * 1024;
+
+/**
+ * Reads a file named in the diff, from the working tree, for the fixtures
+ * marker and nothing else. The working tree copy is the one a reviewer has
+ * open and the one a pre-commit run is about to commit, so that is what an
+ * exemption is read from. The bound this accepts, stated plainly: pointed at
+ * an older commit with --rev, the marker is still read from the file as it
+ * stands now, not as it stood then, so a run over old history reports what
+ * the current file is exempt from.
+ *
+ * A path is resolved against the repository root and refused if it lands
+ * outside it, since a diff read from stdin can name any path at all. An
+ * unreadable path yields undefined, which means no exemption: an exemption
+ * this command could not confirm is never granted.
+ */
+function makeFileTextReader(repoRoot: string): (path: string) => string | undefined {
+  const cache = new Map<string, string | undefined>();
+  const root = resolve(repoRoot);
+  return (path: string): string | undefined => {
+    const cached = cache.get(path);
+    if (cached !== undefined || cache.has(path)) return cached;
+    let text: string | undefined;
+    const full = resolve(root, path);
+    if (full === root || full.startsWith(root + sep)) {
+      try {
+        const fd = openSync(full, "r");
+        try {
+          const buf = Buffer.alloc(FILE_HEAD_BYTES);
+          const read = readSync(fd, buf, 0, buf.length, 0);
+          text = buf.subarray(0, read).toString("utf8");
+        } finally {
+          closeSync(fd);
+        }
+      } catch {
+        text = undefined;
+      }
+    }
+    cache.set(path, text);
+    return text;
+  };
 }
 
 /** A signal's identity for deduplication: same finding, reported once. */
@@ -319,6 +379,28 @@ function readFileOrFail(path: string): string {
   }
 }
 
+/**
+ * The exempt-file block, printed immediately above the signal count on
+ * every run that skipped a file, whether or not anything else was found.
+ * A clean run that skipped two files must not read the same as a clean run
+ * that skipped none, so this is never folded away and never moved to the
+ * end where a reader stops before reaching it.
+ */
+function exemptBlock(result: SeparateResult): string[] {
+  if (result.exemptFiles.length === 0) return [];
+  const lines = [`Exempt from signals (${result.exemptCount}), each carrying the "${FIXTURE_MARKER}" marker:`];
+  for (const path of result.exemptFiles) lines.push(`  ${path}`);
+  lines.push("");
+  return lines;
+}
+
+function signalBlock(result: SeparateResult): string[] {
+  if (result.signals.length === 0) return ["Signals: none found."];
+  const lines = [`Signals (${result.signals.length}):`];
+  for (const signal of result.signals) lines.push(`  ${formatSignalText(signal)}`);
+  return lines;
+}
+
 function formatText(result: SeparateResult): string {
   const lines: string[] = ["Source diff:"];
   if (result.sourceFiles.length === 0) {
@@ -330,14 +412,16 @@ function formatText(result: SeparateResult): string {
 
   if (result.testFiles.length === 0) {
     lines.push("Test diff: no test files changed.");
+    lines.push("");
+    lines.push(...exemptBlock(result));
     // A signal can still exist with no test file in the diff: a test renamed
     // out of the naming rules leaves nothing classified as a test, and that
     // rename is the whole point. Returning early hid it.
     if (result.signals.length > 0) {
-      lines.push("");
       lines.push(`Signals (${result.signals.length}):`);
       for (const signal of result.signals) lines.push(`  ${formatSignalText(signal)}`);
     }
+    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
     return lines.join("\n");
   }
 
@@ -345,12 +429,8 @@ function formatText(result: SeparateResult): string {
   for (const f of result.testFiles) lines.push(`  ${f.path}  +${f.added} -${f.removed}`);
   lines.push("");
 
-  if (result.signals.length === 0) {
-    lines.push("Signals: none found.");
-  } else {
-    lines.push(`Signals (${result.signals.length}):`);
-    for (const signal of result.signals) lines.push(`  ${formatSignalText(signal)}`);
-  }
+  lines.push(...exemptBlock(result));
+  lines.push(...signalBlock(result));
   return lines.join("\n");
 }
 
@@ -389,14 +469,16 @@ function main(): void {
     return;
   }
 
+  const readFileText = makeFileTextReader(tryResolveRepoRoot(process.cwd()) ?? process.cwd());
+
   const diffText = resolveDiffText(args);
-  const result = separateTestDiff(diffText, { rules });
+  const result = separateTestDiff(diffText, { rules, readFileText });
 
   // A .rs file's #[cfg(test)] module can sit outside the default context
   // window; a wide re-run only ever adds signals the narrow diff missed,
   // never touches sourceFiles/testFiles/counts, and degrades silently to
   // nothing found when it cannot run at all. See widerClassificationSignals.
-  const wideSignals = widerClassificationSignals(args, diffText, rules);
+  const wideSignals = widerClassificationSignals(args, diffText, rules, readFileText);
   if (wideSignals !== undefined) {
     const seen = new Set(result.signals.map(signalKey));
     for (const signal of wideSignals) {

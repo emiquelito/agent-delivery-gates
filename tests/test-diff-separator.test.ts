@@ -1,13 +1,23 @@
 // Tests for src/test-diff-separator.ts, the pure core. Every test asserts
 // an observable outcome from separateTestDiff: a signal id, a count, or a
 // file's classification. Never an internal value.
+//
+// adg-test-diff: fixtures
+// This file holds diff text written to look like a weakening, so the
+// detector can be run against it; the signals it trips are never real.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   classifyTestPath,
   compileRuleSet,
   DEFAULT_RULES,
+  FIXTURE_MARKER,
+  hasFixtureMarker,
   isTestPath,
   separateTestDiff,
   type RuleSet,
@@ -1296,4 +1306,165 @@ test("the region closes at its own closing brace: a later, unrelated source chan
   ]);
   const result = separateTestDiff(diff);
   assert.deepEqual(result.signals, []);
+});
+
+
+// --- The fixtures marker ------------------------------------------------------
+//
+// Every test below asserts an observable outcome of separateTestDiff: the
+// signal list, the test-half classification and counts, or the exempt list
+// the report and the JSON both print.
+
+const MARKED_PATH = "tests/holder.test.ts";
+
+/** A one-line skip addition: enough to trip skip-added on its own. */
+const SKIP_DIFF = oneFileDiff(MARKED_PATH, [], ["  test.skip('placeholder', () => {});"]);
+
+function readerFor(text: string | undefined): (path: string) => string | undefined {
+  return (path) => (path === MARKED_PATH ? text : undefined);
+}
+
+/** The marker at the top of a file, in whichever comment form is asked for. */
+function fileWithMarker(form: "line" | "hash" | "block"): string {
+  const body = ["const x = 1;", "const y = 2;"];
+  if (form === "line") return [`// ${FIXTURE_MARKER}`, ...body].join("\n");
+  if (form === "hash") return [`# ${FIXTURE_MARKER}`, ...body].join("\n");
+  return ["/*", ` * ${FIXTURE_MARKER}`, " */", ...body].join("\n");
+}
+
+test("the marker suppresses signals for its file; the same file without it produces them", () => {
+  const marked = separateTestDiff(SKIP_DIFF, { readFileText: readerFor(fileWithMarker("line")) });
+  assert.deepEqual(signalIds(marked.signals), []);
+  assert.deepEqual(marked.exemptFiles, [MARKED_PATH]);
+  assert.equal(marked.exemptCount, 1);
+
+  const unmarked = separateTestDiff(SKIP_DIFF, { readFileText: readerFor("const x = 1;\n") });
+  assert.deepEqual(signalIds(unmarked.signals), ["skip-added"]);
+  assert.deepEqual(unmarked.exemptFiles, []);
+  assert.equal(unmarked.exemptCount, 0);
+});
+
+test("with no way to read the file at all, nothing is exempt", () => {
+  const result = separateTestDiff(SKIP_DIFF);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+  assert.deepEqual(result.exemptFiles, []);
+  assert.equal(result.exemptCount, 0);
+});
+
+test("the marker is honoured in a //, a #, and a /* */ comment", () => {
+  for (const form of ["line", "hash", "block"] as const) {
+    const result = separateTestDiff(SKIP_DIFF, { readFileText: readerFor(fileWithMarker(form)) });
+    assert.deepEqual(signalIds(result.signals), [], `${form} comment should suppress`);
+    assert.deepEqual(result.exemptFiles, [MARKED_PATH], `${form} comment should exempt the file`);
+  }
+});
+
+test("the marker on line 20 is honoured and on line 21 is not", () => {
+  const filler = (n: number) => Array.from({ length: n }, (_, i) => `const v${i} = ${i};`);
+
+  const onLine20 = [...filler(19), `// ${FIXTURE_MARKER}`].join("\n");
+  const inTime = separateTestDiff(SKIP_DIFF, { readFileText: readerFor(onLine20) });
+  assert.deepEqual(signalIds(inTime.signals), []);
+  assert.deepEqual(inTime.exemptFiles, [MARKED_PATH]);
+
+  const onLine21 = [...filler(20), `// ${FIXTURE_MARKER}`].join("\n");
+  const tooLate = separateTestDiff(SKIP_DIFF, { readFileText: readerFor(onLine21) });
+  assert.deepEqual(signalIds(tooLate.signals), ["skip-added"]);
+  assert.deepEqual(tooLate.exemptFiles, []);
+});
+
+test("the marker outside a comment, in code or in a string, is not honoured", () => {
+  const notComments = [
+    `${FIXTURE_MARKER}`,
+    `const marker = "${FIXTURE_MARKER}";`,
+    `const marker = "// ${FIXTURE_MARKER}";`,
+    `const marker = '# ${FIXTURE_MARKER}';`,
+    "const marker = `/* " + FIXTURE_MARKER + " */`;",
+  ];
+  for (const line of notComments) {
+    const result = separateTestDiff(SKIP_DIFF, { readFileText: readerFor(`${line}\nconst x = 1;\n`) });
+    assert.deepEqual(signalIds(result.signals), ["skip-added"], `should not be honoured: ${line}`);
+    assert.deepEqual(result.exemptFiles, [], `should not be exempt: ${line}`);
+  }
+});
+
+test("hasFixtureMarker agrees on each of those forms directly", () => {
+  assert.equal(hasFixtureMarker(fileWithMarker("line")), true);
+  assert.equal(hasFixtureMarker(fileWithMarker("hash")), true);
+  assert.equal(hasFixtureMarker(fileWithMarker("block")), true);
+  assert.equal(hasFixtureMarker(`const m = "${FIXTURE_MARKER}";`), false);
+  assert.equal(hasFixtureMarker("// nothing here\n"), false);
+});
+
+test("a marked file is still a test file, in the test half, with its own counts", () => {
+  const diff = oneFileDiff(
+    MARKED_PATH,
+    ["  expect(sum(1, 2)).toBe(3);", "  expect(sum(2, 2)).toBe(4);"],
+    ["  test.skip('placeholder', () => {});"],
+  );
+  const result = separateTestDiff(diff, { readFileText: readerFor(fileWithMarker("line")) });
+  assert.deepEqual(
+    result.testFiles,
+    [{ path: MARKED_PATH, added: 1, removed: 2 }],
+    "the marked file stays in the test half with its real counts",
+  );
+  assert.deepEqual(result.sourceFiles, []);
+  assert.equal(result.testAdded, 1);
+  assert.equal(result.testRemoved, 2);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("the marker suppresses one file only, never another file in the same diff", () => {
+  const other = "tests/other.test.ts";
+  const diff =
+    SKIP_DIFF + oneFileDiff(other, [], ["  test.skip('also placeholder', () => {});"]);
+  const result = separateTestDiff(diff, { readFileText: readerFor(fileWithMarker("line")) });
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+  assert.equal(result.signals[0].file, other);
+  assert.deepEqual(result.exemptFiles, [MARKED_PATH]);
+  assert.equal(result.exemptCount, 1);
+});
+
+test("a source file carrying the marker is not listed as exempt: it faced no check", () => {
+  const sourcePath = "src/widget.ts";
+  const diff = oneFileDiff(sourcePath, ["return a + b;"], ["return a - b;"]);
+  const result = separateTestDiff(diff, {
+    readFileText: (path) => (path === sourcePath ? fileWithMarker("line") : undefined),
+  });
+  assert.deepEqual(result.exemptFiles, []);
+  assert.equal(result.exemptCount, 0);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// --- Inventory: which files in this repository carry the marker ---------------
+//
+// The exemption spreads quietly or not at all. This test names every file
+// allowed to carry it, so adding a third puts the decision in front of a
+// person instead of letting it pass with a green run.
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+const MARKER_HOLDERS = ["tests/test-diff-separator-cli.test.ts", "tests/test-diff-separator.test.ts"];
+
+test("exactly the two declared fixture files in this repository carry the marker", () => {
+  const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: REPO_ROOT, encoding: "utf8" })
+    .split("\0")
+    .filter((path) => path !== "");
+  assert.ok(tracked.length > 0, "git ls-files returned nothing; the inventory would pass vacuously");
+
+  const carrying = tracked.filter((path) => {
+    let text: string;
+    try {
+      text = readFileSync(join(REPO_ROOT, path), "utf8");
+    } catch {
+      return false;
+    }
+    return hasFixtureMarker(text);
+  });
+
+  assert.deepEqual(
+    carrying.sort(),
+    MARKER_HOLDERS,
+    "a file gained or lost the fixtures marker; a person has to decide whether that exemption is warranted",
+  );
 });

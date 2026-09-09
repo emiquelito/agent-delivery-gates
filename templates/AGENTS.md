@@ -51,6 +51,25 @@ Exit codes: `0` no test file changed, or none of the changed files carry
 a signal; `1` at least one signal was found; `2` could not run as asked,
 including a git failure, so a broken git call never reads as a pass.
 
+A test file can exist to hold text that only looks like a weakening, so
+this check can be run against it. Such a file carries the line
+`adg-test-diff: fixtures` inside a comment, a `//`, a `#`, or a `/* */`
+one, within its first 20 lines, read from the file as it stands in the
+working tree. The marker suppresses the signal checks for that one file.
+It does not change classification: the file is still a test file, is
+still counted in the test half, keeps its added and removed counts, and
+no other file is affected. A marker past line 20, or one outside a
+comment, is not honoured, so an exemption cannot be buried at the bottom
+of a long file or written into a string.
+
+The exemption lives in the file it affects and never in a list of paths
+in a config file, so granting one appears in that commit's own diff where
+a reviewer watches it happen. Every run names every file it skipped, in
+the text report directly above the signal count and in the JSON as
+`exemptFiles` with its own `exemptCount`, whether or not anything else
+was found: a clean run that skipped two files does not read the same as a
+clean run that skipped none.
+
 ### mutate
 
 Breaks the code in a fixed set of known ways, one break at a time, runs
