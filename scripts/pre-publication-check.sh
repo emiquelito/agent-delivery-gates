@@ -133,8 +133,14 @@ check_no_ai_attribution() {
 
 # --- shared: a home directory path -----------------------------------------
 
+# A path that names somebody. /home/NAME and /Users/NAME both carry an
+# account name, so both are caught. A bare ~/ is not here on purpose: it is
+# the anonymous form of a home path, carries no account name and no machine
+# name, and documenting where a tool keeps its config, ~/.codex/config.toml
+# for one, is the correct thing to write. Catching it stopped the whole
+# publication check on a line that leaked nothing.
 home_path_pattern() {
-  printf '%s' '(^|[^A-Za-z0-9_.-])(/home/[A-Za-z0-9_.-]+|/Users/[A-Za-z0-9_.-]+|~/[^[:space:]]+)'
+  printf '%s' '(^|[^A-Za-z0-9_.-])(/home/[A-Za-z0-9_.-]+|/Users/[A-Za-z0-9_.-]+)'
 }
 
 # --- check 3: no commit message carries a personal path --------------------

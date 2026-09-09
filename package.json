@@ -3,11 +3,15 @@
   "version": "0.1.0",
   "description": "Delivery gates that check what an AI coding agent claims about its own work, not only the code it wrote.",
   "license": "Apache-2.0",
+  "author": "emiquelito <contact@agentgates.dev>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/emiquelito/agent-delivery-gates.git"
   },
   "homepage": "https://github.com/emiquelito/agent-delivery-gates#readme",
+  "bugs": {
+    "url": "https://github.com/emiquelito/agent-delivery-gates/issues"
+  },
   "keywords": [
     "ai-agent",
     "delivery-gate",

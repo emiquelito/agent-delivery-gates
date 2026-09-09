@@ -307,3 +307,17 @@ test("a name that does not read as a placeholder still runs the check", () => {
     assert.match(r.stdout, /checked 1 name/);
   });
 });
+
+// A bare tilde path is the anonymous form of a home path. It names no
+// account and no machine, and documenting where a tool keeps its config is
+// the right thing to write, so the check must not stop on it. It did once,
+// on a README line naming a config file, and failed the whole run.
+test("a tracked file holding a bare tilde path passes check 5", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    writeFile(dir, "docs/setup.md", "Add this to " + "~" + "/.codex/config.toml yourself.\n");
+    commit(dir, "Document a config path");
+    const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: NO_SUCH_NAME });
+    assert.match(r.stdout, /PASS\s+\[5\]/, r.stdout);
+  });
+});
