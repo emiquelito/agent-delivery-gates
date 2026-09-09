@@ -7,6 +7,14 @@
 // its own records next, so the contradiction is what is checked here, not
 // the wording.
 //
+// Reading the records again is worth something only if it is read a second
+// way. An earlier version of this file copied the generator's own table
+// parser line for line, so a bug in that parser was reproduced here and the
+// two agreed on the same wrong total. The tally is counted below with a
+// single regex over the raw file, with no header search and no stop at the
+// first line that is not a row, so the two disagree whenever either one is
+// wrong.
+//
 // The site is generated into a scratch directory for each run instead of
 // being read from a committed build. A committed build goes stale the moment
 // a record changes, and a stale page passing its own tests is exactly the
@@ -87,7 +95,7 @@ after(() => {
   if (outDir !== "") rmSync(outDir, { recursive: true, force: true });
 });
 
-// --- the records, read again, independently of the generator -----------------
+// --- the records, read a second way -----------------------------------------
 
 interface RuleRecord {
   id: string;
@@ -112,40 +120,41 @@ interface TallyFacts {
   counts: Map<string, number>;
 }
 
-/** Counts the tally table the same way the tally tooling reads it: the first
- * row whose leading cell is "#" and which is followed by a separator row. */
+/**
+ * Counts the tally with one regex over the whole file: every line that opens
+ * with a number, a date, and a rule id, wherever in the file it sits.
+ *
+ * This deliberately shares no code and no algorithm with the generator. The
+ * generator finds a header row, walks forward, and stops at the first line
+ * that is not a row; this walks nothing and stops nowhere. A gap in the table
+ * changes the generator's answer and cannot change this one, which is the
+ * whole point of counting it here.
+ */
+const TALLY_ROW = /^\| *(\d+) *\| *(\d{4}-\d{2}-\d{2}) *\| *([a-z0-9-]+) *\|/gm;
+
 function readTally(ruleIds: string[]): TallyFacts {
-  const lines = readFileSync(join(ROOT, "docs", "gate-tally.md"), "utf8").split(/\r\n|\r|\n/);
-  const cellsOf = (line: string): string[] => {
-    let body = line.trim();
-    if (body.startsWith("|")) body = body.slice(1);
-    if (body.endsWith("|")) body = body.slice(0, -1);
-    return body.split("|").map((cell) => cell.trim());
-  };
-  const isSeparator = (line: string): boolean => {
-    const cells = cellsOf(line);
-    return cells.length > 0 && cells.every((cell) => /^:?-{2,}:?$/.test(cell));
-  };
-  let header = -1;
-  for (let i = 0; i < lines.length - 1; i++) {
-    if (!lines[i].trim().startsWith("|")) continue;
-    if (cellsOf(lines[i])[0] !== "#") continue;
-    if (!isSeparator(lines[i + 1])) continue;
-    header = i;
-    break;
-  }
-  assert.ok(header >= 0, "docs/gate-tally.md has no table this test can read");
+  const raw = readFileSync(join(ROOT, "docs", "gate-tally.md"), "utf8");
+  const rows = [...raw.matchAll(TALLY_ROW)];
+  assert.ok(rows.length > 0, "docs/gate-tally.md holds no row this test can count");
 
   const counts = new Map<string, number>(ruleIds.map((id) => [id, 0]));
   const dates: string[] = [];
-  for (let i = header + 2; i < lines.length; i++) {
-    if (!lines[i].trim().startsWith("|")) break;
-    const cells = cellsOf(lines[i]);
-    counts.set(cells[2], (counts.get(cells[2]) ?? 0) + 1);
-    dates.push(cells[1]);
+  for (const row of rows) {
+    counts.set(row[3], (counts.get(row[3]) ?? 0) + 1);
+    dates.push(row[2]);
   }
   dates.sort();
-  return { total: dates.length, first: dates[0], last: dates[dates.length - 1], counts };
+
+  // The row numbers run 1..n with no gap, which is a second reading of the
+  // same total that does not depend on how many rows the regex matched.
+  const numbers = rows.map((row) => Number(row[1])).sort((a, b) => a - b);
+  assert.deepEqual(
+    numbers,
+    Array.from({ length: rows.length }, (_, i) => i + 1),
+    "the tally row numbers are not 1..n, so one count of this file is wrong",
+  );
+
+  return { total: rows.length, first: dates[0], last: dates[dates.length - 1], counts };
 }
 
 /** Every `<code>` fragment on the page, unescaped. */
@@ -412,6 +421,9 @@ function scratchProject(): string {
   mkdirSync(join(dir, "docs"), { recursive: true });
   cpSync(join(ROOT, "docs", "gate-tally.md"), join(dir, "docs", "gate-tally.md"));
   cpSync(join(ROOT, "docs", "examples"), join(dir, "docs", "examples"), { recursive: true });
+  // The generator reads the command list out of the command line entry point,
+  // so a scratch project without it is not a project the generator can build.
+  cpSync(join(ROOT, "bin"), join(dir, "bin"), { recursive: true });
   return dir;
 }
 
@@ -492,10 +504,16 @@ test("the site is published only over a green run of the gates", () => {
   assert.match(yml, /name: github-pages/, "the deploy job uses no github-pages environment");
   assert.ok(yml.includes("node site/build.js"), "the workflow never generates the site");
 
-  // Every action is pinned to a version. An unpinned action is whatever it
-  // happens to be on the day it runs.
+  // Every action is pinned to a version tag or to a full commit SHA. A
+  // reference like @main or @master is whatever that branch holds on the day
+  // it runs, which is not a pinned action; an @ on its own proves nothing,
+  // which is what this assertion used to check.
   for (const use of [...yml.matchAll(/uses: (\S+)/g)].map((m) => m[1])) {
-    assert.match(use, /@/, `the workflow uses ${use} with no version`);
+    assert.match(
+      use,
+      /@(v\d+(\.\d+)*|[0-9a-f]{40})$/,
+      `the workflow uses ${use}, which is not pinned to a version tag or a commit SHA`,
+    );
   }
 });
 
@@ -568,4 +586,264 @@ test("the build writes a CNAME holding exactly the custom domain", () => {
   const cname = readFileSync(join(outDir, "dist", "CNAME"), "utf8");
   assert.equal(cname.trim(), SITE_HOST);
   assert.equal(cname.split("\n").filter((l) => l.trim() !== "").length, 1);
+});
+
+// --- the workflow, checked against what the build actually does ----------------
+
+/** One top-level job block out of the workflow file, by name. */
+function jobBlock(yml: string, name: string): string {
+  const lines = yml.split("\n");
+  const start = lines.findIndex((line) => line === `  ${name}:`);
+  assert.ok(start >= 0, `the pages workflow has no ${name} job`);
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^ {2}\S/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+// A dependency between two jobs is the only thing making the gates run before
+// the site is published, and `needs: gates` appearing somewhere in the file
+// says nothing about which job carries it. Pointing deploy straight at the
+// gates would publish whatever the last deploy left behind, over a build that
+// never ran, and read as a passing workflow.
+test("the workflow's job order is gates, then build, then deploy", () => {
+  const yml = readFileSync(WORKFLOW, "utf8");
+  const gates = jobBlock(yml, "gates");
+  const build = jobBlock(yml, "build");
+  const deploy = jobBlock(yml, "deploy");
+
+  assert.doesNotMatch(gates, /^ {4}needs:/m, "the gates job waits on something");
+  assert.match(build, /^ {4}needs: gates$/m, "the build job does not wait on the gates");
+  assert.match(deploy, /^ {4}needs: build$/m, "the deploy job does not wait on the build");
+  assert.doesNotMatch(
+    deploy,
+    /^ {4}needs: gates$/m,
+    "the deploy job skips the build and waits on the gates",
+  );
+});
+
+// The upload step names a directory by hand. Naming one the build never wrote
+// uploads an empty artifact and deploys an empty site, with every job green.
+test("the artifact uploaded is the directory the build writes", () => {
+  const build = jobBlock(readFileSync(WORKFLOW, "utf8"), "build");
+  const out = /node site\/build\.js --out (\S+)/.exec(build);
+  assert.ok(out, "the build job does not generate the site");
+  const uploaded = /uses: actions\/upload-pages-artifact@v\d+\n\s+with:\n\s+path: (\S+)/.exec(build);
+  assert.ok(uploaded, "the build job uploads no Pages artifact");
+  assert.equal(
+    uploaded[1],
+    out[1],
+    `the build writes ${out[1]} and the upload step publishes ${uploaded[1]}`,
+  );
+});
+
+// The gates job runs `npm ci`, which runs whatever lifecycle scripts the
+// lockfile carries. It has no business holding a token that can publish, so
+// the two write scopes belong to the deploy job and nowhere else.
+test("only the deploy job holds the Pages write scopes", () => {
+  const yml = readFileSync(WORKFLOW, "utf8");
+  const header = yml.slice(0, yml.indexOf("\njobs:"));
+  assert.match(header, /^permissions:\n  contents: read\n/m, "the workflow default is not read-only");
+  assert.doesNotMatch(header, /^\s+pages: write$/m, "pages: write is a workflow-wide default");
+  assert.doesNotMatch(header, /^\s+id-token: write$/m, "id-token: write is a workflow-wide default");
+
+  for (const name of ["gates", "build"]) {
+    const block = jobBlock(yml, name);
+    assert.doesNotMatch(block, /pages: write/, `the ${name} job can write a Pages deployment`);
+    assert.doesNotMatch(block, /id-token: write/, `the ${name} job can mint a deployment token`);
+  }
+  const deploy = jobBlock(yml, "deploy");
+  assert.match(deploy, /^ {6}pages: write$/m, "the deploy job cannot write a Pages deployment");
+  assert.match(deploy, /^ {6}id-token: write$/m, "the deploy job cannot mint the deployment token");
+});
+
+// --- what the page says about the tool ------------------------------------------
+
+/** The subcommands `bin/adg.ts` dispatches, minus the internal entry points. */
+function userFacingSubcommands(): string[] {
+  const cli = readFileSync(join(ROOT, "bin", "adg.ts"), "utf8");
+  const internal = new Set([
+    "hook-clean-tree",
+    "hook-path-confinement",
+    "hook-test-diff",
+    "hook-report",
+    "cursor-hook",
+    "copilot-hook",
+  ]);
+  const names = [...cli.matchAll(/^\s*case "([a-z][a-z0-9-]*)":/gm)].map((m) => m[1]);
+  assert.ok(names.includes("init"), "no subcommands were read out of bin/adg.ts");
+  return [...new Set(names)].filter((name) => !internal.has(name));
+}
+
+// The page carried two command names for as long as the tool had two. It kept
+// carrying them after the tool had ten, because they were typed into the
+// template and nothing read the tool.
+test("the page names every user-facing subcommand the tool dispatches", () => {
+  const tokens = new Set(codeTokens(html).flatMap((token) => token.split(/\s+/)));
+  for (const name of userFacingSubcommands()) {
+    assert.ok(tokens.has(name), `the page never names the "${name}" command`);
+  }
+});
+
+// Each rule links at rules/<id>.json. The generator refuses a record whose id
+// disagrees with its file name, and that refusal is the only thing keeping
+// these links off a 404.
+test("every rule record the page links to exists on disk", () => {
+  const linked = [...html.matchAll(/blob\/main\/rules\/([^"]+)/g)].map((m) => m[1]);
+  assert.ok(linked.length > 0, "the page links no rule record");
+  for (const file of linked) {
+    assert.ok(existsSync(join(ROOT, "rules", file)), `the page links rules/${file}, which is absent`);
+  }
+  assert.deepEqual(
+    [...new Set(linked)].sort(),
+    readRules()
+      .map((rule) => `${rule.id}.json`)
+      .sort(),
+    "the page links a different set of rule records than rules/ holds",
+  );
+});
+
+// --- escaping --------------------------------------------------------------------
+
+// Record text reaches the page in two kinds of place: between tags, and inside
+// an attribute value. Nothing in this repository's records holds markup today,
+// so nothing would have noticed the escaping being dropped altogether. This
+// pins the behavior that is already correct.
+test("record text with markup in it reaches the page escaped", () => {
+  const dir = scratchProject();
+  try {
+    const path = join(dir, "rules", "coverage-as-gap-finder.json");
+    const record = JSON.parse(readFileSync(path, "utf8"));
+    record.name = `<script>alert(1)</script> & "quoted" 'single'`;
+    record.claim_class = `</script> ends a block <b>early</b>`;
+    record.severity = `medium" onmouseover="alert(1)`;
+    writeFileSync(path, JSON.stringify(record, null, 2));
+
+    const result = runBuild(join(dir, "site", "build.js"), join(dir, "dist"));
+    assert.equal(result.status, 0, `the build failed: ${result.stderr}`);
+    const page = readFileSync(join(dir, "dist", "index.html"), "utf8");
+
+    for (const raw of [
+      "<script>alert(1)</script>",
+      `"quoted"`,
+      `'single'`,
+      "<b>early</b>",
+      `medium" onmouseover=`,
+    ]) {
+      assert.ok(!page.includes(raw), `the page carries ${raw} unescaped`);
+    }
+    for (const escaped of [
+      "&lt;script&gt;alert(1)&lt;/script&gt;",
+      "&amp; &quot;quoted&quot; &#39;single&#39;",
+      "&lt;/script&gt; ends a block &lt;b&gt;early&lt;/b&gt;",
+      `sev-medium&quot; onmouseover=&quot;alert(1)`,
+    ]) {
+      assert.ok(page.includes(escaped), `the page does not carry ${escaped}`);
+    }
+
+    // And the page still has exactly one script element, the data block.
+    const scripts = [...page.matchAll(/<script([^>]*)>/g)].map((m) => m[1]);
+    assert.equal(scripts.length, 1, "record text opened a second script element");
+    assert.match(scripts[0], /type="application\/ld\+json"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// JSON.stringify leaves "<" alone, so a "</script>" inside any string in the
+// structured data block would end the block early for an HTML parser while the
+// JSON stayed valid. Nothing record-derived reaches that block today. This
+// plants the payload in a value that does reach it.
+test("a closing script tag inside the JSON-LD block cannot end it", () => {
+  const dir = scratchProject();
+  try {
+    const buildPath = join(dir, "site", "build.js");
+    const source = readFileSync(buildPath, "utf8");
+    const payload = `Ev</script><script>alert(1)</script>an`;
+    const patched = source.replace(
+      /const AUTHOR = "[^"]*";/,
+      `const AUTHOR = ${JSON.stringify(payload)};`,
+    );
+    assert.notEqual(patched, source, "the author constant could not be replaced");
+    writeFileSync(buildPath, patched);
+
+    const result = runBuild(buildPath, join(dir, "dist"));
+    assert.equal(result.status, 0, `the build failed: ${result.stderr}`);
+    const page = readFileSync(join(dir, "dist", "index.html"), "utf8");
+
+    const open = `<script type="application/ld+json">`;
+    const start = page.indexOf(open);
+    assert.ok(start >= 0, "the page carries no JSON-LD block");
+    // An HTML parser ends the element at the first "</script>" in the source,
+    // so that is where this reads it too.
+    const end = page.indexOf("</script>", start);
+    const body = page.slice(start + open.length, end);
+    assert.ok(!body.includes("</script>"), "the payload closed the data block early");
+
+    const data = JSON.parse(body);
+    const software = data["@graph"].find(
+      (n: { "@type": string }) => n["@type"] === "SoftwareSourceCode",
+    );
+    assert.equal(software.author.name, payload, "the block lost the value it was given");
+    assert.equal(
+      [...page.matchAll(/<script[^>]*>/g)].length,
+      1,
+      "the payload opened a second script element",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- the tally table, read the way GitHub reads it -------------------------------
+
+// GitHub renders "\|" inside a cell as a literal pipe. Splitting on every pipe
+// reads such a row as having an extra column and stops the build on a file
+// that displays correctly.
+test("a tally cell may hold an escaped pipe", () => {
+  const dir = scratchProject();
+  try {
+    const path = join(dir, "docs", "gate-tally.md");
+    const text = readFileSync(path, "utf8");
+    writeFileSync(
+      path,
+      text +
+        "| 91 | 2026-09-08 | red-before-green | no test; recorded here only |" +
+        " A cell holding a literal \\| pipe, which GitHub renders as one. |\n",
+    );
+    const result = runBuild(join(dir, "site", "build.js"), join(dir, "dist"));
+    assert.equal(result.status, 0, `the build rejected an escaped pipe: ${result.stderr}`);
+    const page = readFileSync(join(dir, "dist", "index.html"), "utf8");
+    assert.ok(page.includes("91 entries"), "the build did not count the row with the escaped pipe");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A blank line, an inserted paragraph, or a second table used to end the count
+// where it appeared. The build exited 0 and the page published a smaller
+// number as though it were the record.
+test("the generator refuses a tally table with a gap in it", () => {
+  const dir = scratchProject();
+  try {
+    const path = join(dir, "docs", "gate-tally.md");
+    const lines = readFileSync(path, "utf8").split("\n");
+    const rows = lines
+      .map((line, i) => [line, i] as [string, number])
+      .filter(([line]) => /^\| *\d+ *\|/.test(line));
+    assert.ok(rows.length > 4, "the tally has too few rows for this test");
+    const at = rows[2][1];
+    writeFileSync(path, [...lines.slice(0, at), "", ...lines.slice(at)].join("\n"));
+
+    const result = runBuild(join(dir, "site", "build.js"), join(dir, "dist"));
+    assert.equal(result.status, 2, "the build published a truncated tally as the whole record");
+    assert.match(result.stderr, /never reached/);
+    assert.ok(!existsSync(join(dir, "dist", "index.html")), "a page was written anyway");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

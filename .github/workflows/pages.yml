@@ -16,12 +16,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Read the repository, write the Pages deployment, and mint the OIDC token
-# deploy-pages exchanges for it. Nothing here needs write access to the code.
+# Read the repository, and nothing more, for every job in this file. The two
+# write scopes the Pages deployment needs, `pages: write` and the OIDC token
+# `id-token: write` mints for deploy-pages, are declared on the deploy job
+# alone. The gates job runs `npm ci`, which runs whatever lifecycle scripts
+# the lockfile carries, and it has no business holding a token that can
+# publish. No fork pull request can reach this workflow at all, since it has
+# no `pull_request` trigger, so this is a second line and not the first one.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deployment at a time. A run already in flight is left to finish, so a
 # half-published site is never what a reader lands on.
@@ -62,6 +65,11 @@ jobs:
     needs: gates
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # configure-pages reads the repository's Pages settings, so this job needs
+    # to read that one scope. It writes no deployment and mints no token.
+    permissions:
+      contents: read
+      pages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -84,6 +92,10 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -104,12 +104,20 @@ function readRules() {
   return rules;
 }
 
-/** One markdown table row split into trimmed cells. */
+/**
+ * One markdown table row split into trimmed cells.
+ *
+ * A cell may hold a pipe of its own if it is written `\|`, which is what
+ * GitHub renders as a literal pipe inside a cell. Splitting on every pipe
+ * would read that one row as having an extra column and stop the build on a
+ * file GitHub displays correctly, so the split skips an escaped pipe and the
+ * cell keeps the pipe without its backslash.
+ */
 function splitRow(line) {
   let body = line.trim();
   if (body.startsWith("|")) body = body.slice(1);
-  if (body.endsWith("|")) body = body.slice(0, -1);
-  return body.split("|").map((cell) => cell.trim());
+  if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
+  return body.split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll("\\|", "|"));
 }
 
 function isSeparatorRow(line) {
@@ -122,6 +130,13 @@ function isSeparatorRow(line) {
  * and how many per rule. The header row is found the same way the tally
  * tooling finds it, by a first cell of "#" followed by a separator row, so
  * the prose above the table is never mistaken for data.
+ *
+ * Counting stops at the first line that is not a table row, which is right
+ * for a table that ends, and silently wrong for a table with a gap in it: a
+ * blank line, a paragraph, or a second table would end the count early and
+ * publish a smaller number as though it were the record. So every row
+ * anywhere in the file whose first cell is a number is collected first, and
+ * a row that the count did not reach stops the build.
  */
 function readTally(ruleIds) {
   const path = join(ROOT, "docs", "gate-tally.md");
@@ -136,8 +151,16 @@ function readTally(ruleIds) {
   }
   if (headerIndex < 0) fail(`no tally table found in ${path}`);
 
+  // Every numbered row in the file, wherever it sits.
+  const numbered = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].trim().startsWith("|")) continue;
+    if (/^\d+$/.test(splitRow(lines[i])[0])) numbered.add(i);
+  }
+
   const counts = new Map(ruleIds.map((id) => [id, 0]));
   const dates = [];
+  const counted = new Set();
   let total = 0;
   for (let i = headerIndex + 2; i < lines.length; i++) {
     const line = lines[i];
@@ -149,7 +172,15 @@ function readTally(ruleIds) {
     if (!counts.has(rule)) fail(`${path} line ${i + 1} names rule "${rule}", which has no record`);
     counts.set(rule, counts.get(rule) + 1);
     dates.push(date);
+    counted.add(i);
     total += 1;
+  }
+  const missed = [...numbered].filter((i) => !counted.has(i));
+  if (missed.length > 0) {
+    fail(
+      `${path} has ${missed.length} numbered row(s) the count never reached, first at line ` +
+        `${missed[0] + 1}: the table is broken in two and the total would be wrong`,
+    );
   }
   if (total === 0) fail(`${path} holds a table with no entries`);
   dates.sort();
@@ -176,6 +207,45 @@ function readExamples() {
   }
   if (examples.length === 0) fail(`no worked examples found in ${dir}`);
   return examples;
+}
+
+// The entry points `bin/adg.ts` dispatches that no person ever types. Each
+// one is invoked by an agent runtime or by a git hook, through the config
+// files `init` writes, and reads a payload on stdin. Listing them as commands
+// would tell a reader to run something that does nothing useful by hand, so
+// the page names the user-facing subcommands only.
+const INTERNAL_SUBCOMMANDS = new Set([
+  "hook-clean-tree",
+  "hook-path-confinement",
+  "hook-test-diff",
+  "hook-report",
+  "cursor-hook",
+  "copilot-hook",
+]);
+
+// `init` sets a project up and `mcp` starts the server; both are described in
+// their own words on the page, so the sentence listing the checks leaves them
+// out. They stay in the user-facing list all the same.
+const SETUP_SUBCOMMANDS = new Set(["init", "mcp"]);
+
+/**
+ * The subcommands the command line entry point dispatches, read out of the
+ * source instead of typed here. A command list typed into a page is a count
+ * by hand under another name: this page carried two commands for weeks after
+ * the tool had eight.
+ */
+function readSubcommands() {
+  const path = join(ROOT, "bin", "adg.ts");
+  const source = readFile(path);
+  const names = [];
+  for (const match of source.matchAll(/^\s*case "([a-z][a-z0-9-]*)":/gm)) {
+    if (!names.includes(match[1])) names.push(match[1]);
+  }
+  if (!names.includes("init")) fail(`no subcommands could be read out of ${path}`);
+  const userFacing = names.filter((name) => !INTERNAL_SUBCOMMANDS.has(name));
+  const checks = userFacing.filter((name) => !SETUP_SUBCOMMANDS.has(name));
+  if (checks.length === 0) fail(`${path} dispatches no user-facing check command`);
+  return { userFacing, checks };
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -305,7 +375,11 @@ function faqEntries(rules, tally) {
       q: `How many of the ${words(rules.length)} rules are checked mechanically?`,
       a:
         `${words(hookCount).replace(/^./, (c) => c.toUpperCase())} of the ${words(rules.length)} are enforced by a hook that runs on a tool call or a commit.` +
-        " The rest are carried by prompt instructions or need a person, and the catalog says which is which.",
+        " Two commands go further than that grouping suggests: census runs a change's new tests" +
+        " against the code from before the change, which is the mechanical half of red-before-green," +
+        " and induce runs a declared failure with the handling in place and again with it taken" +
+        " away, which is what induced-failure-required asks for. The rest are carried by prompt" +
+        " instructions or need a person, and the catalog says which is which.",
     },
     {
       q: "What does a rule with zero tally entries mean?",
@@ -317,8 +391,9 @@ function faqEntries(rules, tally) {
   ];
 }
 
-function renderPage(rules, tally, examples) {
+function renderPage(rules, tally, examples, commands) {
   const faq = faqEntries(rules, tally);
+  const checkList = commands.checks.map((name) => `<code>${escapeHtml(name)}</code>`).join(", ");
   const title = `${PACKAGE_NAME}: proof obligations for an AI coding agent's delivery report`;
   const socialUrl = SITE_URL + SOCIAL_IMAGE;
   const socialAlt =
@@ -350,8 +425,9 @@ function renderPage(rules, tally, examples) {
           "test integrity",
           "MCP server",
         ],
-        applicationCategory: "DeveloperApplication",
-        operatingSystem: "Linux, macOS, Windows",
+        // No applicationCategory or operatingSystem here. Both are properties
+        // of SoftwareApplication, and this node is SoftwareSourceCode, which
+        // is a CreativeWork and not a SoftwareApplication.
         isAccessibleForFree: true,
       },
       {
@@ -365,6 +441,14 @@ function renderPage(rules, tally, examples) {
       },
     ],
   };
+
+  // JSON.stringify leaves "<" alone, so a "</script>" inside any string would
+  // end the block early for an HTML parser while the JSON itself stays valid.
+  // Escaping every "<" as a \\u003c sequence is still the same JSON to a JSON
+  // parser and
+  // carries nothing an HTML parser can act on. Nothing read out of the records
+  // reaches this block today, which is why this is a guard and not a fix.
+  const jsonLdText = JSON.stringify(jsonLd, null, 2).replaceAll("<", "\\u003c");
 
   const exampleItems = examples
     .map(
@@ -401,8 +485,11 @@ function renderPage(rules, tally, examples) {
 <!-- The social image is an SVG. Producing a PNG here would mean adding an
      image library, and this build has no dependencies by design; the same
      rule that keeps the published package free of them applies to the page
-     that describes it. Crawlers read the SVG; a few social previewers do not
-     render one, and show no image at all. -->
+     that describes it. Crawlers read the SVG, but most social previewers,
+     X, Facebook, LinkedIn and Slack among them, reject SVG for a card image,
+     so the realistic outcome is a link with no preview image on any of them
+     while the card type still says summary_large_image. That is the trade
+     accepted here, not a small gap. -->
 <meta property="og:image" content="${socialUrl}">
 <meta property="og:image:type" content="image/svg+xml">
 <meta property="og:image:width" content="1200">
@@ -478,7 +565,7 @@ img { max-width: 100%; height: auto; }
 @media (max-width: 34rem) { body { font-size: 16px; } h1 { font-size: 1.55rem; } }
 </style>
 <script type="application/ld+json">
-${JSON.stringify(jsonLd, null, 2)}
+${jsonLdText}
 </script>
 </head>
 <body>
@@ -547,9 +634,9 @@ git config core.hooksPath .githooks</code></pre>
         <code>--dry-run</code> prints what would happen without writing anything,
         <code>--force</code> overwrites a file that already exists, and
         <code>--dir PATH</code> targets a directory other than the current one.</p>
-      <p>The two command line tools are <code>agent-delivery-gates validate-report</code>
-        and <code>agent-delivery-gates test-diff</code>. Both are ordinary programs with
-        exit codes, so they run from any pre-commit hook or CI job.
+      <p>Every check is a command of its own, read here out of the command line
+        entry point: ${checkList}. Each is an ordinary program with an exit code,
+        so it runs from any pre-commit hook or CI job.
         <code>agent-delivery-gates mcp</code> starts a local MCP server on stdio: a
         client starts it, writes to its stdin and reads its stdout, and nothing about
         a project's code or reports leaves the machine.</p>
@@ -570,7 +657,7 @@ git config core.hooksPath .githooks</code></pre>
             <tr><th scope="row">Codex</th><td><code>.codex/hooks.json</code>, written by <code>init</code></td></tr>
             <tr><th scope="row">GitHub Copilot</th><td><code>.github/hooks/agent-delivery-gates.json</code>, written by <code>init</code></td></tr>
             <tr><th scope="row">CI, no agent</th><td><code>.github/workflows/agent-delivery-gates.yml</code>, written by <code>init</code></td></tr>
-            <tr><th scope="row">Command line, no agent</th><td><code>validate-report</code> and <code>test-diff</code>, run directly or from any pre-commit hook</td></tr>
+            <tr><th scope="row">Command line, no agent</th><td>${checkList}, run directly or from any pre-commit hook</td></tr>
           </tbody>
         </table>
       </div>
@@ -700,6 +787,7 @@ function main() {
   const rules = readRules();
   const tally = readTally(rules.map((rule) => rule.id));
   const examples = readExamples();
+  const commands = readSubcommands();
 
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
@@ -711,7 +799,7 @@ function main() {
     written.push([name, Buffer.byteLength(contents, "utf8")]);
   }
 
-  write("index.html", renderPage(rules, tally, examples));
+  write("index.html", renderPage(rules, tally, examples, commands));
   write("robots.txt", renderRobots());
   // The tally's last entry dates the content, which keeps a rebuild of
   // unchanged inputs byte for byte identical to the one before it.
@@ -724,7 +812,7 @@ function main() {
 
   process.stdout.write(`site build: ${outDir}\n`);
   process.stdout.write(
-    `site build: ${rules.length} rules, ${tally.total} tally entries (${tally.first} to ${tally.last}), ${examples.length} worked examples\n`,
+    `site build: ${rules.length} rules, ${tally.total} tally entries (${tally.first} to ${tally.last}), ${examples.length} worked examples, ${commands.checks.length} check commands\n`,
   );
   for (const [name, size] of written) {
     process.stdout.write(`site build:   ${name} (${size} bytes)\n`);
