@@ -1096,31 +1096,40 @@ test("the page has a wide column and a fluid first heading", () => {
   );
 });
 
-// A colour token defined for one scheme only reads as the other scheme's value
-// on half the machines that open the page, which is the sort of thing nobody
-// running one theme ever sees.
-test("both colour schemes define every token the page uses", () => {
-  const css = pageCss(html);
-  // Which scheme is the default and which is the override is a design choice
-  // that has already changed once. What must hold either way is that both
-  // define every token, so this reads whichever pair is there.
-  const light = /:root \{([\s\S]*?)\}/.exec(css);
-  assert.ok(light, "the page defines no default palette");
-  const dark = /@media \(prefers-color-scheme: (?:dark|light)\) \{\s*:root \{([\s\S]*?)\}/.exec(css);
-  assert.ok(dark, "the page defines no second palette for the other scheme");
+/** Every :root palette in the stylesheet, keyed by where it was found. */
+function palettes(css: string): Array<[string, string]> {
+  const found: Array<[string, string]> = [];
+  const base = /(?:^|\n):root \{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(base, "the page defines no palette at all");
+  found.push(["the palette", base[1]]);
+  for (const m of css.matchAll(/@media \(prefers-color-scheme: (dark|light)\) \{\s*:root \{([\s\S]*?)\}/g)) {
+    found.push([`the ${m[1]} palette`, m[2]]);
+  }
+  return found;
+}
 
+// A colour token left out of one palette falls through to another palette's
+// value, and on a page with two palettes that is a contrast failure nobody
+// running one theme ever sees. This holds for however many palettes are there,
+// which has been one and has been two.
+test("every palette on the page defines every token the page uses", () => {
+  const css = pageCss(html);
   const defined = (block: string) =>
     new Set([...block.matchAll(/(--[a-z-]+)\s*:/g)].map((m) => m[1]));
-  const inLight = defined(light[1]);
-  const inDark = defined(dark[1]);
   const used = new Set([...css.matchAll(/var\((--[a-z-]+)\)/g)].map((m) => m[1]));
   assert.ok(used.size >= 6, "the page uses almost no colour tokens, so this test proves nothing");
 
-  for (const token of used) {
-    assert.ok(inLight.has(token), `${token} is used but the default palette never defines it`);
-    assert.ok(inDark.has(token), `${token} is used but the other scheme never defines it`);
+  const blocks = palettes(css);
+  for (const [where, block] of blocks) {
+    const has = defined(block);
+    for (const token of used) {
+      assert.ok(has.has(token), `${token} is used but ${where} never defines it`);
+    }
   }
-  assert.deepEqual([...inLight].sort(), [...inDark].sort(), "the two palettes define different tokens");
+  const names = blocks.map(([where, block]) => [where, [...defined(block)].sort()] as const);
+  for (const [where, tokens] of names.slice(1)) {
+    assert.deepEqual(tokens, names[0][1], `${where} defines different tokens from ${names[0][0]}`);
+  }
 
   // And no colour is written straight into a rule, where neither scheme can
   // move it.
@@ -1244,15 +1253,11 @@ function contrast(a: string, b: string): number {
 // reads fails here and not on somebody's screen.
 test("every text colour clears 4.5:1 on every background it can land on", () => {
   const css = pageCss(html);
-  const palettes: Array<[string, string]> = [
-    ["default", /:root \{([\s\S]*?)\}/.exec(css)![1]],
-    ["other scheme", /@media \(prefers-color-scheme: (?:dark|light)\) \{\s*:root \{([\s\S]*?)\}/.exec(css)![1]],
-  ];
   // --rule is a hairline and never text, so it is not held to a text bar.
   const textTokens = ["--fg", "--muted", "--link", "--accent", "--warn"];
   const grounds = ["--bg", "--code-bg", "--card-bg"];
   let checked = 0;
-  for (const [scheme, block] of palettes) {
+  for (const [scheme, block] of palettes(css)) {
     const colour = new Map(
       [...block.matchAll(/(--[a-z-]+)\s*:\s*(#[0-9a-fA-F]{6})\s*;/g)].map((m) => [m[1], m[2]]),
     );
@@ -1271,5 +1276,11 @@ test("every text colour clears 4.5:1 on every background it can land on", () => 
       }
     }
   }
-  assert.equal(checked, 30, `only ${checked} pairs were measured, so this test proves less than it reads`);
+  // Fifteen pairs per palette: five text colours on three backgrounds.
+  assert.equal(
+    checked,
+    15 * palettes(css).length,
+    `only ${checked} pairs were measured, so this test proves less than it reads`,
+  );
+  assert.ok(checked >= 15, "no palette was measured at all");
 });

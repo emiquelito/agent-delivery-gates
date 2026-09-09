@@ -580,16 +580,17 @@ function renderPage(rules, tally, examples, commands) {
 <meta name="twitter:description" content="${escapeHtml(DESCRIPTION)}">
 <meta name="twitter:image" content="${socialUrl}">
 <meta name="twitter:image:alt" content="${escapeHtml(socialAlt)}">
-<meta name="theme-color" content="#0b7261" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b7261">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230b7261'/%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' stroke='%239bf4da' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 <style>
 :root {
-  color-scheme: dark light;
-  /* Dark is the default here, on the green ground the Rust site carries.
-     Every colour below was measured against that ground: body text, muted
-     text, links and the tick all clear 4.5:1, and the two panel greens sit
-     far enough off it to read as panels. */
+  color-scheme: dark;
+  /* One palette, on the green ground the Rust site carries, and no second one
+     behind prefers-color-scheme. The page had a light scheme as the override,
+     so a reader whose machine is set to light never saw the green at all and
+     had no way to ask for it. Every colour below was measured against that
+     ground: body text, muted text, links and the tick all clear 4.5:1, and
+     the two panel greens sit far enough off it to read as panels. */
   --bg: #0b7261;
   --fg: #eefbf6;
   --muted: #cbebe0;
@@ -599,23 +600,6 @@ function renderPage(rules, tally, examples, commands) {
   --link: #c7f9e5;
   --accent: #9bf4da;
   --warn: #ffdcc4;
-}
-/* Every token above is redefined here, none of them dropped. A token defined
-   in one scheme only reads as the other scheme's value, which is the kind of
-   contrast failure nobody sees until someone else opens the page. Light is
-   the override now: a reader who has asked their system for light gets it. */
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #ffffff;
-    --fg: #1b1f24;
-    --muted: #5b6672;
-    --rule: #d9dee4;
-    --code-bg: #f4f6f8;
-    --card-bg: #fbfcfd;
-    --link: #137752;
-    --accent: #137752;
-    --warn: #b04f36;
-  }
 }
 * { box-sizing: border-box; }
 body {
