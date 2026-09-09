@@ -1084,7 +1084,11 @@ test("the page has a wide column and a fluid first heading", () => {
 
   // The cards are a grid, three across, and one across on a narrow screen.
   assert.match(css, /\.cards \{[^}]*display: grid/, "the cards are not a grid");
-  assert.match(css, /\.cards \{[^}]*grid-template-columns: repeat\(3, 1fr\)/, "the cards are not three across");
+  assert.match(
+    css,
+    /\.cards \{[^}]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/,
+    "the cards are not three across, or are back to a 1fr that their content can widen",
+  );
   assert.match(
     css,
     /@media \(max-width: \d+rem\) \{\s*\.cards \{[^}]*grid-template-columns: 1fr/,
@@ -1120,4 +1124,20 @@ test("both colour schemes define every token the page uses", () => {
   const outside = css.replace(/:root \{[\s\S]*?\}/g, "");
   const stray = [...outside.matchAll(/#[0-9a-fA-F]{3,8}\b/g)].map((m) => m[0]);
   assert.deepEqual(stray, [], `a colour is written into a rule instead of a token: ${stray.join(", ")}`);
+});
+
+// A grid item's automatic minimum size is its content, so `repeat(3, 1fr)`
+// lets one long unwrappable line of command output push its own track wider
+// than the track asked to be, and the whole row spills off the page. The
+// third card was cut in half on a real screen before this was pinned.
+test("the card row cannot be widened by the output lines inside it", () => {
+  const style = html.match(/<style>([\s\S]*?)<\/style>/)![1];
+  const grid = style.match(/\.cards\s*\{[^}]*\}/)![0];
+  assert.match(
+    grid,
+    /grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/,
+    "the card grid uses 1fr without minmax(0, ...), so its content can widen it",
+  );
+  const cardPre = style.match(/\.card pre\s*\{[^}]*\}/)![0];
+  assert.match(cardPre, /overflow-x:\s*auto/, "a long output line has nowhere to go but outward");
 });

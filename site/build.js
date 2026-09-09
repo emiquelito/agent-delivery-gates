@@ -633,7 +633,11 @@ ul.rules p { margin: 0 0 .4rem; }
    stays put with images off and with JavaScript off. */
 .cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* minmax(0, ...) and not 1fr: a grid item's automatic minimum size is
+     its content, so one long unwrappable line of output pushes its own
+     track wider than the track was asked to be and the whole row spills
+     past the page. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1.6rem;
   width: min(76rem, calc(100vw - 2.2rem));
   margin-left: calc(50% - min(38rem, calc(50vw - 1.1rem)));
@@ -650,7 +654,9 @@ ul.rules p { margin: 0 0 .4rem; }
 .card h3 { margin: .8rem 0 .6rem; font-size: 1.35rem; }
 .card p { margin: 0 0 1rem; }
 .card-cmd { font-size: .95rem; color: var(--muted); }
-.card pre { margin: auto 0 0; font-size: .82em; }
+.card pre { margin: auto 0 0; font-size: .82em; overflow-x: auto; }
+/* The output lines are real command output and are not reflowed, so a
+   narrow card scrolls its own line instead of stretching to hold it. */
 @media (max-width: 60rem) {
   .cards { grid-template-columns: 1fr; width: auto; margin-left: 0; }
 }
