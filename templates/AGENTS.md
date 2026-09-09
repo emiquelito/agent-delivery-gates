@@ -70,6 +70,27 @@ the text report directly above the signal count and in the JSON as
 was found: a clean run that skipped two files does not read the same as a
 clean run that skipped none.
 
+Every pattern is tested against the line with its strings, its template
+literals, its regular expressions, and any trailing comment blanked out,
+so a detector word written inside a fixture string or inside a test's own
+name is not read as a weakening. The line reported is always the original
+one and never the blanked copy: a person reading a signal has to see the
+real text.
+
+That blanking reads one line at a time, so a string opened on an earlier
+line is invisible to it. In
+
+```
+const xml = `
+  <skipped type="pytest.skip"/>
+`;
+```
+
+the middle line carries no quote of its own, so it reads as ordinary code
+and its detector words still fire. A diff line is all this check ever
+holds, so there is no whole file to read instead. For a test file where
+this is common, the fixtures marker above is the answer.
+
 ### mutate
 
 Breaks the code in a fixed set of known ways, one break at a time, runs
@@ -288,8 +309,15 @@ Exit codes: `0` sound; `1` at least one problem; `2` could not run.
 
 Runs the checks a project should pass before a piece of work is
 considered ready to hand off or to make public: no commit message
-carries AI attribution or a personal path, no tracked file carries one
+carries a personal path, no tracked file carries one
 either, and the prose scan passes.
+
+One check is off unless asked for: whether a commit message names the
+tool that helped write it. That is a decision for the person making the
+commit, so it runs only with `ADG_CHECK_AI_ATTRIBUTION=1` set, and it
+reports `OFF` otherwise. `OFF` is not `SKIP`: a check nobody asked for
+ran exactly as configured and leaves the verdict alone, while a check
+that was meant to run and could not makes the whole run incomplete.
 
 Exit codes: `0` everything passed; `1` at least one check failed, or was
 skipped, which counts as incomplete; `2` could not run as asked.

@@ -76,6 +76,13 @@ skip() {
   overall_skipped=1
 }
 
+# A check nobody asked for. Distinct from SKIP, which means a check that was
+# meant to run and could not, and which makes the whole run incomplete. This
+# one ran exactly as configured, so it leaves the verdict alone.
+off() {
+  echo "OFF   [$1] $2"
+}
+
 # --- check 1: no commit ever added a file under the notes directory --------
 
 check_notes_dir_history() {
@@ -105,6 +112,14 @@ check_notes_dir_history() {
 
 check_no_ai_attribution() {
   local id="2" name="no commit message carries AI attribution"
+  # Off unless asked for. Whether a commit message names the tool that helped
+  # write it is a decision for the person making the commit, and a check that
+  # fails somebody's history over it is in the way, not in service.
+  # Set ADG_CHECK_AI_ATTRIBUTION=1 to turn it on.
+  if [ -z "${ADG_CHECK_AI_ATTRIBUTION:-}" ]; then
+    off "$id" "$name: not requested. Set ADG_CHECK_AI_ATTRIBUTION=1 to run it."
+    return
+  fi
   # Deliberately narrow: a co-authored-by line naming an assistant vendor, the
   # phrase "generated with", or the robot emoji. Grepping for a bare vendor
   # word would also catch an ordinary commit message that names a file such

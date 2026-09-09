@@ -134,12 +134,15 @@ test("a commit that added a file under the notes directory fails, even once the 
 
 // --- check 2: AI attribution in commit messages -----------------------------
 
-test("a commit message with an assistant co-authored-by line fails", () => {
+test("a commit message with an assistant co-authored-by line fails when the check is asked for", () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "notes.md", "an ordinary change\n");
     commit(dir, "Update notes\n\nCo-Authored-By: Claude <noreply@anthropic.invalid>", false);
-    const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: NO_SUCH_NAME });
+    const r = runCheck(dir, {
+      ADG_FORBIDDEN_NAMES: NO_SUCH_NAME,
+      ADG_CHECK_AI_ATTRIBUTION: "1",
+    });
     assert.equal(r.status, 1);
     assert.match(r.stdout, /FAIL\s+\[2\]/);
   });
@@ -319,5 +322,35 @@ test("a tracked file holding a bare tilde path passes check 5", () => {
     commit(dir, "Document a config path");
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: NO_SUCH_NAME });
     assert.match(r.stdout, /PASS\s+\[5\]/, r.stdout);
+  });
+});
+
+// Whether a commit message names the tool that helped write it is a decision
+// for the person making the commit, so the check is off unless asked for. OFF
+// is not SKIP: a check nobody asked for leaves the verdict alone, while a
+// check that could not run makes the whole run incomplete.
+test("the attribution check is off unless asked for, and does not make the run incomplete", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    writeFile(dir, "notes.md", "ordinary content\n");
+    commit(dir, "Add notes\n\nCo-Authored-By: Some Assistant <noreply@example.com>");
+    const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: NO_SUCH_NAME });
+    assert.match(r.stdout, /OFF {3}\[2\]/, r.stdout);
+    assert.doesNotMatch(r.stdout, /FAIL {2}\[2\]/);
+    assert.doesNotMatch(r.stdout, /SKIP {2}\[2\]/);
+  });
+});
+
+test("the attribution check runs, and fails, when asked for", () => {
+  withTempRepo((dir) => {
+    initRepo(dir);
+    writeFile(dir, "notes.md", "ordinary content\n");
+    commit(dir, "Add notes\n\nCo-Authored-By: Claude <noreply@example.com>");
+    const r = runCheck(dir, {
+      ADG_FORBIDDEN_NAMES: NO_SUCH_NAME,
+      ADG_CHECK_AI_ATTRIBUTION: "1",
+    });
+    assert.match(r.stdout, /FAIL {2}\[2\]/, r.stdout);
+    assert.equal(r.status, 1);
   });
 });
