@@ -35,6 +35,7 @@
 
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
+import { spawnCommand } from "../src/spawn-command.ts";
 import {
   copyFileSync,
   existsSync,
@@ -89,7 +90,11 @@ the base source.
                   the format is detected from the output, and output in
                   neither format is exit 2, never "no tests found"
   --timeout SECONDS  kill any single run after this long. A run that timed
-                  out is unreadable, not empty
+                  out is unreadable, not empty. The kill takes the run's
+                  whole process tree, not just the direct child, so a
+                  worker process it started cannot outlive it. On Windows
+                  that kill is taskkill /t, which walks the same tree by
+                  a different name
   --no-rerun      do not re-run to check whether a disagreement settles
   --help          print this message and exit 0
 
@@ -386,35 +391,31 @@ interface RunOutput {
   failure: string | null;
 }
 
-function runCommand(command: string, cwd: string, timeoutMs?: number): RunOutput {
-  const result = spawnSync(command, {
+/** Runs the command in its own process group (see src/spawn-command.ts)
+ * and, at the timeout or the output cap below, kills that whole group,
+ * not just the direct child: a runner that starts worker processes of
+ * its own used to leave them running past the timeout, orphaned once the
+ * direct child alone was killed. */
+async function runCommand(command: string, cwd: string, timeoutMs?: number): Promise<RunOutput> {
+  const result = await spawnCommand(command, {
     cwd,
-    shell: true,
     env: cleanEnv(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-    maxBuffer: 64 * 1024 * 1024,
+    timeoutMs,
+    maxBufferBytes: 64 * 1024 * 1024,
   });
-  const error = result.error as NodeJS.ErrnoException | undefined;
-  const timedOut =
-    timeoutMs !== undefined &&
-    (error?.code === "ETIMEDOUT" || (result.status === null && result.signal !== null));
   let failure: string | null = null;
-  if (!timedOut && error !== undefined) {
-    failure =
-      error.code === "ENOBUFS"
-        ? "the run printed more output than this tool will hold, so its results were cut off part way through"
-        : `the run could not be completed (${error.code ?? error.message})`;
-  } else if (!timedOut && result.status === null && result.signal !== null) {
-    failure = `the run was killed by ${result.signal} before it finished printing`;
+  if (result.outputOverflowed) {
+    failure = "the run printed more output than this tool will hold, so its results were cut off part way through";
+  } else if (result.spawnError !== undefined) {
+    failure = `the run could not be completed (${result.spawnError})`;
+  } else if (!result.timedOut && result.killedBySignal !== null) {
+    failure = `the run was killed by ${result.killedBySignal} before it finished printing`;
   }
   return {
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
+    stdout: result.stdout,
+    stderr: result.stderr,
     status: result.status,
-    timedOut,
+    timedOut: result.timedOut,
     failure,
   };
 }
@@ -432,13 +433,13 @@ interface RunCensus {
  * together, which is what makes a runner that prints everything to stderr
  * work at all.
  */
-function runAndParse(
+async function runAndParse(
   command: string,
   cwd: string,
   args: ParsedArgs,
   timeoutMs?: number,
-): RunCensus | { error: string } {
-  const run = runCommand(command, cwd, timeoutMs);
+): Promise<RunCensus | { error: string }> {
+  const run = await runCommand(command, cwd, timeoutMs);
   if (run.timedOut) {
     return { error: `the run in ${cwd} was killed at the timeout, so its results were never printed` };
   }
@@ -773,13 +774,13 @@ async function main(): Promise<void> {
     // while a suite was running is handled while the worktree is still
     // this run's responsibility. Everything else here is synchronous.
     await new Promise((tick) => setImmediate(tick));
-    const headRun = runAndParse(command, repoRoot, args, timeoutMs);
+    const headRun = await runAndParse(command, repoRoot, args, timeoutMs);
     if ("error" in headRun) {
       fail(`the run at HEAD could not be read: ${headRun.error}`);
     }
 
     await new Promise((tick) => setImmediate(tick));
-    const baseRun = runAndParse(command, worktree.dir, args, timeoutMs);
+    const baseRun = await runAndParse(command, worktree.dir, args, timeoutMs);
     if ("error" in baseRun) {
       fail(
         `the run at the base commit could not be read: ${baseRun.error}. ` +
@@ -813,9 +814,9 @@ async function main(): Promise<void> {
 
     if (args.rerun && censusResult.findings.length > 0 && baseTests !== null) {
       await new Promise((tick) => setImmediate(tick));
-      const headAgain = runAndParse(command, repoRoot, args, timeoutMs);
+      const headAgain = await runAndParse(command, repoRoot, args, timeoutMs);
       await new Promise((tick) => setImmediate(tick));
-      const baseAgain = runAndParse(command, worktree.dir, args, timeoutMs);
+      const baseAgain = await runAndParse(command, worktree.dir, args, timeoutMs);
       runs += 2;
       if ("error" in headAgain || "error" in baseAgain) {
         notes.push(
@@ -850,7 +851,7 @@ async function main(): Promise<void> {
     if (testFiles.length > 0) {
       copyTestFilesInto(repoRoot, worktree.dir, testFiles);
       await new Promise((tick) => setImmediate(tick));
-      const redRun = runAndParse(command, worktree.dir, args, timeoutMs);
+      const redRun = await runAndParse(command, worktree.dir, args, timeoutMs);
       runs += 1;
       if ("error" in redRun) {
         notes.push(
@@ -869,7 +870,7 @@ async function main(): Promise<void> {
       result.unmeasured.filter((item) => RED_UNMEASURED_KINDS.has(item.kind)).length;
     if (args.rerun && redSuspects > 0 && redTests !== null) {
       await new Promise((tick) => setImmediate(tick));
-      const redAgain = runAndParse(command, worktree.dir, args, timeoutMs);
+      const redAgain = await runAndParse(command, worktree.dir, args, timeoutMs);
       runs += 1;
       if ("error" in redAgain) {
         notes.push(

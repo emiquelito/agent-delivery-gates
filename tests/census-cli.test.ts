@@ -13,7 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -703,4 +703,99 @@ test("an unknown argument is exit 2", () => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /unknown argument '--nope'/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- no descendant survives a timed-out run --------------------------------------
+
+// spawnSync(command, { shell: true, timeout, killSignal: "SIGKILL" }) killed
+// only the shell, never a worker process the command itself started. This
+// proves the fix directly: a command whose worker shares its own process
+// group and never returns. The pid file directory is named with
+// "cli-test" so leftoverWorktrees() above, which watches for a real `adg
+// census` worktree left behind, does not mistake it for one.
+
+const LEAK_RUN_MJS = `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const pidDir = process.argv[2];
+const here = dirname(fileURLToPath(import.meta.url));
+const worker = spawn(process.execPath, [join(here, "leak-worker.mjs")], { stdio: "ignore" });
+writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+worker.on("exit", (code) => process.exit(code ?? 0));
+`;
+
+const LEAK_WORKER_MJS = `process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+
+function recordedPids(pidDir: string): number[] {
+  return readdirSync(pidDir)
+    .filter((name) => name.endsWith(".pid"))
+    .map((name) => Number(readFileSync(join(pidDir, name), "utf8")));
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Polls for up to `budgetMs` for every pid to be gone, then force-kills
+ * anything still alive so this test never leaves a process behind, red
+ * run or green. Returns the pids still alive when the budget ran out,
+ * which is empty exactly when the fix works. */
+function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
+  const deadline = Date.now() + budgetMs;
+  let stillAlive = pids.filter(isAlive);
+  while (stillAlive.length > 0 && Date.now() < deadline) {
+    spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { timeout: 200 });
+    stillAlive = pids.filter(isAlive);
+  }
+  for (const pid of stillAlive) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  return stillAlive;
+}
+
+test("a timed-out run leaves no descendant running", () => {
+  const dir = makeRepo({
+    "leak-run.mjs": LEAK_RUN_MJS,
+    "leak-worker.mjs": LEAK_WORKER_MJS,
+    "README.md": "first\n",
+  });
+  const base = runGit(dir, ["rev-parse", "HEAD"]).trim();
+  writeFileSync(join(dir, "README.md"), "second\n");
+  runGit(dir, ["add", "."]);
+  runGit(dir, ["commit", "-q", "-m", "second"]);
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-orphan-pids-"));
+  try {
+    const result = runCli(dir, [
+      "--base",
+      base,
+      "--command",
+      `node leak-run.mjs ${pidDir}`,
+      "--timeout",
+      "1",
+      "--no-rerun",
+    ]);
+    const pids = recordedPids(pidDir);
+    assert.ok(
+      pids.length > 0,
+      `expected the run to spawn a worker; census printed: ${result.stdout}\n${result.stderr}`,
+    );
+    const survivors = waitForNoneAlive(pids, 5_000);
+    assert.deepEqual(survivors, [], "a worker process outlived the timed-out run");
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

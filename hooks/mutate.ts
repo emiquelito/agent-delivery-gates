@@ -36,6 +36,7 @@ import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { join, relative } from "node:path";
+import { spawnCommand } from "../src/spawn-command.ts";
 import {
   exitCodeFor,
   formatReportJson,
@@ -78,9 +79,11 @@ test read that line closely enough to fail.
                   report says how many were planned and how many attempted,
                   and says plainly when the two differ
   --timeout SECONDS  per-mutation timeout (default: three times the baseline
-                  run plus ten seconds). The command is killed at the
-                  timeout, but a process the command itself started can
-                  outlive it, so a timed-out mutation is worth a look.
+                  run plus ten seconds). At the timeout, the command's
+                  whole process tree is killed, not just the command
+                  itself, so a worker process it started cannot outlive
+                  it. On Windows that kill is taskkill /t, which walks the
+                  same tree by a different name.
   --format FORMAT "text" (default) or "json"
   --help          print this message and exit 0
 
@@ -391,23 +394,16 @@ function resolveCommand(args: ParsedArgs, repoRoot: string): string {
  * optional timeout in milliseconds. A timeout is reported as its own
  * outcome, never folded into a non-zero exit: a mutation that hung was
  * never judged, and calling that a kill would credit the suite with a
- * catch it did not make. */
-function runCommand(command: string, repoRoot: string, timeoutMs?: number): CommandRun {
-  const started = Date.now();
-  const result = spawnSync(command, {
-    cwd: repoRoot,
-    shell: true,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-  });
-  const durationMs = Date.now() - started;
-  const timedOut =
-    timeoutMs !== undefined &&
-    ((result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
-      (result.status === null && result.signal !== null));
-  return { status: result.status, timedOut, durationMs };
+ * catch it did not make.
+ *
+ * The command runs as the leader of its own process group (see
+ * src/spawn-command.ts) and, at the timeout, the whole group is killed,
+ * not just the shell: a test runner's worker process shares the shell's
+ * group, and a signal to the shell alone never reaches it, which is how a
+ * timed-out mutation used to leave orphaned processes running. */
+async function runCommand(command: string, repoRoot: string, timeoutMs?: number): Promise<CommandRun> {
+  const result = await spawnCommand(command, { cwd: repoRoot, timeoutMs });
+  return { status: result.status, timedOut: result.timedOut, durationMs: result.durationMs };
 }
 
 async function main(): Promise<void> {
@@ -467,7 +463,7 @@ async function main(): Promise<void> {
 
   // The baseline. A suite that is already red cannot tell anyone what a
   // mutation did, so this is a hard stop, not a warning.
-  const baseline = runCommand(command, repoRoot);
+  const baseline = await runCommand(command, repoRoot);
   if (baseline.status !== 0) {
     fail(
       `the baseline run of '${command}' failed (exit ${baseline.status ?? "killed"}) before anything was mutated; ` +
@@ -518,7 +514,7 @@ async function main(): Promise<void> {
       const original = originals.get(mutation.file);
       if (original === undefined) fail(`internal: no original held for '${mutation.file}'`);
       results.push(
-        runOneMutation(mutation, original, join(repoRoot, mutation.file), {
+        await runOneMutation(mutation, original, join(repoRoot, mutation.file), {
           writeFile: (path, text) => writeFileSync(path, text),
           runCommand: () => runCommand(command, repoRoot, timeoutMs),
         }),

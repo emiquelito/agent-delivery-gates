@@ -7,6 +7,12 @@
 // test drives the tool through paths where nothing throws, and the CLI has
 // an outer restore that hides the difference at the end of a run. So the
 // throwing path is tested here, at the seam, against a real file on disk.
+//
+// runCommand is async: running the real command safely means spawning it
+// detached and racing it against a timer by hand (src/spawn-command.ts),
+// which spawnSync cannot do. runOneMutation is async to match, so a throw
+// from a fake runCommand here arrives as a rejected promise, not a
+// synchronous throw.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,15 +24,13 @@ import { runOneMutation, type CommandRun } from "../src/mutate-runner.ts";
 
 const ORIGINAL = "export function f(a, b) {\n  return a > b;\n}\n";
 
-function withFile(fn: (path: string) => void): void {
+function withFile(fn: (path: string) => Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "adg-mutate-runner-test-"));
   const path = join(dir, "f.mjs");
   writeFileSync(path, ORIGINAL);
-  try {
-    fn(path);
-  } finally {
+  return fn(path).finally(() => {
     rmSync(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 function firstMutation() {
@@ -35,16 +39,16 @@ function firstMutation() {
   return mutation;
 }
 
-function ok(status: number): CommandRun {
-  return { status, timedOut: false, durationMs: 5 };
+function ok(status: number): Promise<CommandRun> {
+  return Promise.resolve({ status, timedOut: false, durationMs: 5 });
 }
 
 const writeToDisk = (path: string, text: string): void => writeFileSync(path, text);
 
-test("the file is restored when the command runner throws", () => {
-  withFile((path) => {
+test("the file is restored when the command runner throws", async () => {
+  await withFile(async (path) => {
     let mutatedOnDisk = "";
-    assert.throws(
+    await assert.rejects(
       () =>
         runOneMutation(firstMutation(), ORIGINAL, path, {
           writeFile: writeToDisk,
@@ -62,10 +66,10 @@ test("the file is restored when the command runner throws", () => {
   });
 });
 
-test("the restore is attempted even when writing the break throws", () => {
-  withFile((path) => {
+test("the restore is attempted even when writing the break throws", async () => {
+  await withFile(async (path) => {
     const written: string[] = [];
-    assert.throws(
+    await assert.rejects(
       () =>
         runOneMutation(firstMutation(), ORIGINAL, path, {
           writeFile: (target, text) => {
@@ -83,13 +87,13 @@ test("the restore is attempted even when writing the break throws", () => {
   });
 });
 
-test("the file is restored after an ordinary run, whatever the command said", () => {
+test("the file is restored after an ordinary run, whatever the command said", async () => {
   for (const [status, verdict] of [
     [0, "survived"],
     [1, "killed"],
   ] as const) {
-    withFile((path) => {
-      const result = runOneMutation(firstMutation(), ORIGINAL, path, {
+    await withFile(async (path) => {
+      const result = await runOneMutation(firstMutation(), ORIGINAL, path, {
         writeFile: writeToDisk,
         runCommand: () => ok(status),
       });
@@ -100,11 +104,11 @@ test("the file is restored after an ordinary run, whatever the command said", ()
   }
 });
 
-test("a timed-out command is a timeout with no exit code, and the file still goes back", () => {
-  withFile((path) => {
-    const result = runOneMutation(firstMutation(), ORIGINAL, path, {
+test("a timed-out command is a timeout with no exit code, and the file still goes back", async () => {
+  await withFile(async (path) => {
+    const result = await runOneMutation(firstMutation(), ORIGINAL, path, {
       writeFile: writeToDisk,
-      runCommand: () => ({ status: null, timedOut: true, durationMs: 3000 }),
+      runCommand: () => Promise.resolve({ status: null, timedOut: true, durationMs: 3000 }),
     });
     assert.equal(result.verdict, "timeout");
     assert.equal(result.exitCode, null);
@@ -112,14 +116,16 @@ test("a timed-out command is a timeout with no exit code, and the file still goe
   });
 });
 
-test("a mutation that changes nothing is skipped without writing at all", () => {
-  withFile((path) => {
+test("a mutation that changes nothing is skipped without writing at all", async () => {
+  await withFile(async (path) => {
     const mutation = firstMutation();
     // A mutation whose after text is its before text cannot break anything,
     // so nothing is written and no command runs.
-    const result = runOneMutation({ ...mutation, after: mutation.before }, ORIGINAL, path, {
+    const result = await runOneMutation({ ...mutation, after: mutation.before }, ORIGINAL, path, {
       writeFile: () => assert.fail("nothing should be written for a skipped mutation"),
-      runCommand: () => assert.fail("no command should run for a skipped mutation"),
+      runCommand: () => {
+        assert.fail("no command should run for a skipped mutation");
+      },
     });
     assert.equal(result.verdict, "skipped");
     assert.equal(readFileSync(path, "utf8"), ORIGINAL);

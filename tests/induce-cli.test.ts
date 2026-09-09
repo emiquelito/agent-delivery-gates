@@ -12,10 +12,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import process from "node:process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "induce.ts");
@@ -678,11 +679,12 @@ test("--help says the environment is inherited, not cleaned", () => {
   });
 });
 
-test("--help says a process the command started can outlive the timeout kill", () => {
+test("--help says the whole process tree is killed at the timeout, not just the command", () => {
   const dir = makeProject({});
   withProject(dir, () => {
     const result = runCli(dir, ["--help"]);
-    assert.match(result.stdout, /process the command itself started can\s+outlive it/);
+    assert.match(result.stdout, /whole process tree\s+is killed/);
+    assert.match(result.stdout, /worker\s+process it started cannot outlive it/);
   });
 });
 
@@ -711,5 +713,98 @@ test("a command printing more than the read buffer holds is an overflow, not a t
     assert.match(result.stdout, /printed more output than this tool will hold/);
     assert.doesNotMatch(result.stdout, /hit the timeout/);
     assert.doesNotMatch(result.stdout, /Verdict: proven/);
+  });
+});
+
+// --- no descendant survives a timed-out step ---------------------------------
+
+// The same production incident this file's induce spec is not otherwise
+// about: spawnSync(command, { shell: true, timeout, killSignal: "SIGKILL" })
+// killed only the shell, never a worker process the command itself
+// started. This proves the fix directly: a step whose command spawns a
+// worker sharing its own process group, and the worker ignores SIGTERM
+// and never returns.
+
+const LEAK_RUN_MJS = `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const pidDir = process.argv[2];
+const here = dirname(fileURLToPath(import.meta.url));
+const worker = spawn(process.execPath, [join(here, "leak-worker.mjs")], { stdio: "ignore" });
+writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+worker.on("exit", (code) => process.exit(code ?? 0));
+`;
+
+const LEAK_WORKER_MJS = `process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+
+function recordedPids(pidDir: string): number[] {
+  return readdirSync(pidDir)
+    .filter((name) => name.endsWith(".pid"))
+    .map((name) => Number(readFileSync(join(pidDir, name), "utf8")));
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Polls for up to `budgetMs` for every pid to be gone, then force-kills
+ * anything still alive so this test never leaves a process behind, red
+ * run or green. Returns the pids still alive when the budget ran out,
+ * which is empty exactly when the fix works. */
+function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
+  const deadline = Date.now() + budgetMs;
+  let stillAlive = pids.filter(isAlive);
+  while (stillAlive.length > 0 && Date.now() < deadline) {
+    spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { timeout: 200 });
+    stillAlive = pids.filter(isAlive);
+  }
+  for (const pid of stillAlive) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  return stillAlive;
+}
+
+test("a timed-out step leaves no descendant running", () => {
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-induce-orphan-pids-"));
+  const dir = makeProject(
+    {
+      "leak.json": {
+        claim: "test fixture: a step whose command spawns a worker that never returns",
+        inject: `node leak-run.mjs ${pidDir}`,
+        neutralize: "node -e \"process.exit(1)\"",
+        timeout: 1,
+      },
+    },
+    {
+      "leak-run.mjs": LEAK_RUN_MJS,
+      "leak-worker.mjs": LEAK_WORKER_MJS,
+    },
+  );
+  withProject(dir, () => {
+    try {
+      const result = runCli(dir, []);
+      const pids = recordedPids(pidDir);
+      assert.ok(
+        pids.length > 0,
+        `expected the step to spawn a worker; induce printed: ${result.stdout}\n${result.stderr}`,
+      );
+      const survivors = waitForNoneAlive(pids, 5_000);
+      assert.deepEqual(survivors, [], "a worker process outlived the timed-out step");
+    } finally {
+      rmSync(pidDir, { recursive: true, force: true });
+    }
   });
 });

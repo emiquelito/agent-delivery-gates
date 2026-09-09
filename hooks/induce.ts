@@ -24,9 +24,9 @@
 // one declared check measures one declared handling, and nothing more.
 
 import process from "node:process";
-import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { spawnCommand } from "../src/spawn-command.ts";
 import {
   exitCodeFor,
   formatReportJson,
@@ -67,9 +67,11 @@ handling at all: it would pass if the feature produced nothing.
   --timeout SECONDS  per-command timeout (default: ${DEFAULT_TIMEOUT_SECONDS}). A spec's own
                   "timeout" field overrides it. A command that hits the
                   timeout is reported as timed out and is never counted as
-                  a fail. The command is killed at the timeout, but a
-                  process the command itself started can outlive it, so a
-                  timed-out spec is worth a look
+                  a fail. At the timeout, the command's whole process tree
+                  is killed, not just the command itself, so a worker
+                  process it started cannot outlive it. On Windows that
+                  kill is taskkill /t, which walks the same tree by a
+                  different name
   --format FORMAT "text" (default) or "json"
   --help          print this message and exit 0
 
@@ -285,50 +287,44 @@ function resolveSpecPaths(args: ParsedArgs): { paths: string[]; source: string; 
  * non-zero exit: a command that was killed partway was never judged, and
  * calling that a fail would credit a control nothing watched.
  *
+ * The command runs as the leader of its own process group (see
+ * src/spawn-command.ts) and, at the timeout, the whole group is killed,
+ * not just the direct child: a command that starts a worker process of
+ * its own used to leave that worker running past the timeout, orphaned
+ * once the direct child was killed alone.
+ *
  * The three ways of being killed are told apart, because each needs a
- * different sentence. Node's read buffer is set to 64 MB, the same size
- * census uses, so that a verbose suite is not killed for printing; past
- * that it arrives as ENOBUFS, with the output up to the overflow already
- * in hand and the rest never printed. A signal that is not the timeout
- * kill, a segfault or an out-of-memory kill, arrives as a null status
- * with a signal set. Both used to be reported as timeouts, which told the
- * reader to raise a timeout that had nothing to do with it. */
-function runCommand(
+ * different sentence. Node's read buffer is capped at 64 MB, the same
+ * size census uses, so that a verbose suite is not killed for printing;
+ * past that the whole tree is killed and the output kept up to that
+ * point is reported, not the rest that was never printed. A signal that
+ * is not the timeout kill or the output cap, a segfault or an
+ * out-of-memory kill, arrives as a null status with a signal set. All
+ * three used to be told apart from a single spawnSync call; they still
+ * are, just from spawnCommand's own accounting instead of spawnSync's
+ * error codes. */
+async function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
-): CommandRun & { stdout: string; stderr: string; failure?: string } {
-  const started = Date.now();
-  const result = spawnSync(command, {
-    cwd,
-    shell: true,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: timeoutMs,
-    killSignal: "SIGKILL",
-    maxBuffer: MAX_OUTPUT_BYTES,
-  });
-  const durationMs = Date.now() - started;
-  const error = result.error as NodeJS.ErrnoException | undefined;
-  const timedOut = error?.code === "ETIMEDOUT";
-  const outputOverflowed = !timedOut && error?.code === "ENOBUFS";
-  const killedBySignal = !timedOut && !outputOverflowed && result.status === null ? result.signal : null;
+): Promise<CommandRun & { stdout: string; stderr: string; failure?: string }> {
+  const result = await spawnCommand(command, { cwd, timeoutMs, maxBufferBytes: MAX_OUTPUT_BYTES });
   let failure: string | undefined;
-  if (outputOverflowed) {
+  if (result.outputOverflowed) {
     failure = `printed more than ${Math.round(MAX_OUTPUT_BYTES / (1024 * 1024))} MB and was killed for it`;
-  } else if (killedBySignal !== null && killedBySignal !== undefined) {
-    failure = `killed by ${killedBySignal} before it finished`;
-  } else if (error !== undefined) {
-    failure = `could not be run (${error.code ?? error.message})`;
+  } else if (result.killedBySignal !== null) {
+    failure = `killed by ${result.killedBySignal} before it finished`;
+  } else if (result.spawnError !== undefined) {
+    failure = `could not be run (${result.spawnError})`;
   }
   const run: CommandRun & { stdout: string; stderr: string; failure?: string } = {
     status: result.status,
-    timedOut,
-    durationMs,
-    outputOverflowed,
-    killedBySignal,
-    stdout: keepTail(result.stdout ?? ""),
-    stderr: keepTail(result.stderr ?? ""),
+    timedOut: result.timedOut,
+    durationMs: result.durationMs,
+    outputOverflowed: result.outputOverflowed,
+    killedBySignal: result.killedBySignal,
+    stdout: keepTail(result.stdout),
+    stderr: keepTail(result.stderr),
   };
   if (failure !== undefined) run.failure = failure;
   return run;
@@ -338,7 +334,7 @@ function runCommand(
  * inject, then neutralize. A failing baseline stops the rest: a suite that
  * is already red cannot say what an injection did, so the later steps are
  * recorded as never run instead of being scored. */
-function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: number): SpecRun {
+async function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: number): Promise<SpecRun> {
   const cwd = resolve(process.cwd(), spec.cwd ?? ".");
   let cwdOk = false;
   try {
@@ -361,7 +357,7 @@ function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: number):
       steps.push({ step, command, outcome: "not-run", exitCode: null, durationMs: 0, stdout: "", stderr: "" });
       continue;
     }
-    const run = runCommand(command, cwd, timeoutMs);
+    const run = await runCommand(command, cwd, timeoutMs);
     const outcome = outcomeFor(run);
     const result: StepResult = {
       step,
@@ -379,7 +375,7 @@ function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: number):
   return runFromSteps(file, spec.claim, steps);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(USAGE);
@@ -401,7 +397,7 @@ function main(): void {
       runs.push(unreadableSpecRun(path, parsed.problems));
       continue;
     }
-    runs.push(runSpec(path, parsed.spec, args.timeoutSeconds));
+    runs.push(await runSpec(path, parsed.spec, args.timeoutSeconds));
   }
 
   const report = { source, timeoutMs: Math.round(args.timeoutSeconds * 1000), runs, skipped };
@@ -409,4 +405,7 @@ function main(): void {
   process.exit(exitCodeFor(runs));
 }
 
-main();
+main().catch((err: unknown) => {
+  process.stderr.write(`induce: ${(err as Error).message}\n`);
+  process.exit(2);
+});

@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -560,5 +560,113 @@ test("outside a git repository: exit 2", () => {
     });
     assert.equal(result.status, 2);
     assert.match(result.stderr, /rev-parse/);
+  });
+});
+
+// --- no descendant survives a timed-out mutation -----------------------------
+
+// Sixty-four orphaned `node tests/drain.test.mjs` processes were once found
+// running on this machine, the oldest ten hours old, holding 11 GB of RAM.
+// spawnSync(command, { shell: true, timeout, killSignal: "SIGKILL" }) kills
+// only the shell; a worker process the command itself starts is never
+// signalled and is reparented to init. This proves the fix: a command that
+// spawns a worker sharing its own process group, where the worker only
+// spins forever once the mutation under test flips a loop's `<` to `<=`.
+
+const LOOP_MJS = `export function shouldContinue(seen) {
+  return seen < 1;
+}
+`;
+
+// A launcher whose worker is a normal (non-detached) child, so it shares
+// the launcher's process group exactly the way a test runner's worker
+// process shares its runner's group.
+const RUN_MJS = `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const pidDir = process.argv[2];
+const here = dirname(fileURLToPath(import.meta.url));
+const worker = spawn(process.execPath, [join(here, "worker.mjs")], { stdio: "ignore" });
+writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+worker.on("exit", (code) => process.exit(code ?? 0));
+`;
+
+// Two iterations and done, unless the mutated \`<=\` turns this into a spin
+// that never returns. Ignoring SIGTERM matches the production report: "a
+// Node process stuck in a synchronous infinite loop never reaches its
+// event loop and so never runs its SIGTERM handler."
+const WORKER_MJS = `import { shouldContinue } from "./src/loop.mjs";
+process.on("SIGTERM", () => {});
+let seen = 0;
+while (shouldContinue(seen)) {
+  seen = 1;
+}
+`;
+
+function recordedPids(pidDir: string): number[] {
+  return readdirSync(pidDir)
+    .filter((name) => name.endsWith(".pid"))
+    .map((name) => Number(readFileSync(join(pidDir, name), "utf8")));
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Polls for up to `budgetMs` for every pid to be gone, then force-kills
+ * anything still alive so this test never leaves a process behind, red
+ * run or green. Returns the pids still alive when the budget ran out,
+ * which is empty exactly when the fix works. */
+function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
+  const deadline = Date.now() + budgetMs;
+  let stillAlive = pids.filter(isAlive);
+  while (stillAlive.length > 0 && Date.now() < deadline) {
+    spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { timeout: 200 });
+    stillAlive = pids.filter(isAlive);
+  }
+  for (const pid of stillAlive) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  return stillAlive;
+}
+
+test("a timed-out mutation leaves no descendant running", () => {
+  const dir = makeRepo({
+    "src/loop.mjs": LOOP_MJS,
+    "run.mjs": RUN_MJS,
+    "worker.mjs": WORKER_MJS,
+  });
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-mutate-orphan-pids-"));
+  withRepo(dir, () => {
+    try {
+      const result = runCli(dir, [
+        "--paths",
+        "src/loop.mjs",
+        "--command",
+        `node run.mjs ${pidDir}`,
+        "--timeout",
+        "1",
+      ]);
+      const pids = recordedPids(pidDir);
+      assert.ok(
+        pids.length > 0,
+        `expected the mutation to spawn a worker; mutate printed: ${result.stdout}\n${result.stderr}`,
+      );
+      const survivors = waitForNoneAlive(pids, 5_000);
+      assert.deepEqual(survivors, [], "a worker process outlived the timed-out mutation");
+    } finally {
+      rmSync(pidDir, { recursive: true, force: true });
+    }
   });
 });

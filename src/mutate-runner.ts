@@ -20,10 +20,14 @@ export interface CommandRun {
   durationMs: number;
 }
 
-/** The two effects one mutation step has on the world outside this module. */
+/** The two effects one mutation step has on the world outside this module.
+ * runCommand is async because running the command safely means spawning it
+ * detached and racing it against a timer by hand (see
+ * src/spawn-command.ts): spawnSync cannot create a process group before
+ * its timeout fires, and cannot be told to kill one after. */
 export interface MutationIo {
   writeFile(absolutePath: string, text: string): void;
-  runCommand(): CommandRun;
+  runCommand(): Promise<CommandRun>;
 }
 
 /**
@@ -33,19 +37,19 @@ export interface MutationIo {
  * leave a caller's source file broken on disk, and the caller may not be
  * in a position to write it back.
  */
-export function runOneMutation(
+export async function runOneMutation(
   mutation: Mutation,
   originalText: string,
   absolutePath: string,
   io: MutationIo,
-): MutationResult {
+): Promise<MutationResult> {
   const mutated = applyMutation(originalText, mutation);
   if (mutated === originalText) {
     return { mutation, verdict: "skipped", durationMs: 0, exitCode: null };
   }
   try {
     io.writeFile(absolutePath, mutated);
-    const run = io.runCommand();
+    const run = await io.runCommand();
     const verdict: Verdict = run.timedOut ? "timeout" : run.status === 0 ? "survived" : "killed";
     return { mutation, verdict, durationMs: run.durationMs, exitCode: run.timedOut ? null : run.status };
   } finally {
