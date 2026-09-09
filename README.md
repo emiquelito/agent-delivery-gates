@@ -32,35 +32,43 @@ for an agent that would rather ask than be stopped.
 
 Seven worked examples, each run for real with the exact output it produced:
 
-- **[A feature that shipped with nothing holding it](docs/examples/06-a-feature-with-nothing-holding-it.md)**:
+- **[A feature that shipped with nothing holding it](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/06-a-feature-with-nothing-holding-it.md)**:
   the cart above. One assertion in eighteen added lines was swapped for one
   that is true whatever the code does, and the three new tests check a flag
   and a type but never the money. Breaking the total three different ways
   leaves all seven tests green.
-- **[Tests that stopped running](docs/examples/01-tests-that-stopped-running.md)**:
+- **[Tests that stopped running](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/01-tests-that-stopped-running.md)**:
   a test file renamed so the runner stops collecting it. Git reports zero
   lines changed against that file and git is right, the suite goes green with
   nothing left to fail, and the only trace is a test count nobody reads on a
   passing build.
-- **[A test edited to match a bug](docs/examples/02-test-edited-to-match-a-bug.md)**:
+- **[A test edited to match a bug](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/02-test-edited-to-match-a-bug.md)**:
   a bulk discount that was never built, and a failing test made to pass by
   changing what it expects from 108 to 120, so the assertion agrees with the
   missing feature.
-- **[A report claiming more than it proved](docs/examples/03-report-claiming-more-than-it-proved.md)**:
+- **[A report claiming more than it proved](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/03-report-claiming-more-than-it-proved.md)**:
   "failure handling verified", with nothing behind it anyone can open. A
   robustness claim has to point at a commit, a path, or a command; pointing
   at a conversation fails.
-- **[An edit blocked mid-review](docs/examples/04-edit-blocked-mid-review.md)**:
+- **[An edit blocked mid-review](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/04-edit-blocked-mid-review.md)**:
   the clean-tree hook stopping a review phase from writing over work that was
   never committed, which is how this project lost three fixes once.
-- **[Adopting the gates on a repository that already exists](docs/examples/05-adopting-on-an-existing-repository.md)**:
+- **[Adopting the gates on a repository that already exists](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/05-adopting-on-an-existing-repository.md)**:
   `init` on a project with its own history, a baseline recording what is
   already there, then a clean commit and a caught one.
-- **[A retry that never retries](docs/examples/07-a-retry-that-never-retries.md)**:
+- **[A retry that never retries](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/07-a-retry-that-never-retries.md)**:
   a retry decorator with three attempts, backoff, and a timeout, approved by
   everyone, that makes one call and returns the 503 body to the caller as
   though it were a quote. An induced 503 is the only thing that tells the
   broken version from the fixed one.
+
+Three commands go looking for this on purpose instead of waiting to be
+told. `adg mutate` breaks your code in known ways and reports the breaks no
+test noticed. `adg census` runs the suite at the base commit as well as at
+HEAD, and runs the tests a change added against the code from before it,
+because a test that passes without the fix never showed anything. `adg
+induce` runs a failure you declare, once with the handling in place and once
+with it taken away, and fails the claim when the check passes both times.
 
 ## 🚀 Quickstart
 
@@ -101,7 +109,7 @@ on a new project, which has nothing to record; on its own, without
 | Codex | `.codex/hooks.json`, written by `init` |
 | GitHub Copilot | `.github/hooks/agent-delivery-gates.json`, written by `init` |
 | CI, no agent | `.github/workflows/agent-delivery-gates.yml`, written by `init` |
-| Command line, no agent | `agent-delivery-gates validate-report` and `agent-delivery-gates test-diff`, run directly or from any pre-commit hook |
+| Command line, no agent | every check is a plain command with an exit code: `validate-report`, `test-diff`, `mutate`, `census`, `induce`, `scan-prose`, `tally`, `check` |
 
 `init` never overwrites an existing hook config for Cursor, Codex, or
 Copilot; if one is already there it prints the template's content for a
@@ -175,24 +183,24 @@ hardest:
   from is what caught the overclaim, in the file most likely to be read.
 
 Running `agent-delivery-gates tally` counts entries per rule. As of this
-build: 77 entries, dated 2026-09-07 to 2026-09-08, five with no automated
+build: 90 entries, dated 2026-09-07 to 2026-09-08, five with no automated
 test behind them because someone read the situation and wrote it down
 instead.
 
 ```
-induced-failure-required: 27
-full-finding-list: 16
+induced-failure-required: 30
+full-finding-list: 18
 cross-cutting-audit: 12
-named-spec-files-fail-loud: 9
+named-spec-files-fail-loud: 11
+commit-before-mutation: 5
 filesystem-allowlist: 5
-commit-before-mutation: 4
+one-fail-loud-setup-script: 3
+standing-adversarial-self-review: 2
 test-diff-reported-apart: 2
 coverage-as-gap-finder: 1
-one-fail-loud-setup-script: 1
+red-before-green: 1
 artifact-inputs-reproducible: 0
 builder-reviewer-separation: 0
-red-before-green: 0
-standing-adversarial-self-review: 0
 ```
 
 A zero does not mean a rule was unnecessary. It means the work stayed
