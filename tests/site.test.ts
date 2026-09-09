@@ -64,6 +64,18 @@ const REQUIRED_CRAWLERS = [
   "meta-externalagent",
 ];
 
+
+/** Turns the five entities the generator writes back into their characters.
+ * The inverse of the generator's escaping, not a copy of it. */
+function decodeEntities(text: string): string {
+  return text
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&amp;", "&");
+}
+
 // --- building the site once for the whole file -------------------------------
 
 let outDir = "";
@@ -320,11 +332,17 @@ test("the JSON-LD block parses and describes this project", () => {
   // A FAQ block is only honest if the page really answers those questions.
   const faq = graph.find((node: { "@type": string }) => node["@type"] === "FAQPage");
   if (faq) {
+    const headings = [...html.matchAll(/<h3>([^<]*)<\/h3>/g)].map((m) => decodeEntities(m[1]));
     for (const entry of faq.mainEntity) {
       assert.equal(entry["@type"], "Question");
+      // The page escapes a question before putting it in an h3, so compare
+      // the decoded heading text with the raw question. This used to call
+      // replaceAll("?", "?"), which does nothing, beside a fallback that
+      // matched the unescaped name; the pair passed whatever the page did.
+      // Decoding is the inverse of what the generator does, so this does not
+      // restate the generator's own escaping back at it.
       assert.ok(
-        html.includes(`<h3>${entry.name.replaceAll("?", "?")}</h3>`) ||
-          html.includes(entry.name),
+        headings.includes(entry.name),
         `the FAQ block asks "${entry.name}", which the page itself never asks`,
       );
       assert.equal(entry.acceptedAnswer["@type"], "Answer");

@@ -14,6 +14,12 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # Declared, not inherited. The repository default is read only
+    # today, and a job that says nothing is safe only for as long as
+    # nobody changes that setting. This workflow runs on a pull
+    # request, so it executes a contributor's code.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,6 +50,12 @@ jobs:
     # source. On a pull request this reads the whole range, so a weakening
     # buried in the middle of a branch is still reported.
     runs-on: ubuntu-latest
+    # Declared, not inherited. The repository default is read only
+    # today, and a job that says nothing is safe only for as long as
+    # nobody changes that setting. This workflow runs on a pull
+    # request, so it executes a contributor's code.
+    permissions:
+      contents: read
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4

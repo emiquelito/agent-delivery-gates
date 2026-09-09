@@ -1,7 +1,7 @@
 {
   "name": "agent-delivery-gates",
-  "version": "0.1.0",
-  "description": "Delivery gates that check what an AI coding agent claims about its own work, not only the code it wrote.",
+  "version": "0.1.1",
+  "description": "Delivery gates for AI coding agents, because green tests are not proof. Breaks your code on purpose and reports the breaks no test noticed. Runs a change's new tests against the code from before it. Induces the failure your report says is handled. Git hook, CI step or MCP server. No API key, zero dependencies.",
   "license": "Apache-2.0",
   "author": "emiquelito <contact@agentgates.dev>",
   "repository": {
