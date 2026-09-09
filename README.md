@@ -1,74 +1,57 @@
 # agent-delivery-gates
 
-Rules that check what an AI coding agent claims about its own work, not just the code it wrote.
+Green tests are never enough.
 
-A shopping cart with four passing tests. An agent is asked to add promo
-codes. It does, and it adds three tests for the new behaviour.
+This breaks your code in known ways and reports the breaks no test noticed. It
+runs a failure you declare, once with the handling in place and once with it
+taken away, and fails the claim when the check passes both times. It runs the
+tests a change added against the code from before the change, because a test
+that passes without the fix never showed anything. And it reads what an agent
+writes about its own work, and fails a claim with nothing behind it, against
+[fourteen proof obligations](#the-rules) for a delivery report.
 
-```
-$ node --test tests/*.test.js
-# tests 7
-# pass 7
-# fail 0
-```
+Gates that check the work and the account of it, on the assumption that
+neither is owed the benefit of the doubt. Nothing leaves your machine, no API
+key is needed, and there are no runtime dependencies; the
+[questions](#questions) below have the rest. Five of the obligations are
+carried by a hook on every commit, the checks run the same way in Claude Code,
+Cursor, Codex, GitHub Copilot, CI, or a plain pre-commit hook with no agent at
+all, and there is [an MCP server](#the-mcp-server) for an agent that would
+rather ask than be stopped.
 
-Four tests became seven. Nothing failed. The feature works. Coverage went up.
-A customer whose cart comes to exactly 50 has just started paying for
-shipping, and the test that would have said so was edited, in the same
-commit, until it could no longer fail.
+Seven worked examples, hardest first, each one run for real with the output it
+produced:
 
-Every check a project normally runs got better here, which is the point. A
-green run and a green run over checks that cannot fail look the same from
-outside, and only one of them means anything.
-
-A rule system checks the code an agent wrote. Runtime guardrails check its
-inputs and tool calls while it works. Neither checks what the agent claims
-about its own work once the work is done, which is what this repository is
-for: [fourteen proof obligations](#the-rules) for a delivery
-report, five of them checked by a hook on every commit, tooling that runs
-the same way in Claude Code, Cursor, Codex, GitHub Copilot, CI, or a plain
-pre-commit hook with no agent at all, and [an MCP server](#the-mcp-server)
-for an agent that would rather ask than be stopped.
-
-Seven worked examples, each run for real with the exact output it produced:
-
+- **[A retry that never retries](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/07-a-retry-that-never-retries.md)**:
+  a retry decorator with three attempts, backoff, and a timeout, approved by
+  everyone who read it, that makes one call and hands the caller a 503 body as
+  though it were a quote. Only an induced failure tells the broken version
+  from the fixed one.
 - **[A feature that shipped with nothing holding it](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/06-a-feature-with-nothing-holding-it.md)**:
-  the cart above. One assertion in eighteen added lines was swapped for one
-  that is true whatever the code does, and the three new tests check a flag
-  and a type but never the money. Breaking the total three different ways
-  leaves all seven tests green.
+  four tests become seven, all passing, and a customer starts paying for
+  shipping. One assertion in eighteen added lines was swapped for one that is
+  true whatever the code does, and the new tests check a flag and a type but
+  never the money. Breaking the total three different ways leaves the suite
+  green.
+- **[A test edited to match a bug](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/02-test-edited-to-match-a-bug.md)**:
+  a bulk discount that was never built, and a failing test made to pass by
+  changing what it expects from 108 to 120, so the assertion agrees with the
+  missing feature.
 - **[Tests that stopped running](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/01-tests-that-stopped-running.md)**:
   a test file renamed so the runner stops collecting it. Git reports zero
   lines changed against that file and git is right, the suite goes green with
   nothing left to fail, and the only trace is a test count nobody reads on a
   passing build.
-- **[A test edited to match a bug](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/02-test-edited-to-match-a-bug.md)**:
-  a bulk discount that was never built, and a failing test made to pass by
-  changing what it expects from 108 to 120, so the assertion agrees with the
-  missing feature.
 - **[A report claiming more than it proved](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/03-report-claiming-more-than-it-proved.md)**:
   "failure handling verified", with nothing behind it anyone can open. A
-  robustness claim has to point at a commit, a path, or a command; pointing
-  at a conversation fails.
+  robustness claim has to point at a commit, a path, or a command; pointing at
+  a conversation fails.
 - **[An edit blocked mid-review](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/04-edit-blocked-mid-review.md)**:
   the clean-tree hook stopping a review phase from writing over work that was
   never committed, which is how this project lost three fixes once.
 - **[Adopting the gates on a repository that already exists](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/05-adopting-on-an-existing-repository.md)**:
   `init` on a project with its own history, a baseline recording what is
   already there, then a clean commit and a caught one.
-- **[A retry that never retries](https://github.com/emiquelito/agent-delivery-gates/blob/main/docs/examples/07-a-retry-that-never-retries.md)**:
-  a retry decorator with three attempts, backoff, and a timeout, approved by
-  everyone, that makes one call and returns the 503 body to the caller as
-  though it were a quote. An induced 503 is the only thing that tells the
-  broken version from the fixed one.
-
-Three commands go looking for this on purpose instead of waiting to be
-told. `adg mutate` breaks your code in known ways and reports the breaks no
-test noticed. `adg census` runs the suite at the base commit as well as at
-HEAD, and runs the tests a change added against the code from before it,
-because a test that passes without the fix never showed anything. `adg
-induce` runs a failure you declare, once with the handling in place and once
-with it taken away, and fails the claim when the check passes both times.
 
 ## 🚀 Quickstart
 
@@ -253,6 +236,63 @@ Needs a human gate, meaning no script can confirm it from the outside:
   boundary or reaches a person; a same-session review does not.
 - `cross-cutting-audit`: a fresh session with no build history checks
   that a multi-step build stays consistent across its own seams.
+
+<a id="questions"></a>
+
+## ❓ Questions
+
+| | |
+|---|---|
+| Needs an API key | No. Nothing here calls a model. |
+| Code leaves the machine | No. No network call, no telemetry, no hosted service. |
+| Runtime dependencies | None. |
+| Same input, same answer | Yes. No model call means no variance to average out. |
+| Works offline | Yes. |
+| Blocks | Yes. The hooks exit non-zero and stop the tool call or the commit. |
+| Needs an agent | No. Every check is a command with an exit code. |
+
+**Does it use my model, my tokens, or my key?**
+None of them. These are ordinary programs. They run the same whether you drive
+them from Claude Code, Cursor, Codex, GitHub Copilot, a git hook, or a CI job
+with no agent anywhere. The one part that speaks to an agent is the MCP
+server, and that is a local subprocess on stdio that your client starts, not a
+service anyone hosts.
+
+**Then how does it catch things a model would catch?**
+It does not. It catches a different class. A model reads a diff and forms an
+opinion about it. These checks run the code and report what happened: the
+number of outbound calls against the number the decorator claimed, the
+mutations no test noticed, the test that passes against the code from before
+the fix. A finding here is a transcript, not a prediction, which is why there
+is nothing to argue with and nothing to tune.
+
+**Why check a commit, and not the working tree before one?**
+It does both. `test-diff` and `mutate` take `--staged`, and the pre-commit
+hook uses it. But the checks that go furthest want a commit, for two reasons.
+
+Uncommitted work is not safe around an agent. A review phase that checks out a
+branch, or a sweep that resets a file, erases it with no ground truth left to
+recover from. That happened twice while this repository was being built, once
+destroying three fixes, and it is why `commit-before-mutation` exists and why
+`mutate` and `census` refuse to run on a tree that is not clean.
+
+A commit is also something a report can point at later. The rules here ask a
+claim to name evidence that outlives the session, a hash, a path, or a
+command. "It worked in my editor" is not that. A fix that lands as its own
+commit leaves a trace someone can open next month, and the trail of what a
+gate caught and what was done about it is worth more than the individual
+catch.
+
+**What if my project is not JavaScript?**
+The test-half checks cover ten ecosystems and the rules are configurable.
+`census` reads TAP and JUnit XML, which most runners emit. `mutate` covers the
+C and JavaScript families and leaves Python alone on purpose. `induce` and
+`validate-report` care about neither language nor runner.
+
+**What does it cost to run?**
+Nothing, and no account. The cost is time: `mutate` and `census` run your
+suite many times over, so they belong in a pre-push hook or in CI, never on
+every keystroke. The per-edit hooks are the cheap ones.
 
 ## ⚠️ What is not covered
 
