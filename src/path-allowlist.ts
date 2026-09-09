@@ -150,3 +150,93 @@ export function checkPathAllowed(
     message,
   };
 }
+
+// --- The shared containment helper -------------------------------------------
+
+export interface ContainmentResult {
+  /** Whether the candidate's real path is inside the root's real path. */
+  contained: boolean;
+  /** The root, resolved to its real path. Falls back to the lexically
+   * resolved root when nothing along it exists. */
+  realRoot: string;
+  /** The candidate, resolved to its real path: nearest existing ancestor
+   * plus any not-yet-created remainder. Falls back to the lexically
+   * resolved candidate when nothing along it exists. */
+  realPath: string;
+}
+
+/**
+ * Decides whether `candidate` sits inside `root`, comparing the real paths
+ * of both sides and never the strings as typed.
+ *
+ * Both sides matter. `git rev-parse --show-toplevel` hands back a root with
+ * every symlink already resolved, while a path a caller typed carries
+ * whatever links it was reached through, so resolving only the candidate
+ * still leaves the two halves written in different alphabets. On macOS that
+ * is not a corner: /tmp and /var/folders are links into /private, so every
+ * scratch repository under a temp directory read as outside itself.
+ *
+ * Resolving is not loosening. A symlink inside the root that points outside
+ * it resolves to a real path outside the real root, so it stays refused;
+ * that is the whole reason to resolve, and not to relax the string test.
+ *
+ * A path that does not exist yet is resolved as far as its nearest existing
+ * ancestor and the remainder is reattached unresolved, so a file a caller
+ * is about to create passes while a not-yet-created path whose parent links
+ * outside the root does not.
+ */
+export function resolveWithinRoot(
+  root: string,
+  candidate: string,
+  resolver: PathResolver,
+  cwd: string,
+): ContainmentResult {
+  const absRoot = resolve(cwd, root);
+  const absCandidate = resolve(cwd, candidate);
+
+  let realRoot: string;
+  try {
+    realRoot = resolveRealOrPending(absRoot, resolver);
+  } catch {
+    realRoot = absRoot;
+  }
+
+  let realPath: string;
+  try {
+    realPath = resolveRealOrPending(absCandidate, resolver);
+  } catch {
+    realPath = absCandidate;
+  }
+
+  const contained = isWithin(segmentsOf(realRoot), segmentsOf(realPath));
+  return { contained, realRoot, realPath };
+}
+
+/**
+ * Whether `candidate` is a directory inside `tempDir` and not `tempDir`
+ * itself. This is the check that stands between `adg census` and a
+ * recursive removal of the wrong directory, so it lives here, next to the
+ * containment rule it applies, and not inline in the command: a check that
+ * cannot be called on its own cannot be tested on its own either, and this
+ * one is worth testing.
+ *
+ * The temp directory is passed in, not read from node:os, so this
+ * module keeps touching nothing but the resolver it was handed.
+ *
+ * Both sides are resolved. On macOS the system temp directory is
+ * /var/folders/..., a symlink into /private, so a string comparison could
+ * refuse the very directory the run just created there. A candidate that
+ * links out of the temp directory resolves to a real path outside it and
+ * is still refused, and the temp directory itself is refused outright: a
+ * removal aimed at the whole temp directory is never what was meant.
+ */
+export function isInsideSystemTemp(
+  candidate: string,
+  tempDir: string,
+  resolver: PathResolver,
+  cwd: string,
+): boolean {
+  const found = resolveWithinRoot(tempDir, candidate, resolver, cwd);
+  if (found.realPath === found.realRoot) return false;
+  return found.contained;
+}

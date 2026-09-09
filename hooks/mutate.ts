@@ -34,8 +34,8 @@
 
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, writeFileSync, existsSync, statSync, realpathSync } from "node:fs";
+import { join, relative } from "node:path";
 import {
   exitCodeFor,
   formatReportJson,
@@ -52,6 +52,7 @@ import {
   resolveRepoRoot,
   unstagedDirtyLines,
 } from "../src/clean-tree-gate.ts";
+import { resolveWithinRoot } from "../src/path-allowlist.ts";
 
 const DEFAULT_MAX = 25;
 
@@ -330,12 +331,16 @@ function splitPaths(output: string): string[] {
  * it is pointed at, so it may only be pointed inside the repository whose
  * cleanliness it just checked. */
 function toRepoRelative(path: string, repoRoot: string): string {
-  const absolute = resolve(process.cwd(), path);
-  const rootWithSep = repoRoot.endsWith("/") ? repoRoot : `${repoRoot}/`;
-  if (absolute !== repoRoot && !absolute.startsWith(rootWithSep)) {
-    fail(`'${path}' is outside the repository at ${repoRoot}`);
+  // Both sides are resolved to their real paths before the comparison.
+  // resolveRepoRoot reads the root from git, which hands back the real
+  // path, so comparing it with a candidate that still carries the symlinks
+  // it was reached through refused files that were inside the repository
+  // all along.
+  const found = resolveWithinRoot(repoRoot, path, realpathSync, process.cwd());
+  if (!found.contained) {
+    fail(`'${path}' is outside the repository at ${found.realRoot}`);
   }
-  return absolute.slice(rootWithSep.length);
+  return relative(found.realRoot, found.realPath);
 }
 
 /** Reads each selected file, dropping any that no longer exists (a commit

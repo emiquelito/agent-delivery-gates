@@ -9,9 +9,19 @@
 // touches .claude/settings.json at all; the lines a person would add
 // there are printed, never written.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { resolveWithinRoot } from "./path-allowlist.ts";
 
 export interface InitOptions {
   /** Directory init writes into. Must already be an absolute path. */
@@ -89,14 +99,22 @@ function writeOrPlan(
   ctx: WriteCtx,
   executable = false,
 ): void {
-  const target = resolve(targetDir, relPath);
   // Every relPath passed in above is a fixed literal, never built from
   // user input, so this can only trip if that ever changes. Kept as a
   // real check and not only a comment: a target directory is exactly the
   // kind of thing this tool must never write outside of.
-  if (target !== targetDir && !target.startsWith(targetDir + sep)) {
-    throw new Error(`refusing to write outside the target directory: '${target}'`);
+  //
+  // Both sides are compared as real paths. init writes files that do not
+  // exist yet, so the candidate is resolved as far as its nearest existing
+  // ancestor and the remainder reattached; a target directory reached
+  // through a symlink, which is every scratch directory under /tmp on
+  // macOS, then still reads as containing its own files, while a parent
+  // that links out of the target directory still reads as outside it.
+  const found = resolveWithinRoot(targetDir, relPath, realpathSync, targetDir);
+  if (!found.contained) {
+    throw new Error(`refusing to write outside the target directory: '${found.realPath}'`);
   }
+  const target = found.realPath;
 
   const exists = existsSync(target);
   if (exists && !ctx.force) {

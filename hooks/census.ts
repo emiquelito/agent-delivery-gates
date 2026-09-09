@@ -42,6 +42,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -68,6 +69,7 @@ import {
 } from "../src/census.ts";
 import { classifyTestPath } from "../src/test-diff-separator.ts";
 import { formatDirtyTreeMessage, getGitStatus, resolveRepoRoot } from "../src/clean-tree-gate.ts";
+import { isInsideSystemTemp, resolveWithinRoot } from "../src/path-allowlist.ts";
 
 const USAGE = `Usage: census [--base REF] [--command CMD] [--format text|json]
               [--format-in tap|junit] [--timeout SECONDS] [--no-rerun]
@@ -517,9 +519,13 @@ interface Worktree {
  * caller's own dependencies.
  */
 function removeWorktree(repoRoot: string, worktree: Worktree): void {
-  const temp = resolve(tmpdir());
+  // The decision itself lives in src/path-allowlist.ts, next to the
+  // containment rule it applies, so it can be exercised on its own. Both
+  // sides are resolved there: a string comparison would refuse the very
+  // directory this run created on macOS, where the temp directory is a
+  // symlink into /private.
   const tmpRoot = resolve(worktree.tmpRoot);
-  if (tmpRoot === temp || !tmpRoot.startsWith(`${temp}/`)) {
+  if (!isInsideSystemTemp(worktree.tmpRoot, tmpdir(), realpathSync, process.cwd())) {
     process.stderr.write(
       `census: refusing to remove '${worktree.tmpRoot}', which is not inside the system temp directory\n`,
     );
@@ -646,14 +652,18 @@ function changedTestFiles(repoRoot: string, baseSha: string): string[] {
  * that escaped it would be a write into a directory nobody asked for.
  */
 function copyTestFilesInto(repoRoot: string, worktreeDir: string, paths: string[]): void {
-  const rootWithSep = worktreeDir.endsWith("/") ? worktreeDir : `${worktreeDir}/`;
   for (const path of paths) {
     const from = join(repoRoot, path);
     if (!existsSync(from)) continue;
-    const to = resolve(worktreeDir, path);
-    if (!to.startsWith(rootWithSep)) {
+    // Both sides as real paths. A destination the base worktree does not
+    // hold yet resolves to its nearest existing ancestor with the rest
+    // reattached, so a file about to be created passes while a path whose
+    // parent links out of the worktree does not.
+    const found = resolveWithinRoot(worktreeDir, path, realpathSync, worktreeDir);
+    if (!found.contained || found.realPath === found.realRoot) {
       fail(`'${path}' resolves outside the base worktree; refusing to write there`);
     }
+    const to = found.realPath;
     mkdirSync(dirname(to), { recursive: true });
     copyFileSync(from, to);
   }
