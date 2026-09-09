@@ -31,10 +31,12 @@ import {
   exitCodeFor,
   formatReportJson,
   formatReportText,
+  keepTail,
   outcomeFor,
   parseSpec,
   runFromSteps,
   unreadableSpecRun,
+  type CommandRun,
   type InduceSpec,
   type SpecRun,
   type StepName,
@@ -43,6 +45,12 @@ import {
 
 const DEFAULT_DIR = ".adg/induced";
 const DEFAULT_TIMEOUT_SECONDS = 120;
+
+/** How much output one command may print before Node kills it. Node's own
+ * default is 1 MB, which a verbose suite passes routinely, and the kill
+ * that follows looks exactly like a timeout kill. This is the size census
+ * uses, so the two commands agree on what counts as too much. */
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 const USAGE = `Usage: induce [--dir PATH] [--spec PATH]... [--timeout SECONDS]
               [--format text|json]
@@ -59,7 +67,9 @@ handling at all: it would pass if the feature produced nothing.
   --timeout SECONDS  per-command timeout (default: ${DEFAULT_TIMEOUT_SECONDS}). A spec's own
                   "timeout" field overrides it. A command that hits the
                   timeout is reported as timed out and is never counted as
-                  a fail
+                  a fail. The command is killed at the timeout, but a
+                  process the command itself started can outlive it, so a
+                  timed-out spec is worth a look
   --format FORMAT "text" (default) or "json"
   --help          print this message and exit 0
 
@@ -76,26 +86,63 @@ Spec format, one JSON object per file:
 Any other field is refused. A spec with no "neutralize" is refused: the
 control is not optional, and a run without it proves nothing.
 
+Running a spec runs shell commands:
+  Every command in a spec is handed to a shell and runs with the
+  privileges of whoever ran this command, on this machine, against these
+  files. A spec is a script, not data. Read a spec that came from a
+  repository you did not write before you run it, the same way you would
+  read a script before running it. Note that "cwd" is not contained to
+  the current directory or to the repository, and containing it would buy
+  nothing, because a command that can run at all can "cd" wherever it
+  likes.
+
+  Specs share one working directory, run in filename order, and are not
+  isolated from each other. A spec that leaves a file behind can change
+  the verdict of a spec that runs after it, so a spec must clean up after
+  itself.
+
+  The environment is inherited from the caller, not cleaned. If a
+  variable a spec's neutralize step sets to take the handling away is
+  already set in your environment, the inject run is neutralized too, and
+  the spec then reports check-does-not-measure against a handling that
+  works. The shipped example spec uses ADG_RETRY_DISABLED=1 that way.
+
+A directory entry that is not a *.json file is not read as a spec, so
+"retry.JSON", "retry.json.bak" and "retry.jsonc" are not run. Every entry
+that was not run is named and counted in the report header, so a
+directory where only some specs ran can never read like a clean run.
+
 Verdicts:
   proven                  inject passed, neutralize failed
   handler-did-not-fire    inject did not pass
   check-does-not-measure  inject passed and neutralize passed too
-  could-not-run           a command could not be executed, a command timed
-                          out, the baseline was already failing, or the
-                          spec was malformed
+  could-not-run           a command could not be executed, a command was
+                          cut off before it could be judged, the baseline
+                          was already failing, or the spec was malformed
 
 What this does NOT do:
   It does not read a delivery report, and validate-report does not run a
   spec; the two are separate checks on purpose. It does not know whether
   the spec describes the failure a report means. It cannot tell whether a
   spec is honest: a spec whose neutralize step breaks something unrelated
-  will still report "proven". What it proves is narrow and real: the check
-  named here fails when the handling named here is taken away.
+  will still report "proven". What it observes is narrow: the command
+  named as inject exited 0, and the command named as neutralize did not.
+
+  Any neutralize failure counts, whatever caused it. A syntax error, a
+  missing file, a runner that collected no tests and a script that exited
+  before it reached the check all read as a control that worked. That is
+  why a proven spec prints the tail of what its neutralize command said:
+  read it, and check that the command failed for the reason the spec
+  meant.
 
   A command that exits 126 or 127 is read as never having run, because a
   neutralize step that was never runnable would otherwise look exactly
   like a control that worked. A command that chooses to exit 127 on its
   own is misread by that rule.
+
+  A command killed by a signal, and a command that printed more than this
+  tool will hold, are each reported as themselves, never as a timeout.
+  Both leave the step with no verdict.
 
 Exit codes:
   0  every spec proven
@@ -103,7 +150,8 @@ Exit codes:
   2  could not run as asked: no specs, a malformed spec, a spec with no
      neutralize, a command that could not be executed, a failing baseline,
      or a bad argument
-  3  nothing failed, but at least one spec timed out and was never measured
+  3  nothing failed, but at least one spec was cut off and never measured:
+     a command timed out, was killed by a signal, or printed too much
 `;
 
 function fail(message: string): never {
@@ -170,11 +218,21 @@ function parseArgs(argv: string[]): ParsedArgs {
   return result;
 }
 
-/** The spec files to run, in a fixed order. A missing directory is exit 2,
- * and so is a directory holding no spec: a run that measured nothing must
- * never report the same as a run that measured everything and found
- * nothing wrong. */
-function resolveSpecPaths(args: ParsedArgs): { paths: string[]; source: string } {
+/** The spec files to run, in a fixed order, and the names of everything
+ * beside them that was not run. A missing directory is exit 2, and so is a
+ * directory holding no spec: a run that measured nothing must never report
+ * the same as a run that measured everything and found nothing wrong.
+ *
+ * A near miss such as `retry.JSON`, `retry.json.bak` or `retry.jsonc` is
+ * not read as a spec, and used to be dropped without a word, so a
+ * directory of four specs could run one and report a clean run. Every
+ * entry that was not run is now named and counted in the report header.
+ * The exit code is left alone on purpose: a spec directory may hold a
+ * README or an editor's leftovers, and refusing to run over one would
+ * make the command unusable in an ordinary directory. Naming them is what
+ * the principle needs, since it makes silence impossible; refusing is
+ * more than it needs. */
+function resolveSpecPaths(args: ParsedArgs): { paths: string[]; source: string; skipped: string[] } {
   if (args.specs.length > 0) {
     for (const path of args.specs) {
       let isFile = false;
@@ -185,7 +243,11 @@ function resolveSpecPaths(args: ParsedArgs): { paths: string[]; source: string }
       }
       if (!isFile) fail(`'${path}' is not a file`);
     }
-    return { paths: args.specs.map((path) => resolve(process.cwd(), path)), source: args.specs.join(", ") };
+    return {
+      paths: args.specs.map((path) => resolve(process.cwd(), path)),
+      source: args.specs.join(", "),
+      skipped: [],
+    };
   }
 
   const dir = resolve(process.cwd(), args.dir ?? DEFAULT_DIR);
@@ -199,23 +261,43 @@ function resolveSpecPaths(args: ParsedArgs): { paths: string[]; source: string }
         "Write a spec there, or point --dir somewhere else",
     );
   }
-  const paths = entries
-    .filter((name) => name.endsWith(".json"))
-    .sort()
-    .map((name) => join(dir, name));
-  if (paths.length === 0) fail(`no *.json spec files in '${dir}', so there was nothing to run`);
-  return { paths, source: dir };
+  const isSpecFile = (name: string): boolean => {
+    if (!name.endsWith(".json")) return false;
+    try {
+      return statSync(join(dir, name)).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const specNames = entries.filter(isSpecFile).sort();
+  const skipped = entries.filter((name) => !isSpecFile(name)).sort();
+  const paths = specNames.map((name) => join(dir, name));
+  if (paths.length === 0) {
+    const alsoSkipped =
+      skipped.length === 0 ? "" : `; entries there that are not *.json spec files: ${skipped.join(", ")}`;
+    fail(`no *.json spec files in '${dir}', so there was nothing to run${alsoSkipped}`);
+  }
+  return { paths, source: dir, skipped };
 }
 
-/** Runs one command through a shell, with a timeout. A timeout is its own
- * outcome and is never folded into a non-zero exit: a command that was
- * killed partway was never judged, and calling that a fail would credit a
- * control nothing watched. */
-function runCommand(command: string, cwd: string, timeoutMs: number): {
-  status: number | null;
-  timedOut: boolean;
-  durationMs: number;
-} {
+/** Runs one command through a shell, with a timeout, keeping what it
+ * printed. A timeout is its own outcome and is never folded into a
+ * non-zero exit: a command that was killed partway was never judged, and
+ * calling that a fail would credit a control nothing watched.
+ *
+ * The three ways of being killed are told apart, because each needs a
+ * different sentence. Node's read buffer is set to 64 MB, the same size
+ * census uses, so that a verbose suite is not killed for printing; past
+ * that it arrives as ENOBUFS, with the output up to the overflow already
+ * in hand and the rest never printed. A signal that is not the timeout
+ * kill, a segfault or an out-of-memory kill, arrives as a null status
+ * with a signal set. Both used to be reported as timeouts, which told the
+ * reader to raise a timeout that had nothing to do with it. */
+function runCommand(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): CommandRun & { stdout: string; stderr: string; failure?: string } {
   const started = Date.now();
   const result = spawnSync(command, {
     cwd,
@@ -224,12 +306,32 @@ function runCommand(command: string, cwd: string, timeoutMs: number): {
     stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
     killSignal: "SIGKILL",
+    maxBuffer: MAX_OUTPUT_BYTES,
   });
   const durationMs = Date.now() - started;
-  const timedOut =
-    (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
-    (result.status === null && result.signal !== null);
-  return { status: result.status, timedOut, durationMs };
+  const error = result.error as NodeJS.ErrnoException | undefined;
+  const timedOut = error?.code === "ETIMEDOUT";
+  const outputOverflowed = !timedOut && error?.code === "ENOBUFS";
+  const killedBySignal = !timedOut && !outputOverflowed && result.status === null ? result.signal : null;
+  let failure: string | undefined;
+  if (outputOverflowed) {
+    failure = `printed more than ${Math.round(MAX_OUTPUT_BYTES / (1024 * 1024))} MB and was killed for it`;
+  } else if (killedBySignal !== null && killedBySignal !== undefined) {
+    failure = `killed by ${killedBySignal} before it finished`;
+  } else if (error !== undefined) {
+    failure = `could not be run (${error.code ?? error.message})`;
+  }
+  const run: CommandRun & { stdout: string; stderr: string; failure?: string } = {
+    status: result.status,
+    timedOut,
+    durationMs,
+    outputOverflowed,
+    killedBySignal,
+    stdout: keepTail(result.stdout ?? ""),
+    stderr: keepTail(result.stderr ?? ""),
+  };
+  if (failure !== undefined) run.failure = failure;
+  return run;
 }
 
 /** Runs the steps of one spec: baseline first when it is there, then
@@ -256,18 +358,22 @@ function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: number):
   let stopped = false;
   for (const { step, command } of planned) {
     if (stopped) {
-      steps.push({ step, command, outcome: "not-run", exitCode: null, durationMs: 0 });
+      steps.push({ step, command, outcome: "not-run", exitCode: null, durationMs: 0, stdout: "", stderr: "" });
       continue;
     }
     const run = runCommand(command, cwd, timeoutMs);
     const outcome = outcomeFor(run);
-    steps.push({
+    const result: StepResult = {
       step,
       command,
       outcome,
-      exitCode: run.timedOut ? null : run.status,
+      exitCode: outcome === "passed" || outcome === "failed" ? run.status : null,
       durationMs: run.durationMs,
-    });
+      stdout: run.stdout,
+      stderr: run.stderr,
+    };
+    if (run.failure !== undefined) result.failure = run.failure;
+    steps.push(result);
     if (step === "baseline" && outcome !== "passed") stopped = true;
   }
   return runFromSteps(file, spec.claim, steps);
@@ -280,7 +386,7 @@ function main(): void {
     process.exit(0);
   }
 
-  const { paths, source } = resolveSpecPaths(args);
+  const { paths, source, skipped } = resolveSpecPaths(args);
   const runs: SpecRun[] = [];
   for (const path of paths) {
     let text: string;
@@ -298,7 +404,7 @@ function main(): void {
     runs.push(runSpec(path, parsed.spec, args.timeoutSeconds));
   }
 
-  const report = { source, timeoutMs: Math.round(args.timeoutSeconds * 1000), runs };
+  const report = { source, timeoutMs: Math.round(args.timeoutSeconds * 1000), runs, skipped };
   process.stdout.write(args.format === "json" ? formatReportJson(report) : `${formatReportText(report)}\n`);
   process.exit(exitCodeFor(runs));
 }

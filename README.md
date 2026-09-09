@@ -183,21 +183,21 @@ hardest:
   from is what caught the overclaim, in the file most likely to be read.
 
 Running `agent-delivery-gates tally` counts entries per rule. As of this
-build: 90 entries, dated 2026-09-07 to 2026-09-08, five with no automated
+build: 95 entries, dated 2026-09-07 to 2026-09-09, five with no automated
 test behind them because someone read the situation and wrote it down
 instead.
 
 ```
-induced-failure-required: 30
-full-finding-list: 18
-cross-cutting-audit: 12
+induced-failure-required: 31
+full-finding-list: 19
+cross-cutting-audit: 13
 named-spec-files-fail-loud: 11
 commit-before-mutation: 5
 filesystem-allowlist: 5
-one-fail-loud-setup-script: 3
+one-fail-loud-setup-script: 4
+coverage-as-gap-finder: 2
 standing-adversarial-self-review: 2
 test-diff-reported-apart: 2
-coverage-as-gap-finder: 1
 red-before-green: 1
 artifact-inputs-reproducible: 0
 builder-reviewer-separation: 0

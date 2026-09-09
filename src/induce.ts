@@ -55,8 +55,14 @@ export interface InduceSpec {
   cwd?: string;
 }
 
-/** What one command did. */
-export type StepOutcome = "passed" | "failed" | "timed-out" | "not-run";
+/** What one command did.
+ *
+ * "timed-out", "killed" and "output-overflow" are three different ways for
+ * a command to end without a verdict, and they are kept apart because the
+ * sentence printed under each one is different. Reporting a segfault or a
+ * command that printed too much as a timeout tells the reader to raise the
+ * timeout, which fixes neither. */
+export type StepOutcome = "passed" | "failed" | "timed-out" | "killed" | "output-overflow" | "not-run";
 
 export interface StepResult {
   step: StepName;
@@ -65,6 +71,42 @@ export interface StepResult {
   /** The exit code, or null when the command was killed or never ran. */
   exitCode: number | null;
   durationMs: number;
+  /** What the command printed, kept so the report can show why a control
+   * failed. Trimmed to the last KEPT_OUTPUT_CHARS of each stream: any
+   * failure worth reading names itself at the end. */
+  stdout: string;
+  stderr: string;
+  /** How the command ended, when it ended without a verdict: the signal
+   * that killed it, or why it could not be finished. Absent otherwise. */
+  failure?: string;
+}
+
+/** How much of each stream is kept per step. Node is given a 64 MB read
+ * buffer so that a verbose suite is not killed part way; what is kept for
+ * the report is much smaller, because a report nobody can read is not
+ * evidence. */
+export const KEPT_OUTPUT_CHARS = 64 * 1024;
+
+/** How much of the kept output the text report prints under a verdict:
+ * the last TAIL_MAX_LINES lines, cut to TAIL_MAX_CHARS if those lines are
+ * long. Whichever is smaller wins. */
+export const TAIL_MAX_LINES = 20;
+export const TAIL_MAX_CHARS = 2048;
+
+/** The last `maxChars` characters of `text`. */
+export function keepTail(text: string, maxChars: number = KEPT_OUTPUT_CHARS): string {
+  return text.length <= maxChars ? text : text.slice(text.length - maxChars);
+}
+
+/** The tail a report prints: the last TAIL_MAX_LINES lines, then cut to
+ * TAIL_MAX_CHARS. Never the whole output, and always labelled as a tail
+ * where it is printed, so nobody reads it as the complete run. */
+export function outputTail(text: string): string {
+  const trimmed = text.replace(/\s+$/, "");
+  if (trimmed === "") return "";
+  const lines = trimmed.split("\n");
+  const kept = lines.length <= TAIL_MAX_LINES ? lines : lines.slice(lines.length - TAIL_MAX_LINES);
+  return keepTail(kept.join("\n"), TAIL_MAX_CHARS);
 }
 
 export type Verdict = "proven" | "handler-did-not-fire" | "check-does-not-measure" | "could-not-run";
@@ -73,7 +115,27 @@ export type Verdict = "proven" | "handler-did-not-fire" | "check-does-not-measur
  * exit code differs: a timeout leaves the spec unmeasured (exit 3), while
  * a malformed spec or a command that never started means the run could not
  * happen as asked (exit 2). */
-export type UnrunReason = "spec-invalid" | "baseline-failed" | "command-not-runnable" | "timeout";
+export type UnrunReason =
+  | "spec-invalid"
+  | "baseline-failed"
+  | "command-not-runnable"
+  | "timeout"
+  | "killed-by-signal"
+  | "output-overflow";
+
+/** The outcomes that leave a step with no verdict, and the reason each one
+ * gets. A step in this table was neither a pass nor a fail: the command
+ * ran and was cut off, so scoring it either way would credit or blame a
+ * control that nothing watched. */
+const UNJUDGED_REASONS: Partial<Record<StepOutcome, UnrunReason>> = {
+  "timed-out": "timeout",
+  killed: "killed-by-signal",
+  "output-overflow": "output-overflow",
+};
+
+export function unjudgedReason(outcome: StepOutcome): UnrunReason | undefined {
+  return UNJUDGED_REASONS[outcome];
+}
 
 export interface SpecRun {
   /** Path of the spec file, as the caller named it. */
@@ -180,10 +242,26 @@ export interface CommandRun {
   status: number | null;
   timedOut: boolean;
   durationMs: number;
+  /** True when the command printed more than the read buffer would hold
+   * and was killed for it. Node reports that as ENOBUFS, and the output
+   * kept up to that point is a cut-off run, not a finished one. */
+  outputOverflowed?: boolean;
+  /** The signal that killed the command, when something other than the
+   * timeout killed it: a segfault, an out-of-memory kill, a command that
+   * signals itself. Null or absent when nothing did. */
+  killedBySignal?: string | null;
 }
 
+/**
+ * The outcome of one command. The three ways of ending without a verdict
+ * are told apart here and nowhere else. Order matters: a run that hit the
+ * timeout is a timeout even though a signal killed it, and an overflow
+ * kill also carries a signal, so the signal branch is asked last.
+ */
 export function outcomeFor(run: CommandRun): StepOutcome {
   if (run.timedOut) return "timed-out";
+  if (run.outputOverflowed === true) return "output-overflow";
+  if (run.killedBySignal !== undefined && run.killedBySignal !== null) return "killed";
   return run.status === 0 ? "passed" : "failed";
 }
 
@@ -214,8 +292,8 @@ export function verdictFor(steps: StepResult[]): { verdict: Verdict; reason?: Un
   if (baseline !== undefined && baseline.outcome === "failed") {
     return { verdict: "could-not-run", reason: isNotRunnable(baseline) ? "command-not-runnable" : "baseline-failed" };
   }
-  if (baseline !== undefined && baseline.outcome === "timed-out") {
-    return { verdict: "could-not-run", reason: "timeout" };
+  if (baseline !== undefined && unjudgedReason(baseline.outcome) !== undefined) {
+    return { verdict: "could-not-run", reason: unjudgedReason(baseline.outcome) };
   }
 
   const inject = findStep(steps, "inject");
@@ -224,7 +302,8 @@ export function verdictFor(steps: StepResult[]): { verdict: Verdict; reason?: Un
     return { verdict: "could-not-run", reason: "spec-invalid" };
   }
   for (const result of [inject, neutralize]) {
-    if (result.outcome === "timed-out") return { verdict: "could-not-run", reason: "timeout" };
+    const unjudged = unjudgedReason(result.outcome);
+    if (unjudged !== undefined) return { verdict: "could-not-run", reason: unjudged };
     if (result.outcome === "not-run") return { verdict: "could-not-run", reason: "command-not-runnable" };
     if (isNotRunnable(result)) return { verdict: "could-not-run", reason: "command-not-runnable" };
   }
@@ -245,12 +324,16 @@ export function unreadableSpecRun(file: string, problems: string[]): SpecRun {
   return { file, claim: "", steps: [], verdict: "could-not-run", reason: "spec-invalid", problems };
 }
 
-/** True when a run was left unmeasured by a timeout, as against a run that
- * could not happen as asked. Only a timeout counts: a timed-out command
- * was never judged, and folding it into a fail would credit a control that
- * nothing watched. */
+/** The reasons that mean a command ran and was cut off before it could be
+ * judged, as against a run that could not happen as asked at all. */
+const UNMEASURED_REASONS: readonly UnrunReason[] = ["timeout", "killed-by-signal", "output-overflow"];
+
+/** True when a run was left unmeasured by a command that was cut off, as
+ * against a run that could not happen as asked. Only a cut-off command
+ * counts: it was never judged, and folding it into a fail would credit a
+ * control that nothing watched. */
 export function isUnmeasured(run: SpecRun): boolean {
-  return run.verdict === "could-not-run" && run.reason === "timeout";
+  return run.verdict === "could-not-run" && run.reason !== undefined && UNMEASURED_REASONS.includes(run.reason);
 }
 
 export function isFinding(run: SpecRun): boolean {
@@ -274,7 +357,7 @@ export function isFinding(run: SpecRun): boolean {
  */
 export function exitCodeFor(runs: SpecRun[]): 0 | 1 | 2 | 3 {
   if (runs.length === 0) return 2;
-  if (runs.some((run) => run.verdict === "could-not-run" && run.reason !== "timeout")) return 2;
+  if (runs.some((run) => run.verdict === "could-not-run" && !isUnmeasured(run))) return 2;
   if (runs.some(isFinding)) return 1;
   if (runs.some(isUnmeasured)) return 3;
   return 0;
@@ -310,17 +393,25 @@ function describeStep(result: StepResult): string {
       ? "timed out"
       : result.outcome === "not-run"
         ? "never ran"
-        : `exit ${result.exitCode ?? "killed"}`;
+        : result.outcome === "killed"
+          ? (result.failure ?? "killed by a signal")
+          : result.outcome === "output-overflow"
+            ? (result.failure ?? "printed more output than this tool will hold")
+            : `exit ${result.exitCode ?? "killed"}`;
   return `${result.outcome} (${detail}, ${seconds(result.durationMs)})`;
 }
 
+/** What each verdict says, held to what the tool watched. The tool ran two
+ * commands and read two exit codes: it did not watch a handling fire, and
+ * it does not know why the neutralize command failed. Every line here says
+ * only what was observed; the "What this does not tell you" line in the
+ * report carries the reading of it. */
 const VERDICT_LINES: Record<Verdict, string> = {
-  proven:
-    "proven: the failure was induced and the handling fired, and the same check failed once the handling was taken away.",
+  proven: "proven: the inject command passed and the neutralize command failed.",
   "handler-did-not-fire":
-    "handler-did-not-fire: the inject run did not pass, so nothing here shows the handling firing.",
+    "handler-did-not-fire: the inject command did not pass, so nothing here shows the handling firing.",
   "check-does-not-measure":
-    "check-does-not-measure: the check passed with the handling taken away, so it would pass if the handling produced nothing. It is not measuring the handling, and the claim is unproven whatever the inject run did.",
+    "check-does-not-measure: the neutralize command passed, so the check passes with the handling taken away and would pass if the handling produced nothing. It is not measuring the handling, and the claim is unproven whatever the inject command did.",
   "could-not-run": "could-not-run: this spec was never judged.",
 };
 
@@ -329,7 +420,21 @@ const REASON_LINES: Record<UnrunReason, string> = {
   "baseline-failed": "the baseline was already failing, so no later run can say what the injection did.",
   "command-not-runnable": "a command could not be executed at all (exit 126 or 127).",
   timeout: "a command hit the timeout and was killed, so that step has no verdict.",
+  "killed-by-signal": "a command was killed by a signal before it finished, so that step has no verdict.",
+  "output-overflow":
+    "a command printed more output than this tool will hold and was killed for it, so that step has no verdict.",
 };
+
+/** The label on the tail printed under a proven verdict. */
+export const NEUTRALIZE_TAIL_HEADING = `Neutralize output, tail (last ${TAIL_MAX_LINES} lines, at most ${TAIL_MAX_CHARS} characters).`;
+
+/** Both streams of one step, in the order a terminal would have shown
+ * them, with an empty stream contributing nothing. A runner that prints
+ * its reason to stderr and a runner that prints it to stdout both have to
+ * read back the same way. */
+export function combinedOutput(result: StepResult): string {
+  return [result.stdout, result.stderr].filter((text) => text.trim() !== "").join("\n");
+}
 
 /**
  * The evidence block for one proven spec: the claim, both commands, and
@@ -352,6 +457,22 @@ export function formatEvidence(run: SpecRun): string {
   }
   lines.push(`  Verdict: ${VERDICT_LINES[run.verdict]}`);
   if (run.reason !== undefined) lines.push(`  Why: ${REASON_LINES[run.reason]}`);
+  // A proven verdict rests entirely on the neutralize command failing, and
+  // any failure at all counts: a syntax error, a missing file, a runner
+  // collecting no tests. None of those measure the handling, and the exit
+  // code alone cannot tell them from a control that worked. Printing what
+  // the command said is what lets a reader see which one this was.
+  if (run.verdict === "proven") {
+    const neutralize = findStep(run.steps, "neutralize");
+    const tail = neutralize === undefined ? "" : outputTail(combinedOutput(neutralize));
+    if (tail === "") {
+      lines.push("  Neutralize output: nothing was printed, so this block shows no reason it failed.");
+    } else {
+      lines.push(`  ${NEUTRALIZE_TAIL_HEADING}`);
+      lines.push("  Nothing here checks why it failed, so read it:");
+      for (const line of tail.split("\n")) lines.push(`    | ${line}`);
+    }
+  }
   if (run.problems !== undefined && run.problems.length > 0) {
     for (const problem of run.problems) lines.push(`  Problem: ${problem}`);
   }
@@ -364,6 +485,22 @@ export interface ReportInput {
   /** The default per-command timeout, in milliseconds. */
   timeoutMs: number;
   runs: SpecRun[];
+  /** Entries found beside the specs that were not run, named so that a
+   * near miss such as `retry.JSON` or `retry.json.bak` cannot be dropped
+   * in silence. A run that measured less than the directory holds must
+   * never read like a run that measured all of it. */
+  skipped?: string[];
+}
+
+/** The header line naming what was not run, or an empty string when
+ * everything in the directory was. */
+export function formatSkipped(skipped: readonly string[] | undefined): string {
+  if (skipped === undefined || skipped.length === 0) return "";
+  const count = skipped.length;
+  return (
+    `Not run: ${count} ${count === 1 ? "entry" : "entries"} beside the specs ` +
+    `${count === 1 ? "is" : "are"} not a *.json spec file (${skipped.join(", ")})`
+  );
 }
 
 export function formatReportText(input: ReportInput): string {
@@ -371,6 +508,8 @@ export function formatReportText(input: ReportInput): string {
   const lines: string[] = [];
   lines.push(`Specs: ${input.source}`);
   lines.push(`Default per-command timeout: ${seconds(input.timeoutMs)}`);
+  const skipped = formatSkipped(input.skipped);
+  if (skipped !== "") lines.push(skipped);
   lines.push(
     `proven ${summary.proven}, handler-did-not-fire ${summary["handler-did-not-fire"]}, ` +
       `check-does-not-measure ${summary["check-does-not-measure"]}, could-not-run ${summary["could-not-run"]}`,
@@ -391,10 +530,11 @@ export function formatReportText(input: ReportInput): string {
   } else if (summary["could-not-run"] > 0) {
     lines.push("At least one spec was never judged, so nothing above covers it.");
   } else {
-    lines.push("Every spec was proven: each failure was induced, each handling fired, and each control failed.");
+    lines.push("Every spec: the inject command passed and the neutralize command failed.");
   }
   lines.push(
-    "What this does not tell you: whether the spec describes the failure a report means, and whether the spec is honest.",
+    "What this does not tell you: whether the spec describes the failure a report means, " +
+      "why the neutralize command failed, and whether the spec is honest.",
   );
   return lines.join("\n");
 }
@@ -404,6 +544,7 @@ export function formatReportJson(input: ReportInput): string {
     {
       source: input.source,
       timeoutMs: input.timeoutMs,
+      skipped: input.skipped ?? [],
       summary: summarize(input.runs),
       runs: input.runs,
     },

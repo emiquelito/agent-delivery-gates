@@ -809,16 +809,24 @@ test("a tally cell may hold an escaped pipe", () => {
   try {
     const path = join(dir, "docs", "gate-tally.md");
     const text = readFileSync(path, "utf8");
+    // The next row number and the total come from the file, never typed in.
+    // An earlier version of this test hardcoded both and started failing the
+    // day the tally grew past them.
+    const numbers = [...text.matchAll(/^\| *(\d+) *\|/gm)].map((m) => Number(m[1]));
+    const next = Math.max(...numbers) + 1;
     writeFileSync(
       path,
       text +
-        "| 91 | 2026-09-08 | red-before-green | no test; recorded here only |" +
+        `| ${next} | 2026-09-09 | red-before-green | no test; recorded here only |` +
         " A cell holding a literal \\| pipe, which GitHub renders as one. |\n",
     );
     const result = runBuild(join(dir, "site", "build.js"), join(dir, "dist"));
     assert.equal(result.status, 0, `the build rejected an escaped pipe: ${result.stderr}`);
     const page = readFileSync(join(dir, "dist", "index.html"), "utf8");
-    assert.ok(page.includes("91 entries"), "the build did not count the row with the escaped pipe");
+    assert.ok(
+      page.includes(`${numbers.length + 1} entries`),
+      "the build did not count the row with the escaped pipe",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

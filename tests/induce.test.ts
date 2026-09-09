@@ -9,8 +9,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  combinedOutput,
   exitCodeFor,
   formatEvidence,
+  formatSkipped,
+  keepTail,
+  outputTail,
+  TAIL_MAX_CHARS,
+  TAIL_MAX_LINES,
   formatReportJson,
   formatReportText,
   isNotRunnable,
@@ -28,8 +34,23 @@ import {
   type StepResult,
 } from "../src/induce.ts";
 
-function step(name: StepName, outcome: StepOutcome, exitCode: number | null = null): StepResult {
-  return { step: name, command: `run-${name}`, outcome, exitCode, durationMs: 100 };
+function step(
+  name: StepName,
+  outcome: StepOutcome,
+  exitCode: number | null = null,
+  output: { stdout?: string; stderr?: string; failure?: string } = {},
+): StepResult {
+  const result: StepResult = {
+    step: name,
+    command: `run-${name}`,
+    outcome,
+    exitCode,
+    durationMs: 100,
+    stdout: output.stdout ?? "",
+    stderr: output.stderr ?? "",
+  };
+  if (output.failure !== undefined) result.failure = output.failure;
+  return result;
 }
 
 function runWith(steps: StepResult[]): SpecRun {
@@ -255,8 +276,24 @@ test("isUnmeasured counts a timeout and nothing else", () => {
 
 test("the evidence block names the claim, the spec file, and both commands", () => {
   const run = runFromSteps("specs/retry.json", "the retry path is handled", [
-    { step: "inject", command: "pytest -k retries", outcome: "passed", exitCode: 0, durationMs: 1200 },
-    { step: "neutralize", command: "NO_RETRY=1 pytest -k retries", outcome: "failed", exitCode: 1, durationMs: 900 },
+    {
+      step: "inject",
+      command: "pytest -k retries",
+      outcome: "passed",
+      exitCode: 0,
+      durationMs: 1200,
+      stdout: "1 passed\n",
+      stderr: "",
+    },
+    {
+      step: "neutralize",
+      command: "NO_RETRY=1 pytest -k retries",
+      outcome: "failed",
+      exitCode: 1,
+      durationMs: 900,
+      stdout: "assert 0 == 3\n1 failed\n",
+      stderr: "",
+    },
   ]);
   const text = formatEvidence(run);
   assert.match(text, /Claim: the retry path is handled/);
@@ -296,4 +333,219 @@ test("json output parses, and carries the verdict and both commands", () => {
   assert.equal(parsed.runs[0].verdict, "proven");
   assert.equal(parsed.runs[0].steps.length, 2);
   assert.equal(parsed.runs[1].steps[1].step, "neutralize");
+});
+
+// --- a command cut off before it could be judged ------------------------------
+//
+// Three different endings, three different sentences. Reporting a signal
+// kill or an overflow as a timeout tells the reader to raise a timeout that
+// had nothing to do with it, so each keeps its own outcome and its own
+// reason. All three leave the spec unmeasured, never failed.
+
+test("outcomeFor tells a timeout, an overflow and a signal kill apart", () => {
+  assert.equal(
+    outcomeFor({ status: null, timedOut: false, durationMs: 1, outputOverflowed: true, killedBySignal: "SIGTERM" }),
+    "output-overflow",
+  );
+  assert.equal(
+    outcomeFor({ status: null, timedOut: false, durationMs: 1, outputOverflowed: false, killedBySignal: "SIGKILL" }),
+    "killed",
+  );
+  // A timeout wins over both: the timeout kill carries a signal of its own.
+  assert.equal(
+    outcomeFor({ status: null, timedOut: true, durationMs: 1, outputOverflowed: true, killedBySignal: "SIGKILL" }),
+    "timed-out",
+  );
+  // Nothing killed it, so an ordinary exit code is read as usual.
+  assert.equal(outcomeFor({ status: 1, timedOut: false, durationMs: 1, killedBySignal: null }), "failed");
+});
+
+test("could-not-run: a signal-killed step is reported as killed, never as a timeout", () => {
+  for (const which of ["inject", "neutralize"] as const) {
+    const steps =
+      which === "inject"
+        ? [step("inject", "killed", null, { failure: "killed by SIGSEGV before it finished" }), step("neutralize", "failed", 1)]
+        : [step("inject", "passed", 0), step("neutralize", "killed", null, { failure: "killed by SIGSEGV before it finished" })];
+    const run = runWith(steps);
+    assert.equal(run.verdict, "could-not-run", which);
+    assert.equal(run.reason, "killed-by-signal", which);
+    assert.equal(isUnmeasured(run), true, which);
+  }
+});
+
+test("could-not-run: a step that printed too much is reported as an overflow, never as a timeout", () => {
+  const run = runWith([step("inject", "passed", 0), step("neutralize", "output-overflow")]);
+  assert.equal(run.verdict, "could-not-run");
+  assert.equal(run.reason, "output-overflow");
+  assert.equal(isUnmeasured(run), true);
+});
+
+test("a signal-killed or overflowing step is exit 3, and its own sentence reaches the report", () => {
+  const killed = runWith([step("inject", "passed", 0), step("neutralize", "killed", null, { failure: "killed by SIGSEGV before it finished" })]);
+  const overflowed = runWith([step("inject", "passed", 0), step("neutralize", "output-overflow", null, { failure: "printed more than 64 MB and was killed for it" })]);
+  assert.equal(exitCodeFor([killed]), 3);
+  assert.equal(exitCodeFor([overflowed]), 3);
+  const killedText = formatReportText({ source: "s", timeoutMs: 120_000, runs: [killed] });
+  assert.match(killedText, /killed by SIGSEGV before it finished/);
+  assert.match(killedText, /killed by a signal before it finished/);
+  assert.doesNotMatch(killedText, /hit the timeout/);
+  const overflowText = formatReportText({ source: "s", timeoutMs: 120_000, runs: [overflowed] });
+  assert.match(overflowText, /printed more output than this tool will hold/);
+  assert.doesNotMatch(overflowText, /hit the timeout/);
+});
+
+// M11: without the branch that reads a cut-off baseline, a baseline that
+// timed out is read as a command that could not be executed, which turns
+// exit 3 into exit 2 and blames the wrong thing.
+test("could-not-run: a baseline that timed out keeps the timeout reason and exit 3", () => {
+  const run = runWith([
+    step("baseline", "timed-out"),
+    step("inject", "not-run"),
+    step("neutralize", "not-run"),
+  ]);
+  assert.equal(run.verdict, "could-not-run");
+  assert.equal(run.reason, "timeout");
+  assert.equal(exitCodeFor([run]), 3);
+  assert.match(formatReportText({ source: "s", timeoutMs: 1000, runs: [run] }), /hit the timeout/);
+});
+
+test("could-not-run: a baseline killed by a signal, and one that printed too much, keep their own reasons", () => {
+  const killed = runWith([step("baseline", "killed"), step("inject", "not-run"), step("neutralize", "not-run")]);
+  assert.equal(killed.reason, "killed-by-signal");
+  assert.equal(exitCodeFor([killed]), 3);
+  const overflowed = runWith([
+    step("baseline", "output-overflow"),
+    step("inject", "not-run"),
+    step("neutralize", "not-run"),
+  ]);
+  assert.equal(overflowed.reason, "output-overflow");
+  assert.equal(exitCodeFor([overflowed]), 3);
+});
+
+// M13: without the branch that reads a step that never ran, a stopped
+// inject is scored as an inject that did not pass, which reports
+// handler-did-not-fire against a handling nothing ever exercised.
+test("could-not-run: a step that never ran is not an inject that failed", () => {
+  const run = runWith([step("inject", "not-run"), step("neutralize", "not-run")]);
+  assert.equal(run.verdict, "could-not-run");
+  assert.equal(run.reason, "command-not-runnable");
+  assert.notEqual(run.verdict, "handler-did-not-fire");
+  assert.equal(exitCodeFor([run]), 2);
+});
+
+// --- the output a proven verdict rests on -------------------------------------
+
+test("keepTail keeps the end, and short text untouched", () => {
+  assert.equal(keepTail("short", 100), "short");
+  assert.equal(keepTail("abcdef", 3), "def");
+});
+
+test("outputTail keeps the last lines, cut to the character limit, and drops nothing else", () => {
+  const many = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n");
+  const tail = outputTail(many);
+  assert.equal(tail.split("\n").length, TAIL_MAX_LINES);
+  assert.match(tail, /line 60$/);
+  assert.doesNotMatch(tail, /line 40\b/);
+  assert.ok(outputTail("x".repeat(TAIL_MAX_CHARS * 2)).length <= TAIL_MAX_CHARS);
+  assert.equal(outputTail("   \n\n"), "");
+});
+
+test("combinedOutput reads a runner that prints to either stream", () => {
+  assert.equal(combinedOutput(step("neutralize", "failed", 1, { stderr: "SyntaxError\n" })), "SyntaxError\n");
+  assert.equal(combinedOutput(step("neutralize", "failed", 1, { stdout: "1 failed\n" })), "1 failed\n");
+  assert.equal(
+    combinedOutput(step("neutralize", "failed", 1, { stdout: "out", stderr: "err" })),
+    "out\nerr",
+  );
+  assert.equal(combinedOutput(step("neutralize", "failed", 1)), "");
+});
+
+test("a proven spec prints the tail of what the neutralize command said, labelled a tail", () => {
+  const run = runWith([
+    step("inject", "passed", 0, { stdout: "ok\n" }),
+    step("neutralize", "failed", 1, { stderr: 'File "check.py", line 3\n    def (\nSyntaxError: invalid syntax\n' }),
+  ]);
+  const text = formatEvidence(run);
+  assert.match(text, /SyntaxError: invalid syntax/);
+  assert.match(text, /tail/);
+  assert.match(text, new RegExp(`last ${TAIL_MAX_LINES} lines`));
+  assert.match(text, /Nothing here checks why it failed/);
+});
+
+test("a proven spec whose neutralize command printed nothing says so", () => {
+  const run = runWith([step("inject", "passed", 0), step("neutralize", "failed", 1)]);
+  assert.match(formatEvidence(run), /nothing was printed/);
+});
+
+test("a proven spec prints at most the tail, never the whole run", () => {
+  const noisy = Array.from({ length: 500 }, (_, i) => `noise ${i}`).join("\n");
+  const run = runWith([step("inject", "passed", 0), step("neutralize", "failed", 1, { stdout: noisy })]);
+  const text = formatEvidence(run);
+  assert.doesNotMatch(text, /noise 0\b/);
+  assert.match(text, /noise 499/);
+});
+
+test("json output carries what each command printed", () => {
+  const run = runWith([
+    step("inject", "passed", 0, { stdout: "no quote written\n" }),
+    step("neutralize", "failed", 1, { stderr: "SyntaxError: invalid syntax\n" }),
+  ]);
+  const parsed = JSON.parse(formatReportJson({ source: "s", timeoutMs: 120_000, runs: [run] })) as {
+    runs: { steps: { stdout: string; stderr: string }[] }[];
+  };
+  assert.equal(parsed.runs[0].steps[0].stdout, "no quote written\n");
+  assert.equal(parsed.runs[0].steps[1].stderr, "SyntaxError: invalid syntax\n");
+});
+
+// --- the verdict claims only what was observed --------------------------------
+
+test("the proven verdict line claims two exit codes and nothing more", () => {
+  const text = formatEvidence(runWith([step("inject", "passed", 0), step("neutralize", "failed", 1)]));
+  assert.match(text, /Verdict: proven: the inject command passed and the neutralize command failed\./);
+  assert.doesNotMatch(text, /the handling fired/);
+});
+
+test("the summary line for an all-proven run claims two exit codes and nothing more", () => {
+  const text = formatReportText({
+    source: "s",
+    timeoutMs: 120_000,
+    runs: [runWith([step("inject", "passed", 0), step("neutralize", "failed", 1)])],
+  });
+  assert.match(text, /Every spec: the inject command passed and the neutralize command failed\./);
+  assert.doesNotMatch(text, /each handling fired/);
+  assert.doesNotMatch(text, /each control failed/);
+  assert.match(text, /why the neutralize command failed/);
+});
+
+// --- entries that were not run ------------------------------------------------
+
+test("formatSkipped names and counts every entry that was not run", () => {
+  assert.equal(formatSkipped(undefined), "");
+  assert.equal(formatSkipped([]), "");
+  const one = formatSkipped(["b-second.JSON"]);
+  assert.match(one, /1 entry/);
+  assert.match(one, /b-second\.JSON/);
+  const three = formatSkipped(["b-second.JSON", "c-third.json.bak", "d-fourth.jsonc"]);
+  assert.match(three, /3 entries/);
+  for (const name of ["b-second.JSON", "c-third.json.bak", "d-fourth.jsonc"]) {
+    assert.ok(three.includes(name), name);
+  }
+});
+
+test("a skipped entry reaches the report header even when every spec that ran was proven", () => {
+  const text = formatReportText({
+    source: "specs",
+    timeoutMs: 120_000,
+    runs: [runWith([step("inject", "passed", 0), step("neutralize", "failed", 1)])],
+    skipped: ["b-second.JSON"],
+  });
+  assert.match(text, /Not run: 1 entry/);
+  assert.match(text, /b-second\.JSON/);
+});
+
+test("json output carries the entries that were not run", () => {
+  const parsed = JSON.parse(
+    formatReportJson({ source: "specs", timeoutMs: 120_000, runs: [], skipped: ["c-third.json.bak"] }),
+  ) as { skipped: string[] };
+  assert.deepEqual(parsed.skipped, ["c-third.json.bak"]);
 });

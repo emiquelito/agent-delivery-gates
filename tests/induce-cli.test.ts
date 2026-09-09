@@ -177,7 +177,7 @@ test("proven: the check passes with the handling and fails without it, exit 0", 
     assert.equal(result.status, 0, result.stderr + result.stdout);
     assert.match(result.stdout, /proven 1, handler-did-not-fire 0, check-does-not-measure 0, could-not-run 0/);
     assert.match(result.stdout, /Verdict: proven/);
-    assert.match(result.stdout, /Every spec was proven/);
+    assert.match(result.stdout, /Every spec: the inject command passed and the neutralize command failed\./);
   });
 });
 
@@ -491,5 +491,225 @@ test("--help exits 0 and says what this command does not do", () => {
     assert.match(result.stdout, /validate-report does not run a\s+spec/);
     assert.match(result.stdout, /cannot tell whether a\s+spec is honest/);
     assert.match(result.stdout, /control is not optional/);
+  });
+});
+
+// --- what the neutralize command said -----------------------------------------
+//
+// A proven verdict rests on the neutralize command failing, and any failure
+// counts: a syntax error in the control script fails just as loudly as a
+// control that worked, and the exit code cannot tell them apart. The report
+// prints what the command said so a reader can.
+
+test("a proven spec prints the tail of the neutralize output, so a broken control is visible", () => {
+  const dir = makeProject(
+    {
+      "retry.json": {
+        ...PROVEN_SPEC,
+        neutralize: "node broken-control.mjs",
+      },
+    },
+    { "broken-control.mjs": "this is not( valid javascript\n" },
+  );
+  withProject(dir, () => {
+    const result = runCli(dir, []);
+    assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stdout, /Verdict: proven/);
+    assert.match(result.stdout, /SyntaxError/);
+    assert.match(result.stdout, /Neutralize output, tail/);
+    assert.match(result.stdout, /Nothing here checks why it failed/);
+  });
+});
+
+test("a proven spec's neutralize output reaches --format json", () => {
+  const dir = makeProject({ "retry.json": PROVEN_SPEC });
+  withProject(dir, () => {
+    const result = runCli(dir, ["--format", "json"]);
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout) as {
+      runs: { steps: { step: string; stdout: string; stderr: string }[] }[];
+    };
+    const [inject, neutralize] = parsed.runs[0].steps;
+    assert.match(inject.stdout, /no quote written, outbound calls: 3/);
+    assert.match(neutralize.stdout, /a 503 body was written out as a quote/);
+  });
+});
+
+test("a proven spec whose neutralize command printed nothing says so, and never leaves the block empty", () => {
+  const dir = makeProject({
+    "quiet.json": {
+      claim: "A control that says nothing is still shown as saying nothing.",
+      inject: "node -e 'process.exit(0)'",
+      neutralize: "node -e 'process.exit(1)'",
+    },
+  });
+  withProject(dir, () => {
+    const result = runCli(dir, []);
+    assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stdout, /Neutralize output: nothing was printed/);
+  });
+});
+
+// --- a command cut off before it could be judged ------------------------------
+
+test("a command printing more than 1 MB is run to the end, not killed and called a timeout", () => {
+  const dir = makeProject({
+    "loud.json": {
+      claim: "A loud check is not a check that ran out of time.",
+      inject: "node -e 'process.stdout.write(\"x\".repeat(3000000)); process.exit(0)'",
+      neutralize: "node -e 'process.stdout.write(\"y\".repeat(3000000)); process.exit(1)'",
+    },
+  });
+  withProject(dir, () => {
+    const result = runCli(dir, []);
+    assert.equal(result.status, 0, result.stdout);
+    assert.match(result.stdout, /Verdict: proven/);
+    assert.doesNotMatch(result.stdout, /timed-out/);
+    assert.doesNotMatch(result.stdout, /hit the timeout/);
+  });
+});
+
+test("a command killed by a signal is reported as killed and names the signal, never as a timeout", () => {
+  const dir = makeProject({
+    "killed.json": {
+      claim: "A killed check is not a check that ran out of time.",
+      inject: "node -e 'process.exit(0)'",
+      neutralize: "kill -9 $$",
+    },
+  });
+  withProject(dir, () => {
+    const result = runCli(dir, ["--timeout", "120"]);
+    assert.equal(result.status, 3, result.stdout);
+    assert.match(result.stdout, /killed \(killed by SIGKILL before it finished/);
+    assert.match(result.stdout, /Verdict: could-not-run/);
+    assert.match(result.stdout, /killed by a signal before it finished/);
+    assert.doesNotMatch(result.stdout, /timed-out/);
+    assert.doesNotMatch(result.stdout, /hit the timeout/);
+    // A control that was killed is never a control that worked.
+    assert.doesNotMatch(result.stdout, /Verdict: proven/);
+  });
+});
+
+test("a command that hits the timeout still reports the timeout, not a signal kill", () => {
+  const dir = makeProject({
+    "slow.json": {
+      claim: "A check that ran out of time is not a killed check.",
+      inject: "node -e 'setTimeout(() => {}, 10000)'",
+      neutralize: "node -e 'process.exit(1)'",
+      timeout: 1,
+    },
+  });
+  withProject(dir, () => {
+    const result = runCli(dir, []);
+    assert.equal(result.status, 3, result.stdout);
+    assert.match(result.stdout, /timed-out \(timed out/);
+    assert.match(result.stdout, /hit the timeout/);
+    assert.doesNotMatch(result.stdout, /killed by/);
+  });
+});
+
+// --- entries in the spec directory that were not run --------------------------
+
+test("a near-miss extension is named and counted in the header, never dropped in silence", () => {
+  const dir = makeProject({
+    "a-good.json": PROVEN_SPEC,
+    "b-second.JSON": PROVEN_SPEC,
+    "c-third.json.bak": PROVEN_SPEC,
+    "d-fourth.jsonc": PROVEN_SPEC,
+  });
+  withProject(dir, () => {
+    const result = runCli(dir, []);
+    assert.match(result.stdout, /Not run: 3 entries/);
+    for (const name of ["b-second.JSON", "c-third.json.bak", "d-fourth.jsonc"]) {
+      assert.ok(result.stdout.includes(name), `${name} is not named in:\n${result.stdout}`);
+    }
+    assert.match(result.stdout, /proven 1/);
+  });
+});
+
+test("a directory holding only near misses is refused, and the message names them", () => {
+  const dir = makeProject({ "b-second.JSON": PROVEN_SPEC, "c-third.json.bak": PROVEN_SPEC });
+  withProject(dir, () => {
+    const result = runCli(dir, []);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /nothing to run/);
+    assert.match(result.stderr, /b-second\.JSON/);
+    assert.match(result.stderr, /c-third\.json\.bak/);
+  });
+});
+
+test("--spec names no skipped entries, because nothing beside it was looked at", () => {
+  const dir = makeProject({ "a-good.json": PROVEN_SPEC, "b-second.JSON": PROVEN_SPEC });
+  withProject(dir, () => {
+    const result = runCli(dir, ["--spec", ".adg/induced/a-good.json"]);
+    assert.equal(result.status, 0, result.stdout);
+    assert.doesNotMatch(result.stdout, /Not run:/);
+  });
+});
+
+// --- what --help discloses ----------------------------------------------------
+
+test("--help says a spec runs shell commands with the caller's privileges", () => {
+  const dir = makeProject({});
+  withProject(dir, () => {
+    const result = runCli(dir, ["--help"]);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /runs with the\s+privileges of whoever ran this command/);
+    assert.match(result.stdout, /Read a spec that came from a\s+repository you did not write/);
+    assert.match(result.stdout, /"cwd" is not contained/);
+  });
+});
+
+test("--help says specs are not isolated from each other and must clean up", () => {
+  const dir = makeProject({});
+  withProject(dir, () => {
+    const result = runCli(dir, ["--help"]);
+    assert.match(result.stdout, /share one working directory/);
+    assert.match(result.stdout, /clean up after\s+itself/);
+  });
+});
+
+test("--help says the environment is inherited, not cleaned", () => {
+  const dir = makeProject({});
+  withProject(dir, () => {
+    const result = runCli(dir, ["--help"]);
+    assert.match(result.stdout, /environment is inherited from the caller, not cleaned/);
+    assert.match(result.stdout, /ADG_RETRY_DISABLED=1/);
+  });
+});
+
+test("--help says a process the command started can outlive the timeout kill", () => {
+  const dir = makeProject({});
+  withProject(dir, () => {
+    const result = runCli(dir, ["--help"]);
+    assert.match(result.stdout, /process the command itself started can\s+outlive it/);
+  });
+});
+
+test("--help says any neutralize failure counts, and that the output tail is there to be read", () => {
+  const dir = makeProject({});
+  withProject(dir, () => {
+    const result = runCli(dir, ["--help"]);
+    assert.match(result.stdout, /Any neutralize failure counts/);
+    assert.match(result.stdout, /tail of what its neutralize command said/);
+  });
+});
+
+test("a command printing more than the read buffer holds is an overflow, not a timeout", () => {
+  const dir = makeProject({
+    "flood.json": {
+      claim: "A check that prints without end is never judged.",
+      inject: "node -e 'process.exit(0)'",
+      neutralize: "yes 0123456789012345678901234567890123456789 | head -c 70000000; exit 1",
+    },
+  });
+  withProject(dir, () => {
+    const result = runCli(dir, ["--timeout", "120"]);
+    assert.equal(result.status, 3, result.stdout.slice(0, 400));
+    assert.match(result.stdout, /output-overflow \(printed more than 64 MB and was killed for it/);
+    assert.match(result.stdout, /Verdict: could-not-run/);
+    assert.match(result.stdout, /printed more output than this tool will hold/);
+    assert.doesNotMatch(result.stdout, /hit the timeout/);
+    assert.doesNotMatch(result.stdout, /Verdict: proven/);
   });
 });

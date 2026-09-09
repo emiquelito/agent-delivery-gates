@@ -153,8 +153,10 @@ Runs a declared failure injection twice: once with the handling in place,
 where the check must pass, and once with the handling taken away, where
 the same check must fail. A check that passes both ways is not measuring
 the handling at all. It would pass if the feature produced nothing, which
-is the question `induced-failure-required` asks a reviewer to ask, made
-mechanical.
+is the one question `induced-failure-required` asks a reviewer to ask,
+made mechanical. The rest of that record, whether the evidence exercises
+the failure named and whether the check asserts a user-observable
+outcome, is still a reviewer's judgement.
 
 A spec is one JSON file per claim, in `.adg/induced/` by default:
 `claim` (the sentence a report would make), `inject` (induce the failure
@@ -165,14 +167,42 @@ and `cwd`. Any other field is refused, and so is a spec with no
 `neutralize`: the control is not optional, and a run without one proves
 nothing.
 
+A spec is a script, not data. Every command in it is handed to a shell
+and runs with the privileges of whoever ran the command, on that machine,
+against those files. Read a spec that came from a repository you did not
+write before you run it, the way you would read any script before running
+it. `cwd` is not contained to the repository, and containing it would buy
+nothing: a command that can run at all can `cd` wherever it likes.
+
+Specs share one working directory, run in filename order, and are not
+isolated from each other, so a spec that leaves a file behind can change
+the verdict of a spec that runs after it. A spec must clean up after
+itself. The environment is inherited from the caller and is not cleaned:
+if the variable a neutralize step sets to take the handling away is
+already set in the caller's environment, the inject run is neutralized
+too, and the spec reports `check-does-not-measure` against a handling
+that works.
+
+An entry in the spec directory that is not a `*.json` file is not read as
+a spec, so `retry.JSON`, `retry.json.bak` and `retry.jsonc` are not run.
+Every such entry is named and counted in the report header, so a
+directory where only some specs ran cannot read like a clean run.
+
 Verdicts: `proven` (inject passed, neutralize failed),
 `handler-did-not-fire` (inject did not pass), `check-does-not-measure`
 (both passed), and `could-not-run` (a command could not be executed, a
-command timed out, the baseline was already failing, or the spec was
-malformed). On a proven spec it prints an evidence block naming the claim
-and both commands, which is text a delivery report can cite:
-`validate-report` asks a robustness claim to point at a commit, a path,
-or a command, and the inject command is that command.
+command was cut off before it could be judged, the baseline was already
+failing, or the spec was malformed). The verdict lines say only what was
+watched: two commands ran, one exited 0 and one did not.
+
+On a proven spec it prints an evidence block naming the claim, both
+commands, and the tail of what the neutralize command printed, which is
+text a delivery report can cite: `validate-report` asks a robustness
+claim to point at a commit, a path, or a command, and the inject command
+is that command. Read that tail. Any neutralize failure counts, whatever
+caused it, so a syntax error in the control script, a missing file, or a
+runner that collected no tests all report `proven`; the printed output is
+what lets a reader tell those from a control that worked.
 
 It writes to no source file, so it needs no clean-tree gate and has none;
 `git checkout`, `git stash`, and `git restore` are never run from it.
@@ -184,16 +214,23 @@ What it does not do:
 - It does not know whether a spec describes the failure a report means.
 - It cannot tell whether a spec is honest. A spec whose neutralize step
   breaks something unrelated still reports `proven`.
+- It does not check why a neutralize command failed, only that it did.
 - A command exiting 126 or 127 is read as never having run, because a
   neutralize step that was never runnable would otherwise look exactly
   like a control that worked. A command that chooses to exit 127 on its
   own is misread by that rule.
+- A command killed by a signal, and a command that printed more than the
+  64 MB this tool will hold, are each reported as themselves and never as
+  a timeout. Both leave the step with no verdict.
+- A command is killed at the timeout, but a process the command itself
+  started can outlive it, so a timed-out spec is worth a look.
 
 Exit codes: `0` every spec proven; `1` at least one spec not proven; `2`
 could not run as asked, including no specs at all, a malformed spec, a
 spec with no `neutralize`, a command that could not be executed, or a
-failing baseline; `3` nothing failed, but at least one spec timed out and
-so was never measured.
+failing baseline; `3` nothing failed, but at least one spec was cut off
+and never measured, by the timeout, by a signal, or by printing more than
+this tool will hold.
 
 ### scan-prose
 

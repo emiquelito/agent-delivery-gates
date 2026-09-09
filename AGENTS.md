@@ -204,10 +204,13 @@ an actually separate agent session:
 
 `induced-failure-required` gets a second line for the same reason. The
 hook reads report text: it asks that a robustness verb carry a durable
-evidence reference. Whether that evidence exercises the failure is what
-`agent-delivery-gates induce` answers, by running a declared injection
-with the handling present and again with it taken away. The two are
-separate commands and neither reads the other's input.
+evidence reference. `agent-delivery-gates induce` adds one thing to that,
+the negative control: it runs a declared injection with the handling
+present and again with it taken away, and reports whether the second run
+failed. Whether the evidence exercises the failure the report names, and
+whether the check asserts a user-observable outcome, are still a
+reviewer's judgement and no command here carries them. The two commands
+are separate and neither reads the other's input.
 
 One rule needs its own line, because a hook covers half of it and cannot
 cover the other half. `red-before-green` asks that every fix ship a test
@@ -313,10 +316,13 @@ exited 0 and reported that test as red against the base source.
 
 Runs a declared failure injection twice: once with the handling in place,
 where the check must pass, and once with the handling taken away, where
-the same check must fail. This is the other half of
-`induced-failure-required`, the half a text check cannot carry. That
-record ends by asking whether the check would still pass if the feature
-produced nothing; a spec's neutralize step is that question, run.
+the same check must fail. This is the negative control
+`induced-failure-required` asks for, and only that. The record ends by
+asking whether the check would still pass if the feature produced
+nothing; a spec's neutralize step is that one question, run. The record's
+other two judgements, whether the evidence exercises the failure named
+and whether the check asserts a user-observable outcome, are left to a
+reviewer exactly as before.
 
 ```
 induce [--dir PATH] [--spec PATH]... [--timeout SECONDS] [--format text|json]
@@ -331,15 +337,44 @@ and optionally `baseline` (the happy path, run first), `timeout`
 no `neutralize`: the control is not optional, and a run without one
 proves nothing. `templates/induce-spec.example.json` is a worked spec.
 
+A spec is a script, not data. Every command in it is handed to a shell
+and runs with the privileges of whoever ran the command, on that
+machine, against those files. Read a spec that came from a repository
+you did not write before you run it, the way you would read any script
+before running it. `cwd` is not contained to the repository, and
+containing it would buy nothing: a command that can run at all can `cd`
+wherever it likes.
+
+Specs share one working directory, run in filename order, and are not
+isolated from each other, so a spec that leaves a file behind can change
+the verdict of a spec that runs after it. A spec must clean up after
+itself. The environment is inherited from the caller and is not cleaned:
+if the variable a neutralize step sets to take the handling away is
+already set in the caller's environment, the inject run is neutralized
+too, and the spec reports `check-does-not-measure` against a handling
+that works. The example spec uses `ADG_RETRY_DISABLED=1` that way.
+
+An entry in the spec directory that is not a `*.json` file is not read
+as a spec, so `retry.JSON`, `retry.json.bak` and `retry.jsonc` are not
+run. Every such entry is named and counted in the report header, so a
+directory where only some specs ran cannot read like a clean run.
+
 The verdicts are `proven` (inject passed, neutralize failed),
 `handler-did-not-fire` (inject did not pass), `check-does-not-measure`
 (both passed, so the check would pass if the handling produced nothing),
-and `could-not-run` (a command could not be executed, a command timed
-out, the baseline was already failing, or the spec was malformed). A
-proven spec prints an evidence block naming the claim and both commands,
-which a delivery report can cite: `validate-report` asks a robustness
-claim to point at a commit, a path, or a command, and the inject command
-is that command.
+and `could-not-run` (a command could not be executed, a command was cut
+off before it could be judged, the baseline was already failing, or the
+spec was malformed). The verdict lines say only what was watched: two
+commands ran, one exited 0 and one did not.
+
+A proven spec prints an evidence block naming the claim, both commands,
+and the tail of what the neutralize command printed, which a delivery
+report can cite: `validate-report` asks a robustness claim to point at a
+commit, a path, or a command, and the inject command is that command.
+The tail is there to be read. Any neutralize failure counts, whatever
+caused it, so a syntax error in the control script, a missing file, or a
+runner that collected no tests all report `proven`; the printed output
+is what lets a reader tell those from a control that worked.
 
 This command writes to no source file, so it has no clean-tree gate and
 needs none; `git checkout`, `git stash`, and `git restore` are never run
@@ -352,16 +387,23 @@ What it does not do:
 - It does not know whether the spec describes the failure a report means.
 - It cannot tell whether a spec is honest. A spec whose neutralize step
   breaks something unrelated still reports `proven`.
+- It does not check why a neutralize command failed, only that it did.
 - A command exiting 126 or 127 is read as never having run, because a
   neutralize step that was never runnable would otherwise look exactly
   like a control that worked. A command that chooses to exit 127 on its
   own is misread by that rule.
+- A command killed by a signal, and a command that printed more than the
+  64 MB this tool will hold, are each reported as themselves and never as
+  a timeout. Both leave the step with no verdict.
+- A command is killed at the timeout, but a process the command itself
+  started can outlive it, so a timed-out spec is worth a look.
 
 Exit codes: `0` every spec proven; `1` at least one spec not proven; `2`
 could not run as asked, including no specs at all, a malformed spec, a
 spec with no `neutralize`, a command that could not be executed, or a
-failing baseline; `3` nothing failed, but at least one spec timed out and
-so was never measured.
+failing baseline; `3` nothing failed, but at least one spec was cut off
+and never measured, by the timeout, by a signal, or by printing more
+than this tool will hold.
 
 Verified: against a scratch Python project built from
 `docs/examples/07-a-retry-that-never-retries.md`, with a client that
