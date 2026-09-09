@@ -628,7 +628,7 @@ h4 { font-size: 1.05rem; margin: 0 0 .3rem; }
 p { margin: 0 0 1.2rem; }
 a { color: var(--link); }
 a:hover { text-decoration: none; }
-.lede { color: var(--muted); font-size: 1.35rem; line-height: 1.45; max-width: 44rem; }
+.lede { color: var(--fg); font-size: clamp(1.2rem, 2.1vw, 1.45rem); line-height: 1.45; max-width: 46rem; }
 nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; padding: 0; margin: 2rem 0 0; }
 nav a { font-size: 1rem; }
 main > article > section { padding: 5rem 0 0; }
@@ -653,10 +653,25 @@ ul.rules p { margin: 0 0 .4rem; }
    The left margin centres the row on the page without a transform, so it
    stays put with images off and with JavaScript off. */
 .headline {
-  font-size: clamp(1.15rem, 2.1vw, 1.45rem);
-  line-height: 1.55;
+  font-size: clamp(1.2rem, 2.1vw, 1.45rem);
+  color: var(--fg);
+  line-height: 1.5;
   max-width: 46rem;
   margin: 1.6rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.headline li { position: relative; padding-left: 1.9rem; margin: 0 0 .7rem; }
+/* The tick is drawn by the stylesheet and carries no meaning of its own: the
+   sentence beside it says everything, so a reader who never sees the mark
+   loses nothing. */
+.headline li::before {
+  content: "\\2713";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--accent);
+  font-weight: 700;
 }
 .cta { margin: 2rem 0 0; }
 .button {
@@ -718,7 +733,6 @@ footer { margin-top: 5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule
 img { max-width: 100%; height: auto; }
 @media (max-width: 34rem) {
   body { font-size: 1.0625rem; }
-  .lede { font-size: 1.2rem; }
   .wrap { padding-top: 2.5rem; }
   main > article > section { padding-top: 3.5rem; }
   main > article > section + section { margin-top: 3.5rem; }
@@ -733,7 +747,8 @@ ${jsonLdText}
 <header>
   <h1>${escapeHtml(PACKAGE_NAME)}</h1>
   <p class="lede">${escapeHtml(TAGLINE)}</p>
-  <p class="headline">${HEADLINE.map((line) => escapeHtml(line)).join("<br>")}</p>
+  <ul class="headline">${HEADLINE.map((line) => `\n    <li>${escapeHtml(line)}</li>`).join("")}
+  </ul>
   <p class="cta"><a class="button" href="${REPO_URL}">${GITHUB_MARK}<span>View on GitHub</span></a></p>
   <nav aria-label="Sections of this page">
     <ul>

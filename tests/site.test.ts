@@ -1165,3 +1165,27 @@ test("a button near the top goes to the repository, with the mark inline", () =>
   // background-image pointing at github.com would break that and this test.
   assert.doesNotMatch(header, /<img[^>]+github/i, "the mark is fetched, not inline");
 });
+
+// The four claims are a list, one item each, so a reader with a screen reader
+// hears four things and not one long sentence. The tick beside each is drawn
+// by the stylesheet: it carries no meaning the sentence does not already
+// carry, so losing it costs nothing.
+test("the headline is a list, one item per claim", () => {
+  const list = html.match(/<ul class="headline">[\s\S]*?<\/ul>/);
+  assert.ok(list, "the headline is not a list");
+  const items = list[0].match(/<li>/g) ?? [];
+  assert.equal(items.length, 4, `the headline has ${items.length} items, expected 4`);
+  const css = pageCss(html);
+  assert.match(css, /\.headline li::before \{[^}]*content:/, "the list items carry no mark");
+  assert.match(css, /\.headline li::before \{[^}]*color: var\(--accent\)/, "the mark is not the accent colour");
+});
+
+test("the lede and the claims under it are one block, in one size and colour", () => {
+  const css = pageCss(html);
+  const lede = css.match(/\.lede \{[^}]*\}/)![0];
+  const headline = css.match(/\.headline \{[^}]*\}/)![0];
+  for (const [name, rule] of [["lede", lede], ["headline", headline]] as Array<[string, string]>) {
+    assert.match(rule, /color: var\(--fg\)/, `${name} does not use the body colour`);
+    assert.match(rule, /font-size: clamp\(1\.2rem/, `${name} does not share the size`);
+  }
+});
