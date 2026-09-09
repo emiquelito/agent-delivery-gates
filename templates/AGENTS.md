@@ -285,18 +285,15 @@ point it at a rules file with `--rules`, or run `init --prose-preset
 NAME`, to turn it on.
 
 Exit codes: `0` clean, or nothing configured; `1` a banned pattern was
-found; `2` the scan could not run: a missing rules file, a bad path, or a
-bash older than 4.
+found; `2` the scan could not run: a missing rules file or a bad path.
 
-What it needs: **bash 4 or newer**. This one command uses associative
-arrays, `${x,,}` case folding, and `mapfile`, none of which exist in the
-bash 3.2 macOS ships as `/bin/bash`. Under an older bash it stops at once
-and exits `2`, naming the version it found and saying to run
-`brew install bash` and use that bash instead. It never runs a partial
-scan and reports it as clean.
+What it needs: Node, the same as every other command here. It used to be
+a bash script needing bash 4, which the bash 3.2 macOS ships as
+`/bin/bash` could not run; it is a Node program now, so that whole
+question is gone.
 
-Every other command here, and the pre-commit hook `init` writes, runs on
-bash 3.2 and BSD userland tools, so they work as shipped on macOS.
+Every command here, and the pre-commit hook `init` writes, works as
+shipped on macOS.
 
 ### Turning the prose scan on for an existing project
 
@@ -334,8 +331,8 @@ Exit codes: `0` everything passed; `1` at least one check failed, or was
 skipped, which counts as incomplete; `2` could not run as asked.
 
 Runs on bash 3.2 and BSD userland tools. One of its checks shells out to
-the prose scan, so on a Mac with only the system bash that check reports
-a failure saying the scan needs bash 4; install a newer bash to clear it.
+the prose scan, which is a Node program, so all eight checks run on a Mac
+with nothing installed beyond Node.
 
 ### init
 

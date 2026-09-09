@@ -1,7 +1,7 @@
 // Tests for scripts/pre-publication-check.sh. The script is bash, so every
-// test spawns it as a real subprocess, the way tests/scan-prose.test.ts
-// spawns scripts/scan-prose.sh: stdout, stderr, and exit code are the
-// contract, never an internal function's return value.
+// test spawns it as a real subprocess, the way tests/prose-scan-cli.test.ts
+// spawns the prose scan: stdout, stderr, and exit code are the contract,
+// never an internal function's return value.
 //
 // Every fixture is a throwaway git repository built fresh under
 // os.tmpdir(). None of this ever touches the repository this test file
@@ -19,7 +19,11 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "pre-publication-check.sh");
-const REAL_SCAN_PROSE = readFileSync(join(REPO_ROOT, "scripts", "scan-prose.sh"), "utf8");
+// Check 8 shells out to the prose scan, which is a Node program that imports
+// the pure core beside it, so a fixture repository needs both files at the
+// paths the check looks for.
+const REAL_SCAN_PROSE_CLI = readFileSync(join(REPO_ROOT, "hooks", "scan-prose.ts"), "utf8");
+const REAL_PROSE_SCAN_CORE = readFileSync(join(REPO_ROOT, "src", "prose-scan.ts"), "utf8");
 
 // A fictitious working-notes directory name, used only inside these throwaway
 // fixtures. Never the name this project's own .gitignore actually uses: this
@@ -27,7 +31,7 @@ const REAL_SCAN_PROSE = readFileSync(join(REPO_ROOT, "scripts", "scan-prose.sh")
 const FIXTURE_NOTES_DIR = "scratch-notes";
 
 // Built by concatenation, on purpose, so the raw bytes of this source file
-// never carry a contiguous home-directory path. scripts/scan-prose.test.ts
+// never carry a contiguous home-directory path. tests/prose-scan-cli.test.ts
 // does the same thing for its own banned-word fixture, for the same reason:
 // the thing under test would otherwise flag its own test file.
 const HOME_SEGMENT = "/" + "home" + "/";
@@ -84,11 +88,11 @@ function initRepo(dir: string): void {
       "\n",
     ),
   );
-  writeFile(dir, "scripts/scan-prose.sh", REAL_SCAN_PROSE);
+  writeFile(dir, "hooks/scan-prose.ts", REAL_SCAN_PROSE_CLI);
+  writeFile(dir, "src/prose-scan.ts", REAL_PROSE_SCAN_CORE);
   writeFile(dir, "README.md", "Nothing to see here.\n");
   git(dir, ["add", "-A"]);
   git(dir, ["commit", "-q", "-m", "Initial commit"]);
-  execFileSync("chmod", ["+x", join(dir, "scripts", "scan-prose.sh")]);
 }
 
 function commit(dir: string, message: string, allowEmpty = true): void {

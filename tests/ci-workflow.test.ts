@@ -222,7 +222,7 @@ test("this repository's own workflow runs the prose scan unconditionally with --
   // Unconditional: the run line names the command directly, with no shell
   // `if` guarding whether it executes, unlike the template's guarded form.
   assert.doesNotMatch(runLine!, /run:\s*\|/, "this repo's own prose step should not need a multi-line guard");
-  assert.match(runLine!, /scan-prose\.sh --require-rules/);
+  assert.match(runLine!, /hooks\/scan-prose\.ts --require-rules/);
 });
 
 test(".adg/prose-rules.txt still exists in this repository", () => {

@@ -11,7 +11,7 @@
 #      missing or unreadable, or the working notes directory's name could
 #      not be determined from it
 #
-# Exit 2 matters for the same reason it matters in scripts/scan-prose.sh: a
+# Exit 2 matters for the same reason it matters everywhere else here: a
 # gate that could not run must never look the same as a gate that ran and
 # found everything clean.
 #
@@ -212,8 +212,8 @@ check_no_tracked_personal_data() {
   home_pattern=$(home_path_pattern)
 
   # scripts/pre-publication-check.sh is excluded from the home-path search
-  # only: this file has to name that pattern to check for it, the same
-  # reason scripts/scan-prose.sh excludes itself from its own scan.
+  # only: this file has to name that pattern to check for it, and a file
+  # that has to write the thing it looks for cannot also be searched for it.
   set +e
   git -C "$ROOT" grep -InE -- "$home_pattern" -- ':!scripts/pre-publication-check.sh' \
     >"$tmpd/hit5a" 2>"$tmpd/err5a"
@@ -370,14 +370,22 @@ check_local_settings_not_tracked() {
 
 check_prose_scan() {
   local id="8" name="the prose scan passes"
-  local scanner="$ROOT/scripts/scan-prose.sh"
-  if [ ! -x "$scanner" ] && [ ! -f "$scanner" ]; then
+  # The scan is a Node program, not a shell script: this file has to run
+  # under the bash 3.2 macOS ships, and the scan needs no bash at all.
+  # dist/ first for the same reason bin/adg.ts prefers it: Node refuses to
+  # strip types from a .ts file under node_modules, so an installed copy of
+  # this package has only the built twin to run.
+  local scanner="$ROOT/dist/hooks/scan-prose.js"
+  if [ ! -f "$scanner" ]; then
+    scanner="$ROOT/hooks/scan-prose.ts"
+  fi
+  if [ ! -f "$scanner" ]; then
     fail "$id" "$name: '$scanner' not found"
     return
   fi
   set +e
   local output
-  output=$(bash "$scanner" 2>&1)
+  output=$(node "$scanner" 2>&1)
   local status=$?
   set -e
   case "$status" in

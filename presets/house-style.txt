@@ -1,11 +1,11 @@
 # House style preset for agent-delivery-gates' own prose scan.
 #
-# This file is a rules file for scripts/scan-prose.sh. See the format at the
-# top of that script, or CLAUDE.md, for the syntax: blank lines and lines
-# starting with # are ignored, "include: PATH" pulls in another rules file,
-# "exclude: GLOB" removes a path from the default scan, "prose-only: FRAGMENT"
-# applies only to prose files, and any other line is an extended-regex
-# fragment applied to every scanned file.
+# This file is a rules file for the agent-delivery-gates prose scan. See the
+# format at the top of hooks/scan-prose.ts, or CLAUDE.md, for the syntax:
+# blank lines and lines starting with # are ignored, "include: PATH" pulls in
+# another rules file, "exclude: GLOB" removes a path from the default scan,
+# "prose-only: FRAGMENT" applies only to prose files, and any other line is an
+# extended-regex fragment applied to every scanned file.
 #
 # This is one project's house style, not a delivery gate. A project that
 # adopts agent-delivery-gates does not have to adopt this file; it can point
@@ -58,8 +58,13 @@
 prose-only: [[:alpha:]] - [[:alpha:]]
 
 # Paths never scanned: this file holds every banned word above as a literal,
-# the lockfile is generated, and the licence text is not ours to edit.
-exclude: scripts/scan-prose.sh
+# the lockfile is generated, and the licence text is not ours to edit. The
+# scanner's own sources are not on this list. The bash script that used to be
+# here was, because it wrote one of these words in a comment; the files that
+# replaced it (src/prose-scan.ts, hooks/scan-prose.ts, and the tests, which
+# build their fixture word by concatenation) hold none, so they are scanned
+# like anything else. An exclusion is a check that does not run, and this one
+# has nothing left to earn it.
 exclude: package-lock.json
 exclude: LICENSE
 exclude: presets/house-style.txt

@@ -38,7 +38,7 @@ function fail_(name: string, file = ""): TestRecord {
 // runtime so the literal never appears in this file. Written out, it holds
 // the text this repository's own test-diff gate treats as a skip being added
 // to a test file, and the gate then fired on every command anyone ran in
-// this tree. tests/scan-prose.test.ts builds its banned words the same way,
+// this tree. tests/prose-scan-cli.test.ts builds its banned words the same way,
 // for the same reason: a fixture is not allowed to trip the gate it has
 // nothing to do with, and weakening the gate to hold the fixture would be
 // the wrong way round.

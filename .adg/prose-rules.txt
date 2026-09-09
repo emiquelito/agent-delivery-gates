@@ -1,4 +1,4 @@
-# This repo's own prose rules for scripts/scan-prose.sh.
+# This repo's own prose rules for the agent-delivery-gates prose scan.
 #
 # What follows is one project's house style, not part of the
 # agent-delivery-gates product. A project that adopts this tool is not

@@ -55,7 +55,7 @@ jobs:
         run: npm test
 
       - name: prose scan
-        run: scripts/scan-prose.sh --require-rules
+        run: node hooks/scan-prose.ts --require-rules
 
       - name: tally check
         run: node scripts/tally-report.ts --check

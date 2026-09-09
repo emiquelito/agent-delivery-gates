@@ -80,7 +80,7 @@ function isNonPathReference(cell: string): boolean {
 /**
  * Pulls a path out of a "where to see it" cell, when the cell names one.
  * Paths in this file are written inside backticks, for example
- * `` `tests/scan-prose.test.ts` `` or `` `rules/cross-cutting-audit.json` ``.
+ * `` `tests/prose-scan-cli.test.ts` `` or `` `rules/cross-cutting-audit.json` ``.
  * Returns undefined when the cell carries no backticked path, which is not
  * itself a problem: prose such as "no test; recorded here only" is valid
  * and names nothing to check.

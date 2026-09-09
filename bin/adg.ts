@@ -21,9 +21,8 @@
 // it is what "npm run build" compiles from, and what a test spawns
 // directly when working from a checkout instead of an install, where
 // nothing sits under node_modules and the plain .ts runs on its own.
-// The bash scripts (scripts/scan-prose.sh, scripts/pre-publication-check.sh)
-// carry no such restriction and are run from their one real location
-// either way.
+// The one bash script left (scripts/pre-publication-check.sh) carries no
+// such restriction and is run from its one real location either way.
 
 import process from "node:process";
 import { findPackageRoot } from "../src/package-root.ts";
@@ -255,7 +254,7 @@ function main(): void {
       nodeTool("scripts/tally-report.ts", rest);
       break;
     case "scan-prose":
-      shellTool("scripts/scan-prose.sh", rest);
+      nodeTool("hooks/scan-prose.ts", rest);
       break;
     case "check":
       shellTool("scripts/pre-publication-check.sh", rest);

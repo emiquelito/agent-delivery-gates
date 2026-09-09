@@ -1,12 +1,10 @@
-// Tests for hooks/scan-prose.ts, the TypeScript prose scan. Every test
-// spawns the CLI as a real subprocess and asserts on exit code and output,
-// the contract a caller actually sees.
+// Tests for hooks/scan-prose.ts, the prose scan. Every test spawns the CLI as
+// a real subprocess and asserts on exit code and output, the contract a
+// caller actually sees.
 //
-// Every case in tests/scan-prose.test.ts, which covers the bash script this
-// file's subject was ported from, is repeated here against the port. The two
-// implementations are held to one behaviour on purpose: while both are in
-// the tree, a divergence has to show up as a failing test and not as an
-// opinion about which one is right.
+// The scan was a bash script before this, covered by tests/scan-prose.test.ts.
+// Every case in that file was carried over here before it was deleted, so
+// nothing the bash was held to went unchecked in the move.
 //
 // Fixtures live under a fresh directory in os.tmpdir() per test and are
 // removed afterward. Nothing here ever touches this repository's own tree.
@@ -853,6 +851,20 @@ test("a banned word is still caught inside a fenced code block", () => {
     const doc = fileWith(dir, "doc.md", ["```", `${BANNED_WORD} in a fence`, "```", ""].join("\n"));
     const r = scan(["--rules", rules, "--require-rules", doc]);
     assert.equal(r.status, 1, "a word ban stopped applying inside a fence");
+  });
+});
+
+test("an uppercase banned word inside a fenced code block is caught", () => {
+  // The main match folds case; the re-check that decides whether a match
+  // inside a fence survives has to fold it the same way. When it did not, an
+  // uppercase banned word in a fence was found and then silently dropped,
+  // which is the one place a banned word is most likely to be shouted.
+  withTempDir((dir) => {
+    const rules = fileWith(dir, "rules.txt", `\\b${BANNED_WORD}\\b\n`);
+    const doc = fileWith(dir, "doc.md", ["```", `${BANNED_UPPER} in a fence`, "```", ""].join("\n"));
+    const r = scan(["--rules", rules, "--require-rules", doc]);
+    assert.equal(r.status, 1, "an uppercase banned word inside a fence was dropped");
+    assert.match(r.stdout, new RegExp(`doc\\.md:2:${BANNED_UPPER} in a fence`));
   });
 });
 

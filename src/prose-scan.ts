@@ -4,9 +4,9 @@
 // any future CI step, goes through this file so one decision about what
 // counts as a match lives in exactly one place.
 //
-// This is a port of scripts/scan-prose.sh, which needs bash 4 and so cannot
-// run on the bash macOS ships. The contract is that script's contract: see
-// its header comment for the long form. The short form:
+// This began as a port of a bash script that needed bash 4, and so could not
+// run on the bash macOS ships. That script is gone and this is now the only
+// implementation. The contract, in short:
 //
 //   - a rules file is one entry per line: blank and # lines ignored,
 //     "include: PATH" pulls in another file, "exclude: GLOB" drops a path
@@ -23,10 +23,8 @@
 // --- errors ------------------------------------------------------------------
 
 /**
- * Every failure this core reports that the CLI turns into exit 2. The
- * message is the text the bash script printed after its "scan-prose: "
- * prefix, so the two implementations can be run over the same tree and
- * compared line for line.
+ * Every failure this core reports that the CLI turns into exit 2. The CLI
+ * prints the message after its own "scan-prose: " prefix.
  */
 export class ProseScanError extends Error {
   constructor(message: string) {
@@ -401,7 +399,7 @@ export function parseBaseline(text: string, path: string): Map<string, number> {
 }
 
 const BASELINE_HEADER: readonly string[] = [
-  "# Prose scan baseline for scripts/scan-prose.sh.",
+  "# Prose scan baseline for the agent-delivery-gates prose scan.",
   "#",
   "# Every match already present in this project when the baseline was",
   "# recorded, so turning the prose gate on does not fail on everything",
@@ -493,9 +491,12 @@ export function scan(request: ScanRequest): ScanResult {
   const codePattern = codeSource === "" ? undefined : compilePattern(codeSource, rules.fragments, true);
   const prosePattern =
     proseSource === "" ? undefined : compilePattern(proseSource, [...rules.fragments, ...rules.proseOnly], true);
-  // The fence re-check is the source pattern applied to one line. The bash
-  // ran it without grep's -i, so it is compiled without the flag here too.
-  const fencePattern = codeSource === "" ? undefined : compilePattern(codeSource, rules.fragments, false);
+  // The fence re-check is the source pattern applied to one line, and it
+  // folds case exactly as the main match does. Anything else would drop an
+  // uppercase banned word written inside a fence: the main match would find
+  // the line and the re-check would then fail to confirm it, so the one
+  // place a banned word is most likely to be shouted would go unreported.
+  const fencePattern = codeSource === "" ? undefined : compilePattern(codeSource, rules.fragments, true);
 
   const counts = new Map<string, number>();
   const result: ScanResult = {

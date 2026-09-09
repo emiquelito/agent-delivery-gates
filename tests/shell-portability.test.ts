@@ -3,16 +3,17 @@
 // one that matters most: `adg init` writes it into every adopting project and
 // it runs on every commit there.
 //
-// Three things are checked here.
+// Two things are checked here.
 //
 //  1. No tracked shell script carries a GNU-only tool invocation, and none
 //     carries a bash 4 construct unless the script also carries a guard that
 //     refuses to run under an older bash. The file list comes from
 //     `git ls-files`, never a list written here, so a script added later is
-//     covered without anyone remembering to add it.
-//  2. scripts/scan-prose.sh does need bash 4, and its guard exits 2 with a
-//     message naming bash when the running major version is below 4.
-//  3. The GIT_* stripping in the two pre-commit hooks and in
+//     covered without anyone remembering to add it. No tracked script needs
+//     that guarded exemption today: the one script that did was the prose
+//     scan, and the prose scan is a Node program now, so both scans below
+//     pass with nothing to report. That is the point of them.
+//  2. The GIT_* stripping in the two pre-commit hooks and in
 //     scripts/pre-publication-check.sh still works after `env -0` was
 //     replaced by `compgen -v GIT_`.
 
@@ -27,14 +28,15 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 
-const SCAN_PROSE = join(REPO_ROOT, "scripts", "scan-prose.sh");
 const REPO_HOOK = join(REPO_ROOT, ".githooks", "pre-commit");
 const TEMPLATE_HOOK = join(REPO_ROOT, "templates", "pre-commit");
 const PUBLICATION_CHECK = join(REPO_ROOT, "scripts", "pre-publication-check.sh");
 
+// The markers a script would have to carry to earn the right to use a bash 4
+// construct. No tracked script carries them today; the constants stay so the
+// exemption stays checkable if one ever does.
 const GUARD_BEGIN = "# --- bash version guard: begin ---";
 const GUARD_END = "# --- bash version guard: end ---";
-const VERSION_SOURCE_MARKER = "adg-guard-version-source";
 
 // --- 1: no non-portable construct in any tracked shell script ---------------
 
@@ -47,7 +49,12 @@ function trackedShellScripts(): string[] {
     encoding: "utf8",
   });
   const paths = out.split("\0").filter((p) => p.length > 0);
-  assert.ok(paths.length >= 4, `expected several shell scripts, git listed ${paths.length}`);
+  // Named, not just counted: a list that came back short because the glob
+  // stopped matching would otherwise pass both scans below by looking at
+  // nothing. These three are the shell this repository still has.
+  for (const expected of [".githooks/pre-commit", "templates/pre-commit", "scripts/pre-publication-check.sh"]) {
+    assert.ok(paths.includes(expected), `git did not list ${expected}; it listed ${paths.join(", ")}`);
+  }
   return paths;
 }
 
@@ -175,99 +182,6 @@ test("the two pre-commit hooks and the publication check carry no bash 4 constru
   }
 });
 
-// --- 2: the scan-prose bash 4 guard ------------------------------------------
-
-/**
- * The guard block, lifted verbatim out of the real script.
- *
- * How this is tested, and why: BASH_VERSINFO is readonly in bash and cannot
- * be unset or reassigned, so there is no way to make a modern bash report
- * itself as 3.x, and no old bash to run under. What is done instead is to
- * take the guard's own lines out of the real file and run them, replacing
- * only the single marked line that reads the running version. Every other
- * part of the guard, the comparison, the message, and the exit code, is the
- * real text: change any of them in the script and this test moves with it.
- * The separate ordering test below covers the part this cannot, that the
- * guard runs before anything needing bash 4.
- */
-function guardBlock(): string {
-  const text = readFileSync(SCAN_PROSE, "utf8");
-  const start = text.indexOf(GUARD_BEGIN);
-  const end = text.indexOf(GUARD_END);
-  assert.ok(start >= 0, `${SCAN_PROSE} has no "${GUARD_BEGIN}" marker`);
-  assert.ok(end > start, `${SCAN_PROSE} has no "${GUARD_END}" marker after the begin marker`);
-  return text.slice(start, end + GUARD_END.length);
-}
-
-function runGuardAt(major: number): { status: number | null; stderr: string; stdout: string } {
-  const block = guardBlock();
-  const lines = block.split("\n");
-  const sourceLines = lines.filter((l) => l.includes(VERSION_SOURCE_MARKER) && !l.trim().startsWith("#"));
-  assert.equal(
-    sourceLines.length,
-    1,
-    `expected exactly one line marked ${VERSION_SOURCE_MARKER} in the guard, found ${sourceLines.length}`,
-  );
-  const script = ["#!/usr/bin/env bash", "set -euo pipefail"]
-    .concat(lines.map((l) => (l === sourceLines[0] ? `bash_major=${major}` : l)))
-    .concat(["echo GUARD-DID-NOT-FIRE", "exit 0"])
-    .join("\n");
-  const dir = mkdtempSync(join(tmpdir(), "adg-bash-guard-"));
-  try {
-    const path = join(dir, "guard.sh");
-    writeFileSync(path, script + "\n");
-    const r = spawnSync("bash", [path], { encoding: "utf8" });
-    return { status: r.status, stderr: r.stderr, stdout: r.stdout };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-test("scan-prose's guard exits 2 and names bash when the running major version is 3", () => {
-  const r = runGuardAt(3);
-  assert.equal(r.status, 2, `expected exit 2, got ${r.status}. stdout: ${r.stdout} stderr: ${r.stderr}`);
-  assert.doesNotMatch(r.stdout, /GUARD-DID-NOT-FIRE/);
-  assert.match(r.stderr, /\bbash\b/i);
-  assert.match(r.stderr, /bash 4 or newer/i);
-  // The message has to be actionable on the machine that hit it.
-  assert.match(r.stderr, /brew install bash/);
-});
-
-test("scan-prose's guard also refuses bash 2, and lets bash 4 and 5 through", () => {
-  assert.equal(runGuardAt(2).status, 2);
-  for (const major of [4, 5]) {
-    const r = runGuardAt(major);
-    assert.equal(r.status, 0, `bash ${major} should be allowed: ${r.stderr}`);
-    assert.match(r.stdout, /GUARD-DID-NOT-FIRE/);
-  }
-});
-
-test("the guard runs before the first thing in scan-prose that needs bash 4", () => {
-  const text = readFileSync(SCAN_PROSE, "utf8");
-  const guardEnd = text.indexOf(GUARD_END);
-  assert.ok(guardEnd > 0, "no guard end marker");
-  for (const { pattern } of BASH4_CONSTRUCTS) {
-    const global = new RegExp(pattern.source, "g");
-    for (const m of text.matchAll(global)) {
-      // The guard's own comment names the constructs it is guarding against.
-      if (m.index !== undefined && m.index < guardEnd) continue;
-      assert.ok(
-        m.index !== undefined && m.index > guardEnd,
-        `"${m[0]}" at offset ${m.index} appears before the guard finishes at ${guardEnd}`,
-      );
-    }
-  }
-});
-
-test("scan-prose does not fire the guard under the bash this suite runs on", () => {
-  // The guard must refuse an old bash without also refusing a new one.
-  const r = spawnSync("bash", [SCAN_PROSE, "--rules", "/nonexistent/adg/rules.txt", "README.md"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
-  assert.doesNotMatch(r.stderr, /needs bash 4 or newer/);
-});
-
 // --- 3: the GIT_* stripping still works --------------------------------------
 
 function git(dir: string, args: string[]): void {
@@ -308,7 +222,7 @@ function buildHookRepo(dir: string, tscExit: number): void {
     "package.json",
     JSON.stringify({ name: "fixture", private: true, scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
   );
-  writeExecutable(dir, "scripts/scan-prose.sh", "#!/usr/bin/env bash\nexit 0\n");
+  writeFile(dir, "hooks/scan-prose.ts", "process.exit(0);\n");
   writeFile(dir, "scripts/tally-report.ts", "process.exit(0);\n");
   git(dir, ["add", "-A"]);
   git(dir, ["commit", "-q", "-m", "Fixture commit"]);
@@ -354,7 +268,8 @@ test("the publication check ignores a GIT_DIR pointing at a path that does not e
     git(dir, ["config", "user.email", "fixture@example.invalid"]);
     git(dir, ["config", "user.name", "Fixture"]);
     writeFile(dir, ".gitignore", "node_modules/\nadg-fixture-notes/\n");
-    writeFile(dir, "scripts/scan-prose.sh", readFileSync(SCAN_PROSE, "utf8"));
+    writeFile(dir, "hooks/scan-prose.ts", readFileSync(join(REPO_ROOT, "hooks", "scan-prose.ts"), "utf8"));
+    writeFile(dir, "src/prose-scan.ts", readFileSync(join(REPO_ROOT, "src", "prose-scan.ts"), "utf8"));
     writeFile(dir, "README.md", "Nothing to see here.\n");
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-q", "-m", "Fixture commit"]);

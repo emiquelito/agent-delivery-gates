@@ -6,10 +6,10 @@
 // matching decisions and this file holds only argument parsing, file
 // reading, git, printing, and the exit code.
 //
-// This is the TypeScript port of scripts/scan-prose.sh, which needs bash 4
-// and so refuses to run under the bash 3.2 macOS ships. Node is already a
-// hard requirement of this package, so the port removes the second one, and
-// with it the BSD-versus-GNU differences the bash had to work around.
+// This scan used to be a bash script that needed bash 4, and so refused to
+// run under the bash 3.2 macOS ships. Node is already a hard requirement of
+// this package, so moving the scan here removed the second one, and with it
+// the BSD-versus-GNU differences the bash had to work around.
 //
 // Usage:
 //   scan-prose.ts                    scan every tracked text file, minus
@@ -200,7 +200,7 @@ function git(args: readonly string[], cwd?: string): GitRun {
   return { ok: run.status === 0, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
 }
 
-/** What `$(cat file)` in the bash did to git's error text: drop trailing newlines. */
+/** Drops trailing newlines from git's error text before it is printed. */
 function withoutTrailingNewlines(s: string): string {
   return s.replace(/\n+$/, "");
 }

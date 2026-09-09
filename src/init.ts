@@ -368,11 +368,19 @@ export function runInit(options: InitOptions): InitOutcome {
     if (dryRun) {
       lines.push(`would create: ${PROSE_BASELINE_REL_PATH}`);
     } else {
-      const scanScript = join(packageRoot, "scripts", "scan-prose.sh");
+      // The scan is a Node program. dist/ first, for the reason spelled out
+      // in bin/adg.ts: once this package is installed it sits under
+      // node_modules, where Node refuses to strip types from a .ts file, so
+      // the built twin is the only form that runs. The .ts source is what a
+      // plain checkout has, and nothing there is under node_modules.
+      const builtScanner = join(packageRoot, "dist", "hooks", "scan-prose.js");
+      const scanScript = existsSync(builtScanner)
+        ? builtScanner
+        : join(packageRoot, "hooks", "scan-prose.ts");
       const rulesTarget = resolve(targetDir, PROSE_RULES_REL_PATH);
       const baselineTarget = resolve(targetDir, PROSE_BASELINE_REL_PATH);
       const result = spawnSync(
-        "bash",
+        process.execPath,
         [scanScript, "--rules", rulesTarget, "--write-baseline", baselineTarget],
         { cwd: targetDir, encoding: "utf8" },
       );

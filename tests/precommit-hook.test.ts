@@ -1,9 +1,10 @@
 // Tests for .githooks/pre-commit. The hook is bash, so every test spawns it
-// as a real subprocess, the way tests/scan-prose.test.ts spawns
-// scripts/scan-prose.sh: stdout, stderr, and exit code are the contract.
+// as a real subprocess, the way tests/prose-scan-cli.test.ts spawns the prose
+// scan: stdout, stderr, and exit code are the contract.
 //
-// The hook shells out to real tools (npx tsc, npm test, scripts/scan-prose.sh,
-// node scripts/tally-report.ts), so each fixture repo carries its own stand-in
+// The hook shells out to real tools (npx tsc, npm test,
+// node hooks/scan-prose.ts, node scripts/tally-report.ts), so each fixture
+// repo carries its own stand-in
 // for every one of them, with an exit code the test controls. This keeps the
 // tests fast and independent of this repository's own toolchain, and lets a
 // test target exactly one step without the others' real behaviour getting in
@@ -99,10 +100,10 @@ function buildFixture(dir: string, exits: StepExit = {}): void {
     ),
   );
 
-  writeExecutable(
+  writeFile(
     dir,
-    "scripts/scan-prose.sh",
-    `#!/usr/bin/env bash\necho "stub scan-prose ran"\nexit ${scanProse}\n`,
+    "hooks/scan-prose.ts",
+    `process.stdout.write("stub scan-prose ran\\n");\nprocess.exit(${scanProse});\n`,
   );
 
   writeFile(dir, "scripts/tally-report.ts", `process.stdout.write("stub tally ran\\n");\nprocess.exit(${tally});\n`);
@@ -157,7 +158,7 @@ test("a failure at the prose scan step is named correctly", () => {
     const r = runHook(dir);
     assert.notEqual(r.status, 0);
     assert.match(r.all, /FAILED at: prose scan/);
-    assert.match(r.all, /scripts\/scan-prose\.sh/);
+    assert.match(r.all, /hooks\/scan-prose\.ts/);
   });
 });
 

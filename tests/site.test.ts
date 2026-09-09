@@ -495,7 +495,7 @@ test("the site is published only over a green run of the gates", () => {
   // on has to be in this file, and it has to run the checks.
   assert.match(yml, /^\s{2}gates:$/m, "the pages workflow has no gates job");
   assert.match(yml, /^\s{4}needs: gates$/m, "no job in the pages workflow waits on the gates");
-  for (const step of ["tsc --noEmit", "npm test", "scan-prose.sh --require-rules", "tally-report.ts --check"]) {
+  for (const step of ["tsc --noEmit", "npm test", "hooks/scan-prose.ts --require-rules", "tally-report.ts --check"]) {
     assert.ok(yml.includes(step), `the pages workflow's gates job does not run ${step}`);
   }
 

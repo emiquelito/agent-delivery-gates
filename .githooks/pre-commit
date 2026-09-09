@@ -65,7 +65,7 @@ run_step "typecheck" "npx tsc --noEmit" npx tsc --noEmit
 
 run_step "tests" "npm test" npm test
 
-run_step "prose scan" "scripts/scan-prose.sh --require-rules" scripts/scan-prose.sh --require-rules
+run_step "prose scan" "node hooks/scan-prose.ts --require-rules" node hooks/scan-prose.ts --require-rules
 
 run_step "tally check" "node scripts/tally-report.ts --check" node scripts/tally-report.ts --check
 

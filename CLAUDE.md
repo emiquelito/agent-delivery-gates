@@ -8,5 +8,5 @@ Working directory is the git root. Never reach above it.
 Commit messages describe the change only.
 
 All tracked prose in this repo follows a set of writing constraints, checked
-by `scripts/scan-prose.sh`. Run it against any markdown file before it is
+by `node hooks/scan-prose.ts`. Run it against any markdown file before it is
 tracked.
