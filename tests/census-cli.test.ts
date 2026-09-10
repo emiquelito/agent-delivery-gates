@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
-import { nodeCommand, existsExpr, writeExpr, runAndExit, bumpCounter } from "./lib/portable-command.ts";
+import { nodeCommand, existsExpr, writeExpr, catExpr, runAndExit, bumpCounter } from "./lib/portable-command.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "census.ts");
@@ -104,7 +104,11 @@ async function withPrivateTmpRoot<T>(fn: (root: string, env: Record<string, stri
   try {
     return await fn(root, { TMPDIR: root, TMP: root, TEMP: root });
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    // See the matching comment on the SIGINT test below: a worker just
+    // killed can still hold a Windows directory handle open briefly after
+    // the OS reports the process gone, and a bare rmSync lands inside that
+    // window often enough to fail with EBUSY.
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
 }
 
@@ -626,7 +630,7 @@ test("a '>' in a JUnit test name invents nothing", (t) => {
   // a runner writes when it joins a describe block to the test under it.
   const dir = makeRepo({ "results.xml": suite("plain") }, { "results.xml": suite("outer > inner") });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const result = runCli(dir, ["--command", "cat results.xml"]);
+  const result = runCli(dir, ["--command", nodeCommand(catExpr("results.xml"))]);
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /2 at the base, 2 at HEAD/);
   assert.match(result.stdout, /a\.js :: plain ran at the base commit/);
@@ -639,7 +643,7 @@ test("a JUnit testcase with no name is exit 2, never a census", (t) => {
     "notes.txt": "unchanged\n",
   });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const result = runCli(dir, ["--command", "cat results.xml"]);
+  const result = runCli(dir, ["--command", nodeCommand(catExpr("results.xml"))]);
   assert.equal(result.status, 2, result.stdout + result.stderr);
   assert.match(result.stderr, /carried no name/);
 });
@@ -699,7 +703,7 @@ test("JUnit XML is read end to end, and a lost case is reported", (t) => {
     },
   );
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const result = runCli(dir, ["--command", "cat results.xml"]);
+  const result = runCli(dir, ["--command", nodeCommand(catExpr("results.xml"))]);
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /Result format: junit/);
   assert.match(result.stdout, /OrderTest :: subtracts ran at the base commit/);
@@ -711,7 +715,7 @@ test("--format-in junit forces the parser, and unreadable output is still exit 2
     "notes.txt": "the suite did not change\n",
   });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const forced = runCli(dir, ["--command", "cat results.xml", "--format-in", "junit"]);
+  const forced = runCli(dir, ["--command", nodeCommand(catExpr("results.xml")), "--format-in", "junit"]);
   assert.equal(forced.status, 0, forced.stdout + forced.stderr);
   const wrong = runCli(dir, ["--command", "echo hello", "--format-in", "junit"]);
   assert.equal(wrong.status, 2);

@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,7 +196,7 @@ function writeFile(dir: string, relPath: string, content: string): void {
 
 function writeExecutable(dir: string, relPath: string, content: string): void {
   writeFile(dir, relPath, content);
-  execFileSync("chmod", ["+x", join(dir, relPath)]);
+  chmodSync(join(dir, relPath), 0o755);
   // See the matching comment in tests/precommit-hook.test.ts: without a
   // `.cmd` shim beside it, this stub is invisible to `npx tsc` on Windows,
   // which then runs whichever real `tsc` is next on PATH instead. The shim
@@ -237,7 +237,17 @@ function buildHookRepo(dir: string, tscExit: number): void {
   git(dir, ["commit", "-q", "-m", "Fixture commit"]);
 }
 
-test("the pre-commit hook ignores a GIT_DIR pointing at a path that does not exist", () => {
+// The three tests below spawn .githooks/pre-commit or
+// scripts/pre-publication-check.sh directly through bash (`spawnSync("bash",
+// [...])`), the same POSIX maintainer tools tests/precommit-hook.test.ts and
+// tests/pre-publication-check.test.ts test end to end. bash is not on PATH
+// on a plain Windows machine, so these are skipped there instead of ported.
+const BASH_SPAWN_SKIP =
+  process.platform === "win32"
+    ? "spawns a POSIX maintainer tool (.githooks/pre-commit or scripts/pre-publication-check.sh) through bash, not something a Windows user runs"
+    : false;
+
+test("the pre-commit hook ignores a GIT_DIR pointing at a path that does not exist", { skip: BASH_SPAWN_SKIP }, () => {
   withTempDir((dir) => {
     buildHookRepo(dir, 0);
     const r = spawnSync("bash", [REPO_HOOK], {
@@ -250,7 +260,7 @@ test("the pre-commit hook ignores a GIT_DIR pointing at a path that does not exi
   });
 });
 
-test("the pre-commit hook resolves the repository it is run in, not one GIT_DIR and GIT_WORK_TREE point at", () => {
+test("the pre-commit hook resolves the repository it is run in, not one GIT_DIR and GIT_WORK_TREE point at", { skip: BASH_SPAWN_SKIP }, () => {
   // A decoy that is a real repository, so the failure mode under test is
   // "resolved the wrong tree" and not "git could not run at all". Its
   // typecheck stub exits 1, so a hook that followed GIT_DIR reports a
@@ -271,7 +281,7 @@ test("the pre-commit hook resolves the repository it is run in, not one GIT_DIR 
   });
 });
 
-test("the publication check ignores a GIT_DIR pointing at a path that does not exist", () => {
+test("the publication check ignores a GIT_DIR pointing at a path that does not exist", { skip: BASH_SPAWN_SKIP }, () => {
   withTempDir((dir) => {
     git(dir, ["init", "-q"]);
     git(dir, ["config", "user.email", "fixture@example.invalid"]);

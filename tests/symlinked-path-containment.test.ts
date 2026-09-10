@@ -27,6 +27,7 @@ import process from "node:process";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
 import { isInsideSystemTemp, resolveWithinRoot, realPath } from "../src/path-allowlist.ts";
 import { runInit } from "../src/init.ts";
+import { SYMLINK_SKIP } from "./lib/symlink-capability.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = join(HERE, "..");
@@ -94,7 +95,7 @@ function buildSymlinkedRepo(t: TestContext): { real: string; linked: string; out
 
 // --- mutate --paths ----------------------------------------------------------
 
-test("mutate accepts a file named through a symlinked repository path", (t) => {
+test("mutate accepts a file named through a symlinked repository path", { skip: SYMLINK_SKIP }, (t) => {
   const { real, linked } = buildSymlinkedRepo(t);
   // Proof the two halves really do disagree as strings: this is the exact
   // condition the defect needed, asserted and not assumed.
@@ -115,7 +116,7 @@ test("mutate accepts a file named through a symlinked repository path", (t) => {
   assert.match(result.stdout, /src\/pick\.mjs/);
 });
 
-test("mutate still refuses a symlink inside the repository that points outside it", (t) => {
+test("mutate still refuses a symlink inside the repository that points outside it", { skip: SYMLINK_SKIP }, (t) => {
   const { real, linked, outside } = buildSymlinkedRepo(t);
   symlinkSync(join(outside, "loot.mjs"), join(real, "src", "escape.mjs"));
   git(real, ["add", "-A"]);
@@ -129,7 +130,7 @@ test("mutate still refuses a symlink inside the repository that points outside i
   assert.equal(readFileSync(join(outside, "loot.mjs"), "utf8"), SOURCE);
 });
 
-test("mutate still refuses a path outside the repository, existing and not", (t) => {
+test("mutate still refuses a path outside the repository, existing and not", { skip: SYMLINK_SKIP }, (t) => {
   const { linked, outside } = buildSymlinkedRepo(t);
 
   const existing = runMutate(linked, ["--paths", join(outside, "loot.mjs"), "--command", "true"]);
@@ -143,7 +144,7 @@ test("mutate still refuses a path outside the repository, existing and not", (t)
 
 // --- the repository file reader ----------------------------------------------
 
-test("the file reader accepts a file inside a repository named through a link", (t) => {
+test("the file reader accepts a file inside a repository named through a link", { skip: SYMLINK_SKIP }, (t) => {
   const { real, linked } = buildSymlinkedRepo(t);
   writeFileSync(join(real, "src", "marked.mjs"), "// marked\n");
 
@@ -159,7 +160,7 @@ test("the file reader accepts a file inside a repository named through a link", 
   assert.equal(readByReal(join(real, "src", "marked.mjs")), "// marked\n");
 });
 
-test("the file reader still refuses a link out of the repository and a path outside it", (t) => {
+test("the file reader still refuses a link out of the repository and a path outside it", { skip: SYMLINK_SKIP }, (t) => {
   const { real, linked, outside } = buildSymlinkedRepo(t);
   writeFileSync(join(outside, "secret.txt"), "not yours\n");
   symlinkSync(join(outside, "secret.txt"), join(real, "src", "escape.txt"));
@@ -172,7 +173,7 @@ test("the file reader still refuses a link out of the repository and a path outs
 
 // --- init --dir ---------------------------------------------------------------
 
-test("init writes into a target directory named through a symlink", (t) => {
+test("init writes into a target directory named through a symlink", { skip: SYMLINK_SKIP }, (t) => {
   const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-init-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const real = join(base, "project");
@@ -188,7 +189,7 @@ test("init writes into a target directory named through a symlink", (t) => {
   assert.equal(existsSync(join(real, ".githooks", "pre-commit")), true);
 });
 
-test("init still refuses to write through a directory that links out of the target", (t) => {
+test("init still refuses to write through a directory that links out of the target", { skip: SYMLINK_SKIP }, (t) => {
   const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-init-deny-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const target = join(base, "project");
@@ -208,7 +209,7 @@ test("init still refuses to write through a directory that links out of the targ
 
 // --- the shared helper, on its own --------------------------------------------
 
-test("a not-yet-created path inside the root is accepted, outside it is refused", (t) => {
+test("a not-yet-created path inside the root is accepted, outside it is refused", { skip: SYMLINK_SKIP }, (t) => {
   const { real, linked, outside } = buildSymlinkedRepo(t);
 
   const inside = resolveWithinRoot(real, join(linked, "src", "new-file.mjs"), realPath, real);
@@ -240,7 +241,7 @@ test("a sibling directory whose name starts with the root's name is not inside i
 
 // --- census's temporary worktree check ----------------------------------------
 
-test("census's worktree check refuses anything outside the system temp directory", (t) => {
+test("census's worktree check refuses anything outside the system temp directory", { skip: SYMLINK_SKIP }, (t) => {
   const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-temp-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   // The directory a run actually makes: inside the temp directory, accepted.
@@ -260,7 +261,7 @@ test("census's worktree check refuses anything outside the system temp directory
   assert.equal(isInsideSystemTemp(link, tmpdir(), realPath, process.cwd()), false);
 });
 
-test("census removes its worktree and leaves the repository alone, from a symlinked path", (t) => {
+test("census removes its worktree and leaves the repository alone, from a symlinked path", { skip: SYMLINK_SKIP }, (t) => {
   const { real, linked } = buildSymlinkedRepo(t);
   const censusCli = join(PACKAGE_ROOT, "hooks", "census.ts");
   const result = spawnSync("node", [censusCli, "--base", "HEAD", "--command", "true"], {

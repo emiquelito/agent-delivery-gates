@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,7 +57,7 @@ function writeFile(dir: string, relPath: string, content: string): void {
 
 function writeExecutable(dir: string, relPath: string, content: string): void {
   writeFile(dir, relPath, content);
-  execFileSync("chmod", ["+x", join(dir, relPath)]);
+  chmodSync(join(dir, relPath), 0o755);
   // A real `npm install` leaves a matching `.cmd` shim beside a POSIX
   // shebang script so Windows' own process creation, which cannot run a
   // bare extensionless file no matter what its first line says, has
@@ -136,7 +136,18 @@ function withTempRepo(fn: (dir: string) => void): void {
   }
 }
 
-test("all steps passing exits 0", () => {
+// .githooks/pre-commit is bash, run here with `spawnSync("bash", [HOOK], ...)`
+// (see runHook above), so every test in this file is a POSIX maintainer-tool
+// test: it exercises a hook the project's own Linux/macOS contributors run,
+// never something a Windows user's own workflow invokes. bash is not on PATH
+// on a plain Windows machine (see the comment on writeExecutable above), so
+// these are skipped there instead of ported.
+const HOOK_SKIP =
+  process.platform === "win32"
+    ? "spawns .githooks/pre-commit through bash, a POSIX maintainer tool, not something a Windows user runs"
+    : false;
+
+test("all steps passing exits 0", { skip: HOOK_SKIP }, () => {
   withTempRepo((dir) => {
     buildFixture(dir);
     const r = runHook(dir);
@@ -145,7 +156,7 @@ test("all steps passing exits 0", () => {
   });
 });
 
-test("the hook exits non-zero when a check fails, and names it with the command to run it alone", () => {
+test("the hook exits non-zero when a check fails, and names it with the command to run it alone", { skip: HOOK_SKIP }, () => {
   withTempRepo((dir) => {
     buildFixture(dir, { test: 1 });
     const r = runHook(dir);
@@ -155,7 +166,7 @@ test("the hook exits non-zero when a check fails, and names it with the command 
   });
 });
 
-test("a failure at an earlier step stops before a later step runs", () => {
+test("a failure at an earlier step stops before a later step runs", { skip: HOOK_SKIP }, () => {
   withTempRepo((dir) => {
     buildFixture(dir, { test: 1, scanProse: 1 });
     const r = runHook(dir);
@@ -167,7 +178,7 @@ test("a failure at an earlier step stops before a later step runs", () => {
   });
 });
 
-test("a failure at the prose scan step is named correctly", () => {
+test("a failure at the prose scan step is named correctly", { skip: HOOK_SKIP }, () => {
   withTempRepo((dir) => {
     buildFixture(dir, { scanProse: 1 });
     const r = runHook(dir);
@@ -177,7 +188,7 @@ test("a failure at the prose scan step is named correctly", () => {
   });
 });
 
-test("a failure at the tally step is named correctly", () => {
+test("a failure at the tally step is named correctly", { skip: HOOK_SKIP }, () => {
   withTempRepo((dir) => {
     buildFixture(dir, { tally: 1 });
     const r = runHook(dir);
@@ -187,7 +198,7 @@ test("a failure at the tally step is named correctly", () => {
   });
 });
 
-test("ADG_SKIP_PRECOMMIT skips the hook and prints loudly", () => {
+test("ADG_SKIP_PRECOMMIT skips the hook and prints loudly", { skip: HOOK_SKIP }, () => {
   withTempRepo((dir) => {
     // Every step would fail if it ran, so a status-0 result here can only
     // mean the skip took effect, not that the checks happened to pass.

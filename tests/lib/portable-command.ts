@@ -42,6 +42,12 @@ export function writeExpr(text: string): string {
   return `process.stdout.write('${escaped}')`;
 }
 
+/** JS for: print `path`'s contents to stdout unchanged. A portable stand-in
+ * for `cat path`. `path` must not itself contain a single quote. */
+export function catExpr(path: string): string {
+  return `process.stdout.write(require('fs').readFileSync('${path}'))`;
+}
+
 /** JS statement: run `shellCommand` through this platform's own shell (the
  * same way spawnCommand itself runs any command) and exit with its
  * status. Used to keep one branch of a conditional test command running

@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import { SYMLINK_SKIP } from "./lib/symlink-capability.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "..", "hooks", "scan-prose.ts");
@@ -159,7 +160,7 @@ test("a directory argument exits 2", () => {
   });
 });
 
-test("a symlink whose target does not exist exits 2 and says so", () => {
+test("a symlink whose target does not exist exits 2 and says so", { skip: SYMLINK_SKIP }, () => {
   withTempDir((dir) => {
     const link = join(dir, "dangling.md");
     symlinkSync(join(dir, "absent.md"), link);

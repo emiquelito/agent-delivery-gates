@@ -108,7 +108,18 @@ const NO_SUCH_NAME = "zzz-fixture-does-not-contain-this-zzz";
 
 // --- the clean case ----------------------------------------------------------
 
-test("a clean fixture repository passes", () => {
+// Every test in this file spawns scripts/pre-publication-check.sh through
+// bash (see runCheck above), the same POSIX maintainer tool
+// tests/shell-portability.test.ts exercises a corner of. It runs on this
+// project's own Linux/macOS maintainer machine and in Linux CI, never on a
+// Windows user's own workflow, and bash is not on PATH on a plain Windows
+// machine, so these are skipped there instead of ported.
+const CHECK_SKIP =
+  process.platform === "win32"
+    ? "spawns scripts/pre-publication-check.sh through bash, a POSIX maintainer tool, not something a Windows user runs"
+    : false;
+
+test("a clean fixture repository passes", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: NO_SUCH_NAME });
@@ -119,7 +130,7 @@ test("a clean fixture repository passes", () => {
 
 // --- check 1: notes directory history ---------------------------------------
 
-test("a commit that added a file under the notes directory fails, even once the file is gone from the current tree", () => {
+test("a commit that added a file under the notes directory fails, even once the file is gone from the current tree", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, `${FIXTURE_NOTES_DIR}/draft.md`, "working notes\n");
@@ -138,7 +149,7 @@ test("a commit that added a file under the notes directory fails, even once the 
 
 // --- check 2: AI attribution in commit messages -----------------------------
 
-test("a commit message with an assistant co-authored-by line fails when the check is asked for", () => {
+test("a commit message with an assistant co-authored-by line fails when the check is asked for", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "notes.md", "an ordinary change\n");
@@ -154,7 +165,7 @@ test("a commit message with an assistant co-authored-by line fails when the chec
 
 // --- check 3: personal path in commit messages ------------------------------
 
-test("a commit message with a home directory path fails", () => {
+test("a commit message with a home directory path fails", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "notes.md", "an ordinary change\n");
@@ -167,7 +178,7 @@ test("a commit message with a home directory path fails", () => {
 
 // --- check 4: a tracked file naming the notes directory ---------------------
 
-test("a tracked file naming the notes directory fails", () => {
+test("a tracked file naming the notes directory fails", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "docs/setup.md", `Working notes live under ${FIXTURE_NOTES_DIR}/ locally.\n`);
@@ -180,7 +191,7 @@ test("a tracked file naming the notes directory fails", () => {
 
 // --- check 5: a tracked file holding a home directory path ------------------
 
-test("a tracked file holding a home directory path fails", () => {
+test("a tracked file holding a home directory path fails", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "docs/setup.md", `Run it from ${fixtureHomePath("fixtureuser")}.\n`);
@@ -193,7 +204,7 @@ test("a tracked file holding a home directory path fails", () => {
 
 // --- check 6: forbidden names -------------------------------------------------
 
-test("a forbidden name in a tracked file fails", () => {
+test("a forbidden name in a tracked file fails", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const forbidden = "fixture-forbidden-word";
@@ -205,7 +216,7 @@ test("a forbidden name in a tracked file fails", () => {
   });
 });
 
-test("a forbidden name that appears only in a commit message fails", () => {
+test("a forbidden name that appears only in a commit message fails", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const forbidden = "fixture-forbidden-word-in-history";
@@ -217,7 +228,7 @@ test("a forbidden name that appears only in a commit message fails", () => {
   });
 });
 
-test("no forbidden names configured makes the run incomplete and exits 1", () => {
+test("no forbidden names configured makes the run incomplete and exits 1", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: undefined, ADG_FORBIDDEN_NAMES_FILE: undefined });
@@ -229,7 +240,7 @@ test("no forbidden names configured makes the run incomplete and exits 1", () =>
 
 // --- check 7: local settings tracked -----------------------------------------
 
-test("a tracked local settings file fails", () => {
+test("a tracked local settings file fails", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, ".claude/settings.local.json", "{}\n");
@@ -242,7 +253,7 @@ test("a tracked local settings file fails", () => {
 
 // --- running from a subfolder -------------------------------------------------
 
-test("running from a subfolder gives the same answer", () => {
+test("running from a subfolder gives the same answer", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "docs/setup.md", `Working notes live under ${FIXTURE_NOTES_DIR}/ locally.\n`);
@@ -256,7 +267,7 @@ test("running from a subfolder gives the same answer", () => {
 
 // --- not a git repository ------------------------------------------------------
 
-test("a directory that is not a git repository exits 2", () => {
+test("a directory that is not a git repository exits 2", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: NO_SUCH_NAME });
     assert.equal(r.status, 2);
@@ -266,7 +277,7 @@ test("a directory that is not a git repository exits 2", () => {
 // The names file is written by a person, so it needs the things a person
 // writes: notes to themselves, and blank lines. Treating a note as a name to
 // search for turns the check into noise.
-test("a comment line in the names file is not treated as a name", () => {
+test("a comment line in the names file is not treated as a name", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const namesFile = join(dir, "..", "names-with-comment.txt");
@@ -284,7 +295,7 @@ test("a comment line in the names file is not treated as a name", () => {
 // Being asked to read a file that is not there is not a failed check. It is
 // the script unable to do what it was asked, which is a different exit code
 // and must never look like either a pass or a clean fail.
-test("a names file that cannot be read exits 2", () => {
+test("a names file that cannot be read exits 2", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES_FILE: join(dir, "..", "absent-names.txt") });
@@ -296,7 +307,7 @@ test("a names file that cannot be read exits 2", () => {
 // The first real use of this script ran it against the placeholder names from
 // its own instructions. It printed a pass having looked for nothing, which is
 // the failure this whole repo is about, in the last gate before publication.
-test("placeholder names make the run incomplete instead of passing", () => {
+test("placeholder names make the run incomplete instead of passing", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: "your-codename,a-client-name,an-employer-name" });
@@ -306,7 +317,7 @@ test("placeholder names make the run incomplete instead of passing", () => {
   });
 });
 
-test("a name that does not read as a placeholder still runs the check", () => {
+test("a name that does not read as a placeholder still runs the check", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     const r = runCheck(dir, { ADG_FORBIDDEN_NAMES: "qwxvzrandomname" });
@@ -319,7 +330,7 @@ test("a name that does not read as a placeholder still runs the check", () => {
 // account and no machine, and documenting where a tool keeps its config is
 // the right thing to write, so the check must not stop on it. It did once,
 // on a README line naming a config file, and failed the whole run.
-test("a tracked file holding a bare tilde path passes check 5", () => {
+test("a tracked file holding a bare tilde path passes check 5", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "docs/setup.md", "Add this to " + "~" + "/.codex/config.toml yourself.\n");
@@ -333,7 +344,7 @@ test("a tracked file holding a bare tilde path passes check 5", () => {
 // for the person making the commit, so the check is off unless asked for. OFF
 // is not SKIP: a check nobody asked for leaves the verdict alone, while a
 // check that could not run makes the whole run incomplete.
-test("the attribution check is off unless asked for, and does not make the run incomplete", () => {
+test("the attribution check is off unless asked for, and does not make the run incomplete", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "notes.md", "ordinary content\n");
@@ -345,7 +356,7 @@ test("the attribution check is off unless asked for, and does not make the run i
   });
 });
 
-test("the attribution check runs, and fails, when asked for", () => {
+test("the attribution check runs, and fails, when asked for", { skip: CHECK_SKIP }, () => {
   withTempRepo((dir) => {
     initRepo(dir);
     writeFile(dir, "notes.md", "ordinary content\n");

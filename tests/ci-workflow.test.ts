@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -130,7 +130,7 @@ function withScratchDir(fn: (dir: string) => void): void {
 function installStubNpx(dir: string, exitCode = 0): { binDir: string; callsFile: string } {
   const binDir = join(dir, "bin");
   const callsFile = join(dir, "npx-calls.txt");
-  execFileSync("mkdir", ["-p", binDir]);
+  mkdirSync(binDir, { recursive: true });
   writeFileSync(
     join(binDir, "npx"),
     `#!/usr/bin/env bash\necho "$@" >> "${callsFile}"\nexit ${exitCode}\n`,
@@ -154,7 +154,18 @@ function runProseScanShell(dir: string, binDir: string): { status: number; stdou
   }
 }
 
-test("the CI template's prose step does not run the scan when rules are absent", () => {
+// These four run the CI template's prose-scan step through a real bash, the
+// same fragment GitHub's own Linux runner executes -- never a script a
+// Windows user runs themselves. bash is not on PATH on a plain Windows
+// machine (only GitHub's windows-latest runner happens to carry Git's bash
+// there), so this is a POSIX CI-only fragment, not a Windows portability
+// gap to close.
+const BASH_STEP_SKIP =
+  process.platform === "win32"
+    ? "runs the CI template's prose-scan step through bash, a POSIX fragment GitHub's Linux runner executes, not something a Windows user runs"
+    : false;
+
+test("the CI template's prose step does not run the scan when rules are absent", { skip: BASH_STEP_SKIP }, () => {
   withScratchDir((dir) => {
     const { binDir, callsFile } = installStubNpx(dir);
     const result = runProseScanShell(dir, binDir);
@@ -164,9 +175,9 @@ test("the CI template's prose step does not run the scan when rules are absent",
   });
 });
 
-test("the CI template's prose step still passes --require-rules when it does run", () => {
+test("the CI template's prose step still passes --require-rules when it does run", { skip: BASH_STEP_SKIP }, () => {
   withScratchDir((dir) => {
-    execFileSync("mkdir", ["-p", join(dir, ".adg")]);
+    mkdirSync(join(dir, ".adg"), { recursive: true });
     writeFileSync(join(dir, ".adg", "prose-rules.txt"), "\\bexample\\b\n");
     const { binDir, callsFile } = installStubNpx(dir);
     const result = runProseScanShell(dir, binDir);
@@ -177,9 +188,9 @@ test("the CI template's prose step still passes --require-rules when it does run
   });
 });
 
-test("the CI template's prose step uses the baseline only when it exists", () => {
+test("the CI template's prose step uses the baseline only when it exists", { skip: BASH_STEP_SKIP }, () => {
   withScratchDir((dir) => {
-    execFileSync("mkdir", ["-p", join(dir, ".adg")]);
+    mkdirSync(join(dir, ".adg"), { recursive: true });
     writeFileSync(join(dir, ".adg", "prose-rules.txt"), "\\bexample\\b\n");
     const { binDir: binDirNoBaseline, callsFile: callsNoBaseline } = installStubNpx(dir);
     const withoutBaseline = runProseScanShell(dir, binDirNoBaseline);
@@ -194,10 +205,10 @@ test("the CI template's prose step uses the baseline only when it exists", () =>
   });
 });
 
-test("the CI template's prose step fails the build when the scan it runs fails", () => {
+test("the CI template's prose step fails the build when the scan it runs fails", { skip: BASH_STEP_SKIP }, () => {
   for (const baseline of [false, true]) {
     withScratchDir((dir) => {
-      execFileSync("mkdir", ["-p", join(dir, ".adg")]);
+      mkdirSync(join(dir, ".adg"), { recursive: true });
       writeFileSync(join(dir, ".adg", "prose-rules.txt"), "\\bexample\\b\n");
       if (baseline) writeFileSync(join(dir, ".adg", "prose-baseline.txt"), "");
       const { binDir, callsFile } = installStubNpx(dir, 1);
