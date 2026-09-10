@@ -547,6 +547,16 @@ const grammarGenuineFailures = new Set<string>();
  * and otherwise returns the path, even when every file the package ships
  * has been deleted. That is exactly "is this package present," asked
  * without depending on any one file inside it existing.
+ *
+ * `resolveToUnqualified` has been part of Yarn's documented runtime API
+ * since Plug'n'Play's first release and is what Yarn itself tells a
+ * consumer to call; this project assumes that interface stays stable
+ * across the PnP major versions Yarn has shipped, the same way it assumes
+ * `require.resolve.paths` stays stable across Node versions in the
+ * non-PnP branch below. Neither assumption has a test: this project has
+ * no PnP install of its own to run one against, real or synthetic, and a
+ * synthetic one could only assert that this file calls the method it
+ * already calls.
  */
 interface PnpApi {
   resolveToUnqualified(
@@ -567,6 +577,17 @@ interface PnpApi {
  * for reaching this API from any file it controls, not a filesystem
  * module: nothing on disk is named "pnpapi".
  */
+// A corrupted Plug'n'Play data file (`.pnp.data.json` unreadable or
+// unparsable) makes `require("pnpapi")` itself throw, landing in the catch
+// below and returning null exactly as the non-PnP case does. That sends
+// isPackageManifestResolvable to the disk-based branch, which finds no
+// node_modules tree under a real PnP layout and reports every package
+// absent -- the same side this function already leans on for anything it
+// cannot answer precisely (see the "silent, permanent hard-block" this
+// whole file exists to avoid). No test reaches this: nothing in this
+// project's real call sites corrupts Yarn's own data file, and manufacturing
+// that corruption would only prove Yarn's loader still refuses to run,
+// which is Yarn's contract to keep, not this file's.
 function getPnpApi(): PnpApi | null {
   if (process.versions.pnp === undefined) return null;
   try {
@@ -674,34 +695,23 @@ function isPackageManifestResolvable(packageName: string): boolean {
  * reach
  * that this function needs to separate out, the way web-tree-sitter's can.
  *
- * `ERR_PACKAGE_PATH_NOT_EXPORTED` is included in the code guard below for
- * the same reason the previous two are: it is what `import()` of a bare
- * specifier throws when the target package ships an `exports` map that
- * does not list a root (".") entry -- a form none of the eight packages
- * this project depends on uses today (checked directly against each
- * installed copy), but nothing stops a future release of any of them
- * from adding one. Without this code included, that release would throw
- * a code this guard does not recognise, `return false` before ever
- * reaching `isPackageManifestResolvable`, and read as a real failure
- * for every adopter of that language -- installed or not, since the
- * check never gets far enough to tell the difference -- with no
- * reinstall able to fix a exports map shipped by the package itself:
- * exactly the silent, permanent hard-block this function exists to
- * avoid causing. Including the code costs nothing when it never fires:
- * `isPackageManifestResolvable` still resolves the package (its
- * manifest, or under Plug'n'Play its presence in the dependency graph,
- * neither of which touches the `exports` map) and correctly reports it
- * present, so this stays a real failure, not a manufactured absence.
+ * `ERR_PACKAGE_PATH_NOT_EXPORTED` was tried here too, on the theory that a
+ * future package release shipping an `exports` map with no root (".")
+ * entry should reach the manifest check below instead of reading as a
+ * permanent failure. Traced through instead of assumed: the only place
+ * this code can be thrown is `resolveWasmPath`'s own
+ * `require.resolve(\`${packageName}/package.json\`)`, and Node only throws
+ * that code after it has already found and parsed the target package's
+ * `package.json` -- the exports map that rejected the subpath comes from
+ * that same manifest. By the time this function ever saw the code, the
+ * manifest check below would already find the package on disk (or, under
+ * Plug'n'Play, in the dependency graph) with or without this code in the
+ * guard, so adding it changed no verdict this function returns. Left out,
+ * matching what actually reaches the guard.
  */
 function isModuleAbsenceError(err: unknown, packageNames: readonly string[]): boolean {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
-  if (
-    code !== "MODULE_NOT_FOUND" &&
-    code !== "ERR_MODULE_NOT_FOUND" &&
-    code !== "ERR_PACKAGE_PATH_NOT_EXPORTED"
-  ) {
-    return false;
-  }
+  if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") return false;
   return packageNames.some((packageName) => !isPackageManifestResolvable(packageName));
 }
 
