@@ -60,7 +60,7 @@ function isGateName(value: string | undefined): value is GateName {
   return value !== undefined && (GATE_NAMES as readonly string[]).includes(value);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const gateArg = process.argv[2];
   if (!isGateName(gateArg)) {
     denyOnFailure(`copilot-hook: unknown gate '${gateArg ?? ""}'; expected one of ${GATE_NAMES.join(", ")}.`);
@@ -78,7 +78,13 @@ function main(): void {
   const eventName =
     typeof payload.hookEventName === "string" ? payload.hookEventName : GATE_EVENT[gate];
 
-  const decision = runCopilotGate(gate, eventName, payload);
+  // runCopilotGate became async once the test-diff gate had to warm the
+  // Python language service before separating a diff (see
+  // src/agent-adapter.ts's runTestDiffGate); the .catch below is what a
+  // bare, unhandled `main()` call would otherwise lose: an uncaught
+  // rejection here would exit 1, a code this file documents it must never
+  // use.
+  const decision = await runCopilotGate(gate, eventName, payload);
 
   switch (decision.kind) {
     case "allow":
@@ -93,8 +99,6 @@ function main(): void {
   }
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   denyOnFailure(`copilot-hook: unexpected failure (${(err as Error).message}).`);
-}
+});

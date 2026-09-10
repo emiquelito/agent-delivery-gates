@@ -23,9 +23,8 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { checkPathAllowed } from "./path-allowlist.ts";
 import { validateReport, formatFindingText } from "./report-validator.ts";
-import { separateTestDiff, formatSignalText, pathsInDiff, type RuleSet } from "./test-diff-separator.ts";
+import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
-import { warmLanguageServices } from "./code-mask.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 
@@ -295,10 +294,10 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
   const rules = resolveRules(ctx);
   if ("error" in rules) return toolError(rules.error);
 
-  // See hooks/test-diff-separator.ts for why this has to happen ahead of
-  // the plain synchronous separateTestDiff call, not inside it.
-  await warmLanguageServices(pathsInDiff(diffText));
-  const result = separateTestDiff(diffText, { rules });
+  // separateTestDiffWarmed warms the Python language service ahead of the
+  // plain synchronous separateTestDiff call, so a .py file in this diff
+  // gets the tree-sitter mask instead of the regex fallback silently.
+  const result = await separateTestDiffWarmed(diffText, { rules });
 
   const lines: string[] = [];
   lines.push(
@@ -475,8 +474,49 @@ export async function handleLine(raw: string, ctx: McpContext): Promise<string |
   }
 }
 
+// --- Test-only stall seam ----------------------------------------------------
+//
+// A method this server never advertises: absent from TOOLS, from
+// handleToolsList, from every template this project ships, and answered
+// with the ordinary "unknown method" error unless
+// ADG_MCP_ENABLE_TEST_STALL=1 is set in the environment, which nothing this
+// project ships ever sets. It exists so tests/mcp-server.test.ts can drive
+// the real subprocess in hooks/mcp-server.ts against a request that truly
+// never resolves, the only way to prove that file's close-handler drain is
+// bounded instead of depending on a hang that happens to be caused by an
+// unwarmed tree-sitter load. Two modes, matching the two ways a
+// pending promise can stall a process, both reported by the reviewer who
+// found the drain bug:
+//   "timer": awaits a promise kept alive by a real timer that is never
+//     cleared, so the event loop has an active reason to keep running.
+//     Left to itself the process hangs forever; only an external kill
+//     ends it. This is Finding 1.
+//   anything else ("forever"): awaits a promise with no timer, no socket,
+//     nothing keeping the event loop open at all. Left alone, Node's own
+//     idle exit fires before this promise, or anything waiting on it, ever
+//     gets a say. This is Finding 2: the reply for this request is
+//     dropped, silently, with exit 0 and no error.
+function stallForever(mode: unknown): Promise<never> {
+  if (mode === "timer") {
+    return new Promise<never>(() => {
+      setInterval(() => {}, 0x7fffffff);
+    });
+  }
+  return new Promise<never>(() => {});
+}
+
 async function dispatch(method: string, msg: ParsedMessage, ctx: McpContext): Promise<string | null> {
   switch (method) {
+    case "__test_stall__": {
+      if (process.env.ADG_MCP_ENABLE_TEST_STALL !== "1") {
+        return err(msg.id, errorObj(-32601, `unknown method '${method}'`));
+      }
+      const params = typeof msg.params === "object" && msg.params !== null ? (msg.params as Record<string, unknown>) : {};
+      await stallForever(params.mode);
+      // Never reached: stallForever's promise never resolves.
+      return null;
+    }
+
     case "initialize":
       return ok(msg.id, handleInitialize(msg.params, ctx));
 

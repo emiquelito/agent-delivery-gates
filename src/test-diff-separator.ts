@@ -11,7 +11,12 @@
 // what changed in the test files themselves, separately from the source
 // change that supposedly caused them to pass.
 
-import { languageServiceFor } from "./code-mask.ts";
+import {
+  languageServiceFor,
+  warmLanguageServices,
+  hadUnwarmedPythonAccess,
+  resetUnwarmedPythonAccess,
+} from "./code-mask.ts";
 
 /** Reaches the scanner chosen for `path` on every call (see
  * languageServiceFor in src/code-mask.ts), so a `.py` file is read by the
@@ -304,6 +309,19 @@ export interface SeparateResult {
    */
   exemptFiles: string[];
   exemptCount: number;
+  /**
+   * True when this run answered at least one `.py` file's mask with the
+   * regex scanner because nothing had warmed the Python service first, not
+   * because the load was tried and failed. A caller that warms before
+   * calling (see `separateTestDiffWarmed` below, and every production
+   * entry point in this project) never sees this true; a caller that
+   * skips the warm and happens to touch a `.py` file does, whether or not
+   * anyone reading its code ever noticed the skip. This is reported
+   * unconditionally, found or not, the same reasoning `exemptCount` above
+   * already follows: a degraded run that reads like a clean one is the
+   * failure this project exists to catch, including in itself.
+   */
+  unwarmedPythonUsed: boolean;
 }
 
 /** Renders one signal as the CLI's text-format line: `id severity file: message`. */
@@ -1158,6 +1176,12 @@ function cfgTestRegionMask(lines: DiffLine[], path: string): boolean[] {
  * added/removed lines checked, marker or not.
  */
 export function separateTestDiff(diffText: string, options: SeparateOptions = {}): SeparateResult {
+  // Reset-then-read around this call only, not a lasting mode switch: this
+  // function is synchronous start to finish (no `await` anywhere in it or
+  // in anything it calls), so nothing else in this process can run between
+  // the reset below and the read at the bottom to blur one call's answer
+  // into another's, however many other callers share this same process.
+  resetUnwarmedPythonAccess();
   const ruleSet = options.rules ?? DEFAULT_RULES;
   const rules = ruleSet === DEFAULT_RULES ? DEFAULT_COMPILED : compileRuleSet(ruleSet);
   const files = parseDiff(diffText);
@@ -1258,5 +1282,28 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
     signalCount: signals.length,
     exemptFiles,
     exemptCount: exemptFiles.length,
+    unwarmedPythonUsed: hadUnwarmedPythonAccess(),
   };
+}
+
+/**
+ * `separateTestDiff`, warmed first. `pathsInDiff` already exists for
+ * exactly this: naming every file a diff touches before any of it is
+ * scanned, the way `planMutationsWarmed` in src/mutate.ts warms ahead of
+ * `planMutations`. Every production caller of `separateTestDiff` -
+ * hooks/test-diff-separator.ts, hooks/test-diff-post-tool-hook.ts,
+ * src/mcp-server.ts, and src/agent-adapter.ts's runTestDiffGate - now goes
+ * through this instead of repeating its own warm-then-call pair by hand,
+ * the same fix mutate.ts's own history already made for its callers: one
+ * function to reach for instead of one more call site to remember.
+ * `separateTestDiff` itself stays synchronous and unwarmed on purpose, for
+ * a caller (a test among them) that already knows it holds no `.py` file,
+ * or warms some other way.
+ */
+export async function separateTestDiffWarmed(
+  diffText: string,
+  options: SeparateOptions = {},
+): Promise<SeparateResult> {
+  await warmLanguageServices(pathsInDiff(diffText));
+  return separateTestDiff(diffText, options);
 }

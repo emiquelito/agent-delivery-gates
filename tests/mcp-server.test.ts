@@ -28,8 +28,9 @@ class Session {
   #closed = false;
   exitCode: number | null = null;
 
-  constructor(cwd: string = REPO_ROOT) {
-    this.#child = spawn("node", [SERVER_PATH], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+  constructor(cwd: string = REPO_ROOT, env?: Record<string, string | undefined>) {
+    const childEnv = env === undefined ? process.env : { ...process.env, ...env };
+    this.#child = spawn("node", [SERVER_PATH], { cwd, env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
     this.#child.stdout!.setEncoding("utf8");
     this.#child.stdout!.on("data", (chunk: string) => {
       this.#rawOut += chunk;
@@ -113,6 +114,39 @@ class Session {
       this.#child.on("close", (code) => resolvePromise(code));
       this.#child.stdin!.end();
     });
+  }
+
+  /**
+   * Ends stdin and waits up to `ms` for the process to exit on its own. If
+   * it has not by then, this is exactly the hang Finding 1 describes, so it
+   * force-kills the child (SIGKILL) instead of waiting forever, and
+   * resolves `null` to mark that the process never exited by itself. Used
+   * only by the drain-bound tests below: every other test in this file
+   * uses `close()`/`withSession`, which trusts the server to exit on its
+   * own because nothing in those tests asks it to stall.
+   */
+  closeOrKill(ms: number): Promise<number | null> {
+    return new Promise((resolvePromise) => {
+      if (this.#closed) {
+        resolvePromise(this.exitCode);
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.#child.kill("SIGKILL");
+      }, ms);
+      this.#child.on("close", (code) => {
+        clearTimeout(timer);
+        resolvePromise(code);
+      });
+      this.#child.stdin!.end();
+    });
+  }
+
+  /** Unconditional cleanup: SIGKILL if still running, a no-op otherwise.
+   * Used in a `finally` around the drain-bound tests so a process this
+   * project's own bug left hanging never survives the test that proved it. */
+  kill(): void {
+    if (!this.#closed) this.#child.kill("SIGKILL");
   }
 }
 
@@ -316,6 +350,68 @@ test("a request needing the Python grammar still gets a reply when the client cl
       `expected a reply for id 42 on stdout before exit, got: ${JSON.stringify(s.rawStdout)}`,
     );
   });
+});
+
+// --- The drain bound: Findings 1 and 2 ------------------------------------------
+//
+// hooks/mcp-server.ts's `close` handler used to await Promise.allSettled
+// over every in-flight request with no timeout, no bound, no escape. Two
+// ways that goes wrong, driven here against the real subprocess through the
+// test-only "__test_stall__" method src/mcp-server.ts answers only when
+// ADG_MCP_ENABLE_TEST_STALL=1 (see its own comment for why that seam is
+// safe to ship): a handler stalled on a promise a real timer keeps alive
+// hangs the process forever (Finding 1), and a handler stalled on a promise
+// with no active handle at all lets Node's own idle exit fire first,
+// dropping the reply silently at exit 0 (Finding 2). ADG_MCP_DRAIN_TIMEOUT_MS
+// shortens the production bound (a few seconds) to a few hundred
+// milliseconds so these tests do not take the full bound to prove their
+// point.
+
+const STALL_ENV = { ADG_MCP_ENABLE_TEST_STALL: "1", ADG_MCP_DRAIN_TIMEOUT_MS: "300" };
+
+test("Finding 1: a handler stalled on a live timer does not hang the process forever; it answers and exits within the drain bound", async () => {
+  const s = new Session(REPO_ROOT, STALL_ENV);
+  try {
+    await initialize(s);
+    s.sendRequest("__test_stall__", { mode: "timer" }, 101);
+    // No await between the request and closing stdin: the request is
+    // still in flight when stdin closes, the same race both findings
+    // describe.
+    const exitCode = await s.closeOrKill(4000);
+    assert.notEqual(
+      exitCode,
+      null,
+      "the server did not exit within the drain bound; it hung the way Finding 1 describes",
+    );
+    assert.equal(exitCode, 0);
+    assert.match(
+      s.rawStdout,
+      /"id":101/,
+      `expected an explicit reply for id 101 once the drain bound expired, got: ${JSON.stringify(s.rawStdout)}`,
+    );
+    const parsed = JSON.parse(s.rawStdout.trim().split("\n").at(-1)!);
+    assert.equal(parsed.id, 101);
+    assert.equal(typeof parsed.error?.message, "string");
+  } finally {
+    s.kill();
+  }
+});
+
+test("Finding 2: a handler stalled on a promise with no active handle still gets an explicit reply, not a silent exit 0", async () => {
+  const s = new Session(REPO_ROOT, STALL_ENV);
+  try {
+    await initialize(s);
+    s.sendRequest("__test_stall__", { mode: "forever" }, 102);
+    const exitCode = await s.closeOrKill(4000);
+    assert.equal(exitCode, 0);
+    assert.match(
+      s.rawStdout,
+      /"id":102/,
+      `expected the reply for id 102 not to be silently dropped, got: ${JSON.stringify(s.rawStdout)}`,
+    );
+  } finally {
+    s.kill();
+  }
 });
 
 // --- Protocol errors -----------------------------------------------------------

@@ -28,7 +28,7 @@ import {
   resolveRepoRoot,
 } from "./clean-tree-gate.ts";
 import { checkPathAllowed } from "./path-allowlist.ts";
-import { separateTestDiff, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
+import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
 import { validateReport, formatFindingText, parsePriorFindingIds } from "./report-validator.ts";
 
@@ -235,7 +235,7 @@ function runsGitCommit(command: string): boolean {
   return /(^|[;&|]|\s)git\s+commit(\s|$)/.test(command);
 }
 
-export function runTestDiffGate(payload: CanonicalPayload): AdapterDecision {
+export async function runTestDiffGate(payload: CanonicalPayload): Promise<AdapterDecision> {
   const command = payload.command ?? "";
   if (!runsGitCommit(command)) {
     return allow();
@@ -280,7 +280,30 @@ export function runTestDiffGate(payload: CanonicalPayload): AdapterDecision {
     return fail(`test-diff: the gate could not run, so nothing was checked: could not read HEAD's diff (${detail}).`);
   }
 
-  const result = separateTestDiff(diffText, { rules });
+  // Finding 6: this used to call separateTestDiff directly, the one
+  // production entry point that read a diff without ever warming the
+  // Python language service first (hooks/test-diff-separator.ts,
+  // hooks/test-diff-post-tool-hook.ts, and src/mcp-server.ts each warm; this
+  // file did not). A Copilot or Cursor user committing a .py file got the
+  // regex mask with nothing to say a better one existed.
+  // separateTestDiffWarmed warms first, and every one of those four
+  // production call sites now goes through it instead of its own
+  // warm-then-call pair, so a fifth path (or a sixth, or this one again
+  // after a future refactor) cannot silently repeat the miss by forgetting
+  // a step: there is only one step. The check right after is the backstop
+  // for when it happens anyway: result.unwarmedPythonUsed is set by
+  // src/code-mask.ts's languageServiceFor itself, from inside the one
+  // function every caller of this scanner already goes through, so it
+  // catches a future bypass of separateTestDiffWarmed too, not only this
+  // one.
+  const result = await separateTestDiffWarmed(diffText, { rules });
+  if (result.unwarmedPythonUsed) {
+    return fail(
+      "test-diff: a Python file in this diff was masked without the Python language service warmed first; " +
+        "the regex fallback may have missed a docstring, an f-string interpolation, or a trailing comment. " +
+        "This is a bug in the gate itself, not in the commit; treat this run as unmeasured, not as clean.",
+    );
+  }
   if (result.signals.length === 0) return allow();
 
   const lines = [
@@ -358,7 +381,7 @@ export function runReportGate(payload: CanonicalPayload): AdapterDecision {
  * place that picks which gate core to run; every platform's own hook entry
  * point calls this, never the individual gate functions above directly,
  * so a gate added or changed here reaches every platform at once. */
-export function runGate(gate: GateName, payload: CanonicalPayload): AdapterDecision {
+export async function runGate(gate: GateName, payload: CanonicalPayload): Promise<AdapterDecision> {
   switch (gate) {
     case "clean-tree":
       return runCleanTreeGate(payload);

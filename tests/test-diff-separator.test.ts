@@ -20,6 +20,7 @@ import {
   hasFixtureMarker,
   isTestPath,
   separateTestDiff,
+  separateTestDiffWarmed,
   type RuleSet,
   type Signal,
 } from "../src/test-diff-separator.ts";
@@ -1657,4 +1658,29 @@ test("a #[cfg(test)] written inside a Rust string opens no test region", () => {
   const result = separateTestDiff(diff);
   assert.deepEqual(result.testFiles, []);
   assert.deepEqual(signalIds(result.signals), []);
+});
+
+// --- Finding 6: an unwarmed .py request silently uses the wrong mask -----------
+//
+// A removed line whose real code carries no assertion at all, only a
+// trailing "#" comment that happens to say "assert": the regex scanner
+// does not know the "#" comment form (see src/code-mask.ts's own header),
+// so unwarmed it reads that comment as code and reports a real assertion
+// gone. The tree-sitter service knows the comment for what it is and masks
+// it away, so warmed first, the same diff reports nothing. This is the gap
+// src/agent-adapter.ts's runTestDiffGate used to fall into silently before
+// it was moved onto separateTestDiffWarmed.
+
+test("Finding 6: unwarmed, a trailing '#' comment's word counts as a real assertion, and the run records that it degraded", () => {
+  const diff = oneFileDiff("tests/test_thing.py", ["    result = compute()  # assert result == 42"], []);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["assertion-removed"]);
+  assert.equal(result.unwarmedPythonUsed, true);
+});
+
+test("Finding 6: warmed first, the same diff reports nothing and the run is not marked degraded", async () => {
+  const diff = oneFileDiff("tests/test_thing.py", ["    result = compute()  # assert result == 42"], []);
+  const result = await separateTestDiffWarmed(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+  assert.equal(result.unwarmedPythonUsed, false);
 });

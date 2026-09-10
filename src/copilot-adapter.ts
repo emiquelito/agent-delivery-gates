@@ -118,10 +118,10 @@ export function writeCopilotVerdict(decision: AdapterDecision): CopilotDecision 
  * carried through for callers and tests that want to record or assert on
  * it; the gate to run is selected by `gate` alone; see GATE_EVENT above for
  * which event each gate is wired to. */
-export function runCopilotGate(
+export async function runCopilotGate(
   gate: GateName,
   _eventName: string,
   payload: Record<string, unknown>,
-): CopilotDecision {
-  return writeCopilotVerdict(runGate(gate, readCopilotPayload(payload)));
+): Promise<CopilotDecision> {
+  return writeCopilotVerdict(await runGate(gate, readCopilotPayload(payload)));
 }

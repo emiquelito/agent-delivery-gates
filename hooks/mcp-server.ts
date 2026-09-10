@@ -17,6 +17,21 @@ import { createInterface } from "node:readline";
 import { findPackageRoot } from "../src/package-root.ts";
 import { buildContext, handleLine } from "../src/mcp-server.ts";
 
+// How long the drain in the `close` handler below waits for in-flight work
+// before it stops waiting and answers what is left with an explicit error.
+// A few seconds: long enough for the slowest real thing this server does
+// mid-request (loading the tree-sitter Python grammar the first time a .py
+// file shows up, a git diff-tree over a large repo) to finish under normal
+// conditions, short enough that an editor closing this process down does
+// not sit there for the length of a coffee break waiting on a request that,
+// by definition, is never going to finish on its own. Overridable for
+// tests, which want this bound in milliseconds, not seconds.
+const DRAIN_TIMEOUT_MS = (() => {
+  const raw = process.env.ADG_MCP_DRAIN_TIMEOUT_MS;
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5000;
+})();
+
 function main(): void {
   let ctx;
   try {
@@ -42,8 +57,34 @@ function main(): void {
   // Nothing but `close` reads this set; `line` only ever adds to it and
   // removes what it added, so nothing here can leak across requests.
   const inFlight = new Set<Promise<void>>();
+  // The id of every request still in flight, so the `close` handler below
+  // can answer one that is still pending when its bound expires instead of
+  // dropping it. Only a request gets an entry here (a message with an
+  // "id"); a notification gets no reply whatever happens to it, so there is
+  // nothing useful to track for one.
+  const pendingIds = new Map<Promise<void>, string | number | null>();
 
   rl.on("line", (line: string) => {
+    // A best-effort peek at the id, for the drain bound below only. This
+    // is not the parse that decides what handleLine does with the line;
+    // handleLine does its own parsing and owns every real decision about
+    // malformed input. A line that fails to parse here (or carries no
+    // "id") simply gets no entry in pendingIds, which only matters if this
+    // exact request is still unresolved when the bound expires; handleLine
+    // resolves a parse failure on its own almost immediately, so that case
+    // does not arise in practice.
+    let id: string | number | null | undefined;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (typeof parsed === "object" && parsed !== null && Object.prototype.hasOwnProperty.call(parsed, "id")) {
+        const rawId = (parsed as Record<string, unknown>).id;
+        if (typeof rawId === "string" || typeof rawId === "number" || rawId === null) id = rawId;
+      }
+    } catch {
+      // Malformed line: handleLine reports the parse error itself, with no
+      // id to reply against. Nothing to track here.
+    }
+
     // handleLine documents that it never throws: every failure it hits,
     // from a malformed line to an internal error mid-request, comes back
     // as a JSON-RPC reply (or null for a notification), never an
@@ -63,15 +104,57 @@ function main(): void {
       })
       .finally(() => {
         inFlight.delete(task);
+        pendingIds.delete(task);
       });
     inFlight.add(task);
+    if (id !== undefined) pendingIds.set(task, id);
   });
 
   rl.on("close", () => {
-    // Drain every reply already in flight before exiting. A client that
-    // never closes stdin never reaches this at all, so it is unaffected;
-    // one that does gets every reply it is owed first.
+    // Drain every reply already in flight before exiting, but never past
+    // DRAIN_TIMEOUT_MS: Finding 1 was this drain waiting on
+    // Promise.allSettled with no bound at all, so one handler stalled on
+    // real work that never finished (a stuck grammar load, a hung child
+    // process, any stalled I/O) hung this process forever, killable only
+    // from outside. Finding 2 was that even bounding it is not enough on
+    // its own: a pending promise that holds no timer, socket, or other
+    // active handle lets Node's own idle exit fire before either the drain
+    // or this timeout ever gets a say, dropping the reply exactly as
+    // silently as before the drain existed. Setting this timer here, and
+    // never calling `.unref()` on it, is what keeps the process alive
+    // until one of the two paths below actually runs.
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // Every request still in flight when the bound expired gets an
+      // explicit error reply instead of silence, so a client sees "this
+      // did not finish" instead of a hang or a dropped reply.
+      // Never a duplicate: a task only reaches this loop while it is still
+      // in inFlight, and finishing removes it from both maps before this
+      // callback (a macrotask) can even run, since every microtask queued
+      // by a settling task drains first.
+      for (const task of inFlight) {
+        const id = pendingIds.get(task);
+        if (id === undefined) continue;
+        process.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            error: {
+              code: -32000,
+              message: `mcp-server: shutting down after ${DRAIN_TIMEOUT_MS}ms; this request had not finished`,
+            },
+          })}\n`,
+        );
+      }
+      process.exit(0);
+    }, DRAIN_TIMEOUT_MS);
+
     void Promise.allSettled(inFlight).then(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       process.exit(0);
     });
   });

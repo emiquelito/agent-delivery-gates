@@ -102,10 +102,10 @@ export function writeCursorVerdict(decision: AdapterDecision): CursorDecision {
  * it; the gate to run is selected by `gate` alone; see GATE_EVENT above for
  * which event each gate is wired to.
  */
-export function runCursorGate(
+export async function runCursorGate(
   gate: GateName,
   _eventName: string,
   payload: Record<string, unknown>,
-): CursorDecision {
-  return writeCursorVerdict(runGate(gate, readCursorPayload(payload)));
+): Promise<CursorDecision> {
+  return writeCursorVerdict(await runGate(gate, readCursorPayload(payload)));
 }

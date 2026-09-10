@@ -395,6 +395,41 @@ export const regexLanguageService: LanguageService = {
 // process, not retried on every call.
 let pythonService: LanguageService | undefined;
 
+// Records a fact `languageServiceFor` cannot report through its own return
+// value: that a `.py` path was answered by the regex scanner not because
+// the load was tried and failed, but because nothing had asked it to try
+// yet. That distinction matters because a caller who never warms keeps
+// reintroducing the same bug this project has already hit more than once
+// (see planMutationsWarmed in src/mutate.ts, and src/agent-adapter.ts's
+// runTestDiffGate before this file's own history added a fourth, then a
+// fifth, warm call by hand). Set here, inside the one function every
+// caller already goes through, so the fact survives even a future caller
+// nobody adds a comment for. Cleared by `separateTestDiffWarmed`'s own
+// caller reading `resetUnwarmedPythonAccess`/`hadUnwarmedPythonAccess`
+// around one synchronous batch of work; see src/test-diff-separator.ts.
+let unwarmedPythonAccess = false;
+
+/** True once this process has answered a `.py` mask request with the regex
+ * scanner because `warmLanguageServices` had not yet resolved the Python
+ * service for it -- not because the load was tried and failed. A caller
+ * that always warms before asking (every production entry point this
+ * project ships now does) never sets this; a caller that forgets to does,
+ * silently or not. */
+export function hadUnwarmedPythonAccess(): boolean {
+  return unwarmedPythonAccess;
+}
+
+/** Clears the flag `hadUnwarmedPythonAccess` reports. Meant to be called
+ * immediately before one synchronous batch of `languageServiceFor` calls,
+ * so the flag it reports after that batch reflects only that batch, not
+ * whatever ran earlier in this same process. Safe to call this way because
+ * every reader of this flag is itself synchronous, start to finish: nothing
+ * else can run between the reset and the read to blur one batch into
+ * another. */
+export function resetUnwarmedPythonAccess(): void {
+  unwarmedPythonAccess = false;
+}
+
 async function resolvePythonService(): Promise<LanguageService> {
   if (pythonService !== undefined) return pythonService;
   try {
@@ -450,6 +485,10 @@ export async function warmLanguageServices(paths: readonly string[]): Promise<vo
  * an entry point remembering a second, separate call.
  */
 export function languageServiceFor(path: string): LanguageService {
-  if (path.toLowerCase().endsWith(".py") && pythonService !== undefined) return pythonService;
+  if (path.toLowerCase().endsWith(".py")) {
+    if (pythonService !== undefined) return pythonService;
+    unwarmedPythonAccess = true;
+    return regexLanguageService;
+  }
   return regexLanguageService;
 }

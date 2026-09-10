@@ -21,14 +21,13 @@ import {
   classifyTestPath,
   FIXTURE_MARKER,
   formatSignalText,
-  pathsInDiff,
   separateTestDiff,
+  separateTestDiffWarmed,
   type RuleSet,
   type SeparateResult,
   type Signal,
 } from "../src/test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
-import { warmLanguageServices } from "../src/code-mask.ts";
 
 const USAGE = `Usage: test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json] [--config PATH]
        test-diff-separator --classify PATH... [--config PATH]
@@ -434,11 +433,11 @@ async function main(): Promise<void> {
 
   const diffText = resolveDiffText(args);
   // A .py file is masked by the tree-sitter service once it is loaded for
-  // this process; loading it is not synchronous, so it happens here, ahead
-  // of separateTestDiff, which stays a plain synchronous function. A diff
-  // with no .py file in it never imports anything for this.
-  await warmLanguageServices(pathsInDiff(diffText));
-  const result = separateTestDiff(diffText, { rules, readFileText });
+  // this process; loading it is not synchronous, so warming has to happen
+  // ahead of separateTestDiff, which stays a plain synchronous function.
+  // separateTestDiffWarmed does both, in order, so this call site cannot
+  // forget the warm the way src/agent-adapter.ts once did.
+  const result = await separateTestDiffWarmed(diffText, { rules, readFileText });
 
   // A .rs file's #[cfg(test)] module can sit outside the default context
   // window; a wide re-run only ever adds signals the narrow diff missed,

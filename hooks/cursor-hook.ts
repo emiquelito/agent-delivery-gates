@@ -36,7 +36,7 @@ function isGateName(value: string | undefined): value is GateName {
   return value !== undefined && (GATE_NAMES as readonly string[]).includes(value);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const gateArg = process.argv[2];
   if (!isGateName(gateArg)) {
     fail(`cursor-hook: unknown gate '${gateArg ?? ""}'; expected one of ${GATE_NAMES.join(", ")}.`);
@@ -53,7 +53,13 @@ function main(): void {
 
   const eventName = typeof payload.hook_event_name === "string" ? payload.hook_event_name : GATE_EVENT[gate];
 
-  const decision = runCursorGate(gate, eventName, payload);
+  // runCursorGate became async once the test-diff gate had to warm the
+  // Python language service before separating a diff (see
+  // src/agent-adapter.ts's runTestDiffGate); the .catch below is what a
+  // bare, unhandled `main()` call would otherwise lose: an uncaught
+  // rejection here would exit 1 with node's own stack trace, the one exit
+  // code that fails open in Cursor's terms.
+  const decision = await runCursorGate(gate, eventName, payload);
 
   switch (decision.kind) {
     case "allow":
@@ -69,8 +75,6 @@ function main(): void {
   }
 }
 
-try {
-  main();
-} catch (err) {
+main().catch((err) => {
   fail(`cursor-hook: unexpected failure (${(err as Error).message}).`);
-}
+});
