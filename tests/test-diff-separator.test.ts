@@ -954,6 +954,124 @@ test("a removed should-style assertion fires assertion-removed", () => {
   assert.ok(signalIds(result.signals).includes("assertion-removed"));
 });
 
+// --- anchored fragments: false positives cleared, true positives kept -------
+//
+// A full audit of every weakening rule ran against the real gate and found
+// four confirmed false positives on ordinary code, each a bare English word
+// or a common standard-library method name: "\bverify\(", "\btest\(",
+// "\bshould\b", and "\bdelta\b". Every pattern below is anchored the way
+// most fragments in this file already are, and every group first proves the
+// false positive is gone, then proves the real weakening it exists to catch
+// still fires, in each form a reviewer would recognise as a live framework's
+// own syntax -- not a redundant restatement, an independent reproduction.
+
+// "\bshould\b" -> "\.should\b": an ordinary variable named "should" no
+// longer reads as an assertion.
+test("a plain variable named should does not fire assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  const should = computeExpectation();"], []),
+  );
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// Old-style RSpec's dot-chained form, distinct from Chai's ".should.equal"
+// already pinned above: same anchor, a different assertion-library user.
+test("RSpec's old-style .should matcher still fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("spec/widget_spec.rb", ["  person.should.have_valid_email"], []),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+// "\bverify\(" -> a receiver-qualified or a receiverless-but-chained call:
+// ordinary domain code calling a function that happens to be named verify no
+// longer reads as a mock assertion.
+test("an ordinary domain call to verify( does not fire assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/q.test.js", ["  await verify(user.verificationToken);"], []),
+  );
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("verify() with a mock-style assignment but no receiver or chain does not fire assertion-removed", () => {
+  // The accepted residual gap named in src/test-diff-separator.ts: a
+  // receiverless, unchained call is syntactically identical to the ordinary
+  // domain call above, so this one is a documented miss, not a bug -- pinned
+  // here as a fact instead of only stated in prose.
+  const result = separateTestDiff(oneFileDiff("tests/WidgetTest.java", ["    verify(mockList);"], []));
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("Mockito/ts-mockito's receiverless, chained verify(mock).method() still fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/WidgetTest.java", ["    verify(mockedList).size();"], []),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+test("Moq's receiver-qualified mock.Verify(...) still fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/WidgetTests.cs", ["        mock.Verify(x => x.Foo());"], []),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+test("PHP Prophecy's arrow-qualified $prophecy->verify() still fires assertion-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/WidgetTest.php", ["        $prophecy->verify();"], []),
+  );
+  assert.ok(signalIds(result.signals).includes("assertion-removed"));
+});
+
+// "\btest\(" -> a following string or template-literal opener: the standard
+// JS/TS RegExp.prototype.test method call no longer reads as a test case.
+test("regex.test(input) does not fire test-case-removed", () => {
+  const result = separateTestDiff(oneFileDiff("tests/q.test.js", ["  const ok = regex.test(input);"], []));
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("a deleted template-literal-named test( case still fires test-case-removed", () => {
+  const result = separateTestDiff(
+    oneFileDiff("tests/widget.test.ts", ["test(`adds ${1} and ${2}`, () => { doAdd(); });"], []),
+  );
+  assert.ok(signalIds(result.signals).includes("test-case-removed"));
+});
+
+// "\bdelta\b" -> a following ":" or "=" and a numeral: an ordinary
+// position-difference variable no longer reads as a loosened tolerance.
+test("an ordinary delta variable, changed on both sides, does not fire tolerance-widened", () => {
+  const result = separateTestDiff(
+    oneFileDiff(
+      "tests/q.test.js",
+      ["  const delta = nextPos - prevPos;"],
+      ["  const delta = nextPos2 - prevPos2;"],
+    ),
+  );
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("Python's assertAlmostEqual(..., delta=N) keyword argument still fires tolerance-widened", () => {
+  const result = separateTestDiff(
+    oneFileDiff(
+      "tests/test_widget.py",
+      ["self.assertAlmostEqual(want, got, delta=0.01)"],
+      ["self.assertAlmostEqual(want, got, delta=0.5)"],
+    ),
+  );
+  assert.ok(signalIds(result.signals).includes("tolerance-widened"));
+});
+
+test("an options object's { delta: N } property still fires tolerance-widened", () => {
+  const result = separateTestDiff(
+    oneFileDiff(
+      "tests/q.test.js",
+      ["  expect(result).to.be.approximately(5, { delta: 0.001 });"],
+      ["  expect(result).to.be.approximately(5, { delta: 0.5 });"],
+    ),
+  );
+  assert.ok(signalIds(result.signals).includes("tolerance-widened"));
+});
+
 test("a changed epsilon fires tolerance-widened", () => {
   const result = separateTestDiff(
     oneFileDiff("tests/q.test.js", ["  compare(a, b, epsilon = 0.001)"], ["  compare(a, b, epsilon = 0.5)"]),
@@ -1542,8 +1660,8 @@ test("#[cfg(all(test, feature = \"slow\"))] opens a region, same as plain #[cfg(
     ' #[cfg(all(test, feature = "slow"))]',
     " mod tests {",
     "     fn check(n: i64) {",
-    "-        verify(n, 100);",
-    "+        verify(n, 110);",
+    "-        assert_eq!(n, 100);",
+    "+        assert_eq!(n, 110);",
     "     }",
     " }",
   ]);
@@ -1609,7 +1727,7 @@ test("cfg(test) region detection never changes the file's added/removed counts, 
 test("a single-line block comment holding a stray '}' no longer closes the region early", () => {
   // Reproduction: with the comment line present, the region used to close
   // at the '}' inside "/* a comment with a } inside */", so the change to
-  // verify(n, 100) below sat outside the mask and reported nothing.
+  // assert_eq!(n, 100) below sat outside the mask and reported nothing.
   // stripRustNoiseForBraceCounting now removes a same-line /* ... */
   // block comment before brace counting runs, so the region should still
   // extend to the module's real closing brace.
@@ -1618,8 +1736,8 @@ test("a single-line block comment holding a stray '}' no longer closes the regio
     " mod tests {",
     "     /* a comment with a } inside */",
     "     fn check(n: i64) {",
-    "-        verify(n, 100);",
-    "+        verify(n, 110);",
+    "-        assert_eq!(n, 100);",
+    "+        assert_eq!(n, 110);",
     "     }",
     " }",
   ]);
@@ -1644,8 +1762,8 @@ test("known miss: a multi-line block comment holding a stray '}' still closes th
     "        with a } inside",
     "        that spans lines */",
     "     fn check(n: i64) {",
-    "-        verify(n, 100);",
-    "+        verify(n, 110);",
+    "-        assert_eq!(n, 100);",
+    "+        assert_eq!(n, 110);",
     "     }",
     " }",
   ]);
@@ -1663,8 +1781,8 @@ test("known limit: #[cfg(any(test, feature = \"x\"))] opens no region and matche
     ' #[cfg(any(test, feature = "x"))]',
     " mod tests {",
     "     fn check(n: i64) {",
-    "-        verify(n, 100);",
-    "+        verify(n, 110);",
+    "-        assert_eq!(n, 100);",
+    "+        assert_eq!(n, 110);",
     "     }",
     " }",
   ]);

@@ -135,8 +135,37 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // Assertions. all match through this one prefix.
     "\\bassert",
     "\\bexpect\\(",
-    "\\bshould\\b",
-    "\\bverify\\(",
+    // Anchored to a receiver, never a bare word: "should" alone is an
+    // ordinary English word and an ordinary variable name ("const should =
+    // ..."), confirmed firing on exactly that by a full audit of this rule
+    // family. Chai's and old-style RSpec's
+    // "should" assertion is always reached off a receiver -- "result.should
+    // .equal(x)", "person.should.have_valid_email" -- never written bare, so
+    // requiring the "." loses no real form while dropping the plain-word
+    // false positive entirely.
+    "\\.should\\b",
+    // Anchored the same way as "\\bverify\\(" below: a bare "verify(" is an
+    // ordinary English verb, confirmed firing on ordinary domain code such
+    // as "await verify(user.verificationToken)" by the same audit. Real
+    // mock-verification calls take one of two forms on a single line, and
+    // this covers both without narrowing to a receiver allowlist (which
+    // would miss the aliased or differently-imported form the skips bucket
+    // above already learned not to assume):
+    //   - receiver-qualified: "mock.verify(...)" (Moq), "$prophecy->verify()"
+    //     (PHP Prophecy), "self.mock.verify()", "EasyMock.verify(mock)".
+    //   - receiverless, chained: "verify(mock).method(...)" (Mockito and
+    //     ts-mockito's usual static-import style, where the verify call
+    //     itself carries no receiver but is always immediately chained to
+    //     the method being asserted on).
+    // Known gap, not attempted here: a receiverless, unchained call such as
+    // EasyMock's bare "verify(mock);" is syntactically identical to the
+    // domain false positive this anchor exists to drop -- nothing on that
+    // one line tells them apart -- so that form is not covered. Narrower
+    // frameworks that never chain and never qualify the call are the
+    // accepted residual, the same trade this file already makes elsewhere
+    // (see the ".skip(" bracket-access gap above).
+    "(?:\\.|->)\\s*verify\\(",
+    "\\bverify\\(.*\\)\\s*\\.\\w+\\(",
     "\\brequire!",
     // Go testify's require.NoError(...), require.Equal(...), and so on.
     // Named explicitly, not just "require." followed by a call, because
@@ -150,7 +179,21 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\bt\\.(?:Errorf?|Fatalf?|Fail(?:Now)?)\\b",
   ],
   testCases: [
-    "\\btest\\(",
+    // Anchored to a following string literal, never a bare "test(": the
+    // unanchored form matches "regex.test(input)", the standard JS/TS
+    // RegExp method every codebase using a regex calls constantly,
+    // confirmed firing on exactly that by a full audit of this rule family.
+    // Every real test-case opener this fragment exists to catch --
+    // Jest/Mocha/Deno's "test('name', fn)",
+    // "test(\"name\", function () {...})" -- always opens with the test's
+    // name as a string (or template) literal right after the parenthesis.
+    // Masking blanks a literal's contents but keeps its opening quote (see
+    // maskNonCode in src/code-mask.ts), so the quote character alone is
+    // enough to anchor on without needing the (masked-away) name itself.
+    // Known gap, not attempted here: a dynamically-named test case, such as
+    // "test(name, () => {})" with the title held in a variable, is real but
+    // uncommon next to the literal form, and is not covered.
+    "\\btest\\(\\s*[\"'`]",
     "\\bit\\(",
     "\\bdescribe\\(",
     "\\bdef test_",
@@ -327,7 +370,24 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\bepsilon\\b",
     "\\batol\\b",
     "\\brtol\\b",
-    "\\bdelta\\b",
+    // Anchored to a tolerance context (a keyword argument or an object
+    // property assigning a numeric literal), never a bare "delta": the
+    // unanchored form matches "const delta = nextPos - prevPos", an
+    // ordinary position-difference variable, confirmed firing on exactly
+    // that by a full audit of this rule family -- unlike every other word
+    // in this bucket, "delta" alone is common outside tolerance code
+    // (physics, finance, diffing). A real tolerance usage names the value
+    // right there --
+    // Python's "assertAlmostEqual(a, b, delta=0.01)", an options object's
+    // "{ delta: 0.001 }" -- so requiring "delta" be followed by ":" or "="
+    // and then a numeral keeps every literal-valued form while dropping the
+    // plain-variable false positive.
+    // Known gap, not attempted here: a tolerance value held in a named
+    // constant, not written as a literal -- "delta=MAX_DELTA" -- is not
+    // covered, the same kind of residual this file already accepts
+    // elsewhere (see the ".skip(" bracket-access gap above), instead of
+    // reopening the bare-word false positive to reach it.
+    "\\bdelta\\b\\s*[:=]\\s*[-+]?[\\d.]",
     "\\bcloseTo\\b",
     "\\bapproximately\\b",
     "\\balmostEqual\\b",
