@@ -237,6 +237,19 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // Rust's #[tokio::test], #[async_std::test], and similar.
     "#\\[\\w+::test\\]",
     "@ParameterizedTest\\b",
+    // Vitest's/Jest's conditional-skip opener: "test.skipIf(cond)('name',
+    // fn)" and "describe.skipIf(cond)('suite', fn)". Needed here, not just
+    // in the skips bucket below, for a reason specific to this bucket: an
+    // unconditional "test('name', fn)" turned into
+    // "test.skipIf(cond)('name', fn)" removes a line matching "\btest\(" and
+    // adds a line that does not (the "." breaks that anchor), so
+    // netRemovalSignal saw a bare removal with nothing added to offset it
+    // and reported test-case-removed -- a reviewer confirmed this
+    // reproduces exactly, and called it worse than reporting nothing, since
+    // it names the wrong kind of change. This fragment gives the new line
+    // its own testCases match, so the counts balance and the (correct)
+    // skip-added signal from the skips bucket below is what fires instead.
+    "\\b(?:test|it|describe)\\.skipIf\\(",
   ],
   skips: [
     // This bucket runs against test files only (see "Weakening signals,
@@ -390,6 +403,51 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // has nothing to match. This is the same per-line limit named on
     // maskDiffLine below, not a defect specific to this fragment.
     "\\bskip\\s*=\\s*\\S",
+    // Vitest's/Jest's conditional skip: "test.skipIf(cond)(...)" and
+    // "describe.skipIf(cond)(...)". Reviewers confirmed this produces no
+    // signal at all through the real gate, and worse: the testCases fix
+    // above stops it from being misreported as test-case-removed too. No
+    // receiver anchor, same reasoning as ".skip(" above: this bucket only
+    // runs against test files, so the residual noise (an unrelated object
+    // with its own ".skipIf(" method) is cheaper than the miss.
+    "\\.skipIf\\s*\\(",
+    // Jest's and Vitest's chained table form: "test.skip.each([...])(...)"
+    // and "it.skip.each([...])(...)" disable every row of a parameterized
+    // test. ".skip(" above needs "skip" directly followed by "(" and misses
+    // this, since "skip" is followed by ".each(" instead.
+    "\\.skip\\.each\\s*\\(",
+    // TestNG's declarative disable: "@Test(enabled = false)", the only
+    // form TestNG uses -- there is no separate skip attribute the way
+    // JUnit/NUnit have one. Anchored to "@Test(" so it never collides with
+    // an ordinary "enabled = false" assignment on unrelated config or
+    // feature-flag code, which a bare "\\benabled\\s*=\\s*false\\b" would
+    // have (that trade was not made here, unlike the receiver-agnostic
+    // fragments elsewhere in this bucket, because "enabled = false" reads
+    // as ordinary test-file code far more often than "skip = ..." does).
+    // Known gap, the same per-line limit named above: an attribute wrapped
+    // so "enabled = false" lands on its own continuation line, away from
+    // "@Test(", is invisible to this one-line fragment.
+    "@Test\\s*\\([^)]*\\benabled\\s*=\\s*false\\b",
+    // R testthat's skip family: "skip_if(cond)", "skip_on_cran()",
+    // "skip_on_os(\"windows\")", "skip_if_not(cond)", and any other
+    // "skip_*(" call testthat exposes now and later. The bare-call fragment
+    // above (see "(?<!\\.)\\bskip\\(") anchors on "skip(" directly and
+    // misses every one of these, since an underscore always sits between
+    // "skip" and the parenthesis.
+    "\\bskip_\\w*\\(",
+    // NUnit's imperative, mid-test disable: "Assert.Ignore(\"reason\")",
+    // called from inside the test body, not declared as an
+    // attribute -- the same imperative/declarative split
+    // "\\bskipTest\\(" above already draws for Python's unittest.
+    "\\bAssert\\.Ignore\\s*\\(",
+    // Deno's object-form test opener carries its disable as an option, not
+    // a separate call: "Deno.test({ name: \"x\", ignore: true, fn() {} })".
+    // Matched as a bare "ignore: true" key/value, the same no-receiver-
+    // anchor reasoning as "\\bskip:\\s*\\S" and "\\bpending:\\s*\\S" above:
+    // the option can land on its own diff line, away from "Deno.test(",
+    // when the call is wrapped across lines, which real Deno code usually
+    // is once "name" and "fn" are both present.
+    "\\bignore:\\s*true\\b",
   ],
   tolerance: [
     "\\btolerance\\b",

@@ -592,6 +592,126 @@ test("Elixir's @moduletag :skip (the whole-file form) fires skip-added", () => {
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
+// --- Six more gaps, each reproduced through the real gate by a reviewer,
+// closed here. Every "before" behaviour named in these comments was
+// confirmed by running the prior commit's separateTestDiff against the same
+// fixture, not assumed.
+
+// Vitest's (and Jest's) conditional skip, ranked first because it was the
+// worst of the six: an unconditional "test('name', fn)" turned into
+// "test.skipIf(cond)('name', fn)" produced no skip-added at all before this
+// fix, AND the removed unconditional line, with nothing left to offset it in
+// the testCases count, was reported as test-case-removed -- the wrong kind
+// of change, confirmed against the prior commit.
+
+test("Vitest's test.skipIf(cond)(...) fires skip-added, not test-case-removed", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    ["test('adds', () => { doAdd(); });"],
+    ["test.skipIf(isCI)('adds', () => { doAdd(); });"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Vitest's describe.skipIf(cond)(...) fires skip-added, not test-case-removed", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    ["describe('suite', () => {"],
+    ["describe.skipIf(isCI)('suite', () => {"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Jest's and Vitest's chained table form: confirmed producing no signal at
+// all before this fix, since "skip" was followed by ".each(", not "(",
+// which the plain ".skip(" fragment requires directly.
+
+test("Jest's/Vitest's test.skip.each([...])(...) fires skip-added", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    [],
+    ["test.skip.each([[1, 2, 3]])('adds %i and %i', (a, b, exp) => { doAdd(a, b, exp); });"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("it.skip.each([...])(...) fires skip-added too", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["it.skip.each([[1, 2]])('adds %i', (a, b) => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// TestNG's declarative disable: no separate skip attribute exists, so a
+// test is disabled by setting "enabled = false" on @Test itself. Confirmed
+// producing no signal at all before this fix; no fragment in this bucket
+// covered this form.
+
+test("TestNG's @Test(enabled = false) fires skip-added", () => {
+  const diff = oneFileDiff("src/test/java/com/example/WidgetTest.java", [], ["@Test(enabled = false)"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("an ordinary @Test(dataProvider = \"x\") with no enabled attribute does not fire skip-added", () => {
+  // Guards the anchor chosen for the TestNG fix: it is scoped to "@Test("
+  // plus "enabled = false" on the same line, not a bare "enabled = false"
+  // anywhere in a test file, which would collide with ordinary feature-flag
+  // or mock-config code.
+  const diff = oneFileDiff("src/test/java/com/example/WidgetTest.java", [], ['@Test(dataProvider = "x")']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// R's testthat skip family: an underscore always sits between "skip" and
+// the call's parenthesis, which the bare-call fragment above
+// ("(?<!\\.)\\bskip\\(") does not allow for, so each of these produced no
+// signal before this fix.
+
+test("R testthat's skip_if(cond) fires skip-added", () => {
+  const diff = oneFileDiff("tests/testthat/test-widget.R", [], ["skip_if(is_offline())"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("R testthat's skip_on_cran() fires skip-added", () => {
+  const diff = oneFileDiff("tests/testthat/test-widget.R", [], ["skip_on_cran()"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("R testthat's skip_on_os(\"windows\") fires skip-added", () => {
+  const diff = oneFileDiff("tests/testthat/test-widget.R", [], ['skip_on_os("windows")']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// NUnit's imperative, mid-test disable: "Assert.Ignore(...)" is called from
+// inside the test body, distinct from the "[Ignore]" attribute already
+// covered above. Confirmed producing no signal at all before this fix.
+
+test("NUnit's Assert.Ignore(\"reason\") fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['Assert.Ignore("not ready yet");']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Deno's object-form test opener carries its disable as an "ignore: true"
+// option, not a separate call. Confirmed producing no signal at all before
+// this fix; no fragment named "ignore" at all.
+
+test("Deno's Deno.test({ ignore: true, ... }) fires skip-added", () => {
+  const diff = oneFileDiff(
+    "widget_test.ts",
+    [],
+    ["Deno.test({", '  name: "adds",', "  ignore: true,", "  fn() { doAdd(); },", "});"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
 // --- tolerance-widened ---------------------------------------------------------
 
 test("a changed tolerance line, one removed and one added, fires tolerance-widened", () => {
