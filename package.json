@@ -50,7 +50,7 @@
     "build": "node scripts/build.ts",
     "prepare": "npm run build",
     "prepack": "npm run build",
-    "verify": "tsc --noEmit && node --test tests/*.test.ts && node hooks/scan-prose.ts --require-rules && node scripts/tally-report.ts --check && node scripts/refresh-readme-tally.ts --check"
+    "verify": "tsc --noEmit && node --test tests/*.test.ts && node hooks/scan-prose.ts --require-rules && node scripts/tally-report.ts --check && node scripts/refresh-readme-tally.ts --check && node scripts/check-versions.ts --check"
   },
   "dependencies": {
     "web-tree-sitter": "^0.27.0"
