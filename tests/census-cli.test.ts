@@ -19,13 +19,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { nodeCommand, existsExpr, writeExpr, catExpr, runAndExit, bumpCounter } from "./lib/portable-command.ts";
-import {
-  recordedPids,
-  waitForNoneAlive,
-  describeSurvivors,
-  cleanupTempDir,
-  sweepStaleTempDirs,
-} from "./lib/process-tree.ts";
+import { recordedPids, waitForNoneAlive, cleanupTempDir, sweepStaleTempDirs } from "./lib/process-tree.ts";
 
 // A previous run's temp directories that this process's own kill left
 // behind because a lock had not yet let go (see cleanupTempDir in
@@ -1046,11 +1040,7 @@ test("a real Ctrl-C (SIGINT) to the census process leaves no descendant running"
       ]);
       if (exitResult === "timed-out") child.kill("SIGKILL");
       const survivors = waitForNoneAlive(pids, 5_000);
-      assert.deepEqual(
-        survivors,
-        [],
-        `a process in census's tree outlived it after a real SIGINT: ${describeSurvivors(survivors)}`,
-      );
+      assert.deepEqual(survivors, [], "a process in census's tree outlived it after a real SIGINT");
       assert.deepEqual(leftoverWorktrees(root), [], "the temporary base worktree was not removed after the interrupt");
       // Design correction B: census re-raises the signal with its own
       // default disposition once the worktree is removed, instead of a

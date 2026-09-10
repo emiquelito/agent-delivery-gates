@@ -13,13 +13,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
-import {
-  recordedPids,
-  waitForNoneAlive,
-  describeSurvivors,
-  cleanupTempDir,
-  sweepStaleTempDirs,
-} from "./lib/process-tree.ts";
+import { recordedPids, waitForNoneAlive, cleanupTempDir, sweepStaleTempDirs } from "./lib/process-tree.ts";
 
 // A previous run's temp directories that this process's own kill left
 // behind because a lock had not yet let go (see cleanupTempDir in
@@ -765,11 +759,7 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
     ]);
     if (exitResult === "timed-out") child.kill("SIGKILL");
     const survivors = waitForNoneAlive(pids, 5_000);
-    assert.deepEqual(
-      survivors,
-      [],
-      `a process in mutate's tree outlived it after a real SIGINT: ${describeSurvivors(survivors)}`,
-    );
+    assert.deepEqual(survivors, [], "a process in mutate's tree outlived it after a real SIGINT");
     // reviewer finding 3: mutate used to register its own SIGINT/SIGTERM
     // handlers only after the baseline returned, so a Ctrl-C during the
     // baseline (this window) fell through to the "the baseline failed"
@@ -886,7 +876,7 @@ test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already r
     assert.deepEqual(
       survivors,
       [],
-      `a process in mutate's tree outlived it after a real SIGINT sent during a post-baseline mutation: ${describeSurvivors(survivors)}`,
+      "a process in mutate's tree outlived it after a real SIGINT sent during a post-baseline mutation",
     );
     assert.match(stderr, /interrupted by SIGINT/);
   } finally {

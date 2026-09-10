@@ -47,43 +47,6 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-/** What `pid` actually is (its executable name), for a failure message.
- * A bare process id says nothing about which link in the tree survived --
- * the shell, the script, or the leaf worker -- and telling those apart is
- * exactly what a real Windows failure needed and did not have: without
- * it, an actual partial-tree-kill looked identical to any other flaky
- * process-cleanup failure. `ps -o comm=` covers POSIX (Linux and macOS
- * alike); `tasklist /fi` covers Windows. Best-effort only: a pid that
- * exits between being read as a survivor and being described here, or any
- * other lookup failure, reports as "unknown" instead of throwing, since
- * this exists to add information to a failure, not to become a second way
- * for the test itself to fail. */
-export function describePid(pid: number): string {
-  try {
-    if (process.platform === "win32") {
-      const result = spawnSync("tasklist", ["/fi", `PID eq ${pid}`, "/fo", "csv", "/nh"], {
-        encoding: "utf8",
-        timeout: 2000,
-      });
-      const match = result.stdout.trim().match(/^"([^"]+)"/);
-      return match ? match[1] : "unknown";
-    }
-    const result = spawnSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
-    const name = result.stdout.trim();
-    return name || "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-/** Renders a list of surviving pids as `pid (name)` pairs for a failure
- * message. Empty input renders as an empty string, cheaply (no process
- * enumeration happens), so call sites can build this unconditionally
- * without an extra branch for the passing case. */
-export function describeSurvivors(pids: number[]): string {
-  return pids.map((pid) => `${pid} (${describePid(pid)})`).join(", ");
-}
-
 /** Polls for up to `budgetMs` for every pid to be gone, then force-kills
  * anything still alive so a test never leaves a process behind, red run
  * or green. Returns the pids still alive when the budget ran out, which
