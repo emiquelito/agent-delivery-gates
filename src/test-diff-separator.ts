@@ -135,15 +135,35 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // Assertions. all match through this one prefix.
     "\\bassert",
     "\\bexpect\\(",
-    // Anchored to a receiver, never a bare word: "should" alone is an
-    // ordinary English word and an ordinary variable name ("const should =
-    // ..."), confirmed firing on exactly that by a full audit of this rule
-    // family. Chai's and old-style RSpec's
-    // "should" assertion is always reached off a receiver -- "result.should
-    // .equal(x)", "person.should.have_valid_email" -- never written bare, so
-    // requiring the "." loses no real form while dropping the plain-word
-    // false positive entirely.
-    "\\.should\\b",
+    // Anchored to a receiver or a call, never a bare word: "should" alone is
+    // an ordinary English word and an ordinary variable name ("const should
+    // = ..."), confirmed firing on exactly that by a full audit of this rule
+    // family. Chai's and old-style RSpec's "should" assertion is always
+    // reached off a receiver -- "result.should.equal(x)",
+    // "person.should.have_valid_email" -- never written bare, so requiring
+    // the "." catches those two without reopening the plain-word false
+    // positive. But should.js, a real BDD library, is called with no
+    // receiver at all: "should(value).equal(x)". A reviewer built a test
+    // with two should.js assertions, removed one, and got no signal from
+    // the receiver-only anchor -- confirmed regression. The second
+    // alternative below accepts the word directly followed by "(", which
+    // catches should.js's call form while still requiring either a
+    // receiver or an argument list, so the bare variable ("should =
+    // ...", no trailing paren) stays unmatched.
+    // Known gap, reopened by this fix, not attempted here: an ordinary
+    // domain function that happens to be named "should" and takes an
+    // argument -- "const ok = should(userInput);" -- now reads as an
+    // assertion too, the same trade "\bverify\(.*\)\s*\.\w+\(" below makes
+    // on purpose for a chained call. Anchoring should( to a trailing
+    // ".word(" chain, the way verify( is anchored, would drop this false
+    // positive, but was not done here: every previous narrowing attempt in
+    // this rule family traded one real miss for another, and should.js's
+    // own docs show bare, unchained top-level assertions too (a custom
+    // assertion registered on the should object can be invoked as
+    // "should(value).myAssertion()" with no further chain visible on the
+    // same line as "should(" once masked). Left as the same kind of
+    // dismissible-warning trade this whole file already makes elsewhere.
+    "(?:\\.should\\b|\\bshould\\()",
     // Anchored the same way as "\\bverify\\(" below: a bare "verify(" is an
     // ordinary English verb, confirmed firing on ordinary domain code such
     // as "await verify(user.verificationToken)" by the same audit. Real
@@ -179,21 +199,27 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\bt\\.(?:Errorf?|Fatalf?|Fail(?:Now)?)\\b",
   ],
   testCases: [
-    // Anchored to a following string literal, never a bare "test(": the
-    // unanchored form matches "regex.test(input)", the standard JS/TS
-    // RegExp method every codebase using a regex calls constantly,
-    // confirmed firing on exactly that by a full audit of this rule family.
-    // Every real test-case opener this fragment exists to catch --
-    // Jest/Mocha/Deno's "test('name', fn)",
-    // "test(\"name\", function () {...})" -- always opens with the test's
-    // name as a string (or template) literal right after the parenthesis.
-    // Masking blanks a literal's contents but keeps its opening quote (see
+    // Anchored to a following string literal or an opening brace, never a
+    // bare "test(": the unanchored form matches "regex.test(input)", the
+    // standard JS/TS RegExp method every codebase using a regex calls
+    // constantly, confirmed firing on exactly that by a full audit of this
+    // rule family. Every real test-case opener this fragment exists to
+    // catch -- Jest/Mocha's "test('name', fn)",
+    // "test(\"name\", function () {...})" -- opens with the test's name as
+    // a string (or template) literal right after the parenthesis. Masking
+    // blanks a literal's contents but keeps its opening quote (see
     // maskNonCode in src/code-mask.ts), so the quote character alone is
     // enough to anchor on without needing the (masked-away) name itself.
+    // Deno's object form is different: "Deno.test({ name: \"adds\", fn()
+    // {...} })" opens with "{", not a quote, so the string-only anchor
+    // missed it -- a reviewer removed one of two such tests and got no
+    // signal, confirmed regression. "{" is added to the anchor class for
+    // that reason; "regex.test(input)" still does not match, since "input"
+    // is neither a quote nor a brace.
     // Known gap, not attempted here: a dynamically-named test case, such as
     // "test(name, () => {})" with the title held in a variable, is real but
-    // uncommon next to the literal form, and is not covered.
-    "\\btest\\(\\s*[\"'`]",
+    // uncommon next to the literal and object forms, and is not covered.
+    "\\btest\\(\\s*[\"'`{]",
     "\\bit\\(",
     "\\bdescribe\\(",
     "\\bdef test_",
@@ -1578,10 +1604,22 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMa
 //   this fails toward calling the rest of the file's visible lines test
 //   content instead of missing them, on purpose: a false "this is a test"
 //   costs a human one look, a false "this is source" is exactly the miss
-//   this file exists to avoid. Widening the context window (the CLI does
-//   this for a .rs diff; see hooks/test-diff-separator.ts) narrows this
-//   bound but cannot erase it. A change far enough from both the opener
-//   and the closer, in a file wide enough, is still outside any diff.
+//   this file exists to avoid. But "the rest of the file's visible lines"
+//   is not bounded by the hunk the opener was found in: cfgTestRegionMask
+//   walks the file's whole ordered line stream, so an unclosed region
+//   swallows every later hunk in the same file's diff too, however far
+//   away and however many hunks separate them, not just the remaining
+//   lines of the one hunk the opener appeared in. A reviewer confirmed
+//   this concretely: with the closing brace pushed outside the diff
+//   window, an assertion in an actually separate production function
+//   forty lines later, in its own later hunk, was swept in and reported
+//   as test content. That is a wider blast radius than the Rust commit
+//   message that introduced cfgTestRegionMask claims to have fixed, in any
+//   file large enough for git to split its diff into separate hunks.
+//   Widening the context window (the CLI does this for a .rs diff; see
+//   hooks/test-diff-separator.ts) narrows this bound but cannot erase it.
+//   A change far enough from both the opener and the closer, in a file
+//   wide enough, is still outside any diff.
 // - `#[cfg(any(test, feature = "x"))]` opens no region and matches no
 //   marker: CFG_TEST_ATTR_RE only recognises `cfg(test)` and a `cfg(all(
 //   ...))` naming test among its conditions, both forms where test is

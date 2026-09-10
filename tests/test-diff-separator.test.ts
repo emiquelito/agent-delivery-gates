@@ -983,6 +983,24 @@ test("RSpec's old-style .should matcher still fires assertion-removed", () => {
   assert.ok(signalIds(result.signals).includes("assertion-removed"));
 });
 
+// Finding 1 (confirmed regression): the receiver-only anchor "\.should\b"
+// caught Chai and old-style RSpec but dropped should.js, a real BDD
+// assertion library with no receiver at all -- "should(value).equal(x)".
+// A reviewer built a block with two such assertions, removed one, and got
+// no signal; this reproduces that case as a permanent test, through the
+// real gate, asserting the signal id, never the regex.
+test("should.js's receiverless should(value).equal(x) still fires assertion-removed", () => {
+  const diff = diffWithHunk("tests/widget.test.js", [
+    "-  should(sum(1, 2)).equal(3);",
+    "   should(sum(2, 2)).equal(4);",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.ok(
+    signalIds(result.signals).includes("assertion-removed"),
+    `expected assertion-removed for should.js, got ${JSON.stringify(signalIds(result.signals))}`,
+  );
+});
+
 // "\bverify\(" -> a receiver-qualified or a receiverless-but-chained call:
 // ordinary domain code calling a function that happens to be named verify no
 // longer reads as a mock assertion.
@@ -1035,6 +1053,33 @@ test("a deleted template-literal-named test( case still fires test-case-removed"
     oneFileDiff("tests/widget.test.ts", ["test(`adds ${1} and ${2}`, () => { doAdd(); });"], []),
   );
   assert.ok(signalIds(result.signals).includes("test-case-removed"));
+});
+
+// Finding 2 (confirmed regression): the string-literal-only anchor
+// "\btest\(\s*[\"'`]" caught Jest/Mocha's "test('name', fn)" but dropped
+// Deno's object form, "Deno.test({ name, fn })", which opens with "{" and
+// no quote at all. A reviewer removed one of two such test cases and got
+// no signal -- hidden in casual testing because a body with an assertion
+// call is caught incidentally by the assertions bucket; this case's body
+// is a plain helper call on purpose, so nothing but test-case-removed can
+// explain the signal.
+test("Deno.test({ name, fn }), the object form, still fires test-case-removed", () => {
+  const diff = diffWithHunk("tests/widget_test.ts", [
+    "-Deno.test({",
+    "-  name: \"adds\",",
+    "-  fn() {",
+    "-    checkAdd();",
+    "-  },",
+    "-});",
+    " Deno.test({",
+    "   name: \"subtracts\",",
+    "   fn() {",
+    "     checkSubtract();",
+    "   },",
+    " });",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["test-case-removed"]);
 });
 
 // "\bdelta\b" -> a following ":" or "=" and a numeral: an ordinary
@@ -1669,6 +1714,39 @@ test("a change to real source code in the same .rs file, outside the #[cfg(test)
     result.sourceFiles.map((f) => f.path),
     ["src/pricing.rs"],
   );
+});
+
+// Finding 3: no behaviour change here, only a sharpened comment on
+// cfgTestRegionMask -- but the comment now claims a wider blast radius than
+// before, so it earns a test pinning the actual behaviour as fact. When a
+// #[cfg(test)] region opens but its closing brace sits outside the diff
+// (the module's own body is far below the hunk's context window), the
+// region is never marked closed, and every later hunk in the SAME FILE's
+// diff -- not just the rest of the opening hunk -- reads as test content.
+// Here that sweeps in an actually separate, unrelated production function
+// forty-plus lines later, in its own hunk, and reports its removed
+// assert! as a weakening. This is the accepted, pre-existing gap the
+// comment above cfgTestRegionMask now describes; it is not fixed here.
+test("an unclosed #[cfg(test)] region sweeps in an unrelated assertion from a later, separate hunk (accepted gap, not a bug)", () => {
+  const diff = [
+    "diff --git a/src/pricing.rs b/src/pricing.rs",
+    "index 1111111..2222222 100644",
+    "--- a/src/pricing.rs",
+    "+++ b/src/pricing.rs",
+    "@@ -10,3 +10,3 @@",
+    " #[cfg(test)]",
+    " mod tests {",
+    "-    fn helper_stub() {}",
+    "+    fn helper_stub_v2() {}",
+    "@@ -60,3 +60,3 @@",
+    " fn compute_price(x: i32) -> i32 {",
+    "-    assert!(x > 0);",
+    "+    // assert removed here, in a totally unrelated function",
+    " }",
+    "",
+  ].join("\n");
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["assertion-removed"]);
 });
 
 test("nested braces inside the test module (a fn, a match, and a closure) do not close the region early", () => {
