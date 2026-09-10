@@ -333,3 +333,82 @@ function startsRegex(lastCode: string): boolean {
   if (IDENT_CHAR.test(lastCode)) return false;
   return !(lastCode === ")" || lastCode === "]" || lastCode === "}");
 }
+
+// --- the language-service seam ------------------------------------------------
+//
+// Everything above this line answers "where is the code" for the C-family
+// and JavaScript-family languages only, using regexes and hand-written
+// heuristics like isLoneTick. That is the whole of what this file's own
+// doc comment lists as its known limits: no per-file state across lines,
+// no `#` comments, no Python triple-quoted strings, and so on.
+//
+// A `LanguageService` names the two things a caller actually needs from a
+// scanner: codeMask to decide where a mutation may land, maskNonCode to
+// decide where a detector may read. Both callers, src/mutate.ts and
+// src/test-diff-separator.ts, use nothing else from this file except the
+// IDENT_CHAR character class, which is about identifier syntax and not
+// literal scanning, and stays a plain export, not part of the seam.
+//
+// Wrapping the existing functions as `regexLanguageService` changes no
+// behaviour: it is the same `classify` underneath, reached through one more
+// layer of indirection. `getLanguageService` is what a caller calls instead
+// of `codeMask`/`maskNonCode` directly, so which scanner runs is one
+// function call away from being switched, in one place, for every caller at
+// once.
+
+/** What a caller needs from a source-language scanner. */
+export interface LanguageService {
+  /** See `codeMask` above. */
+  codeMask(text: string): boolean[];
+  /** See `maskNonCode` above. */
+  maskNonCode(text: string): string;
+}
+
+/** The regex-and-heuristic scanner this file has always run, wrapped to the
+ * interface callers now go through. Byte-for-byte the same scanner as
+ * before this seam existed. */
+export const regexLanguageService: LanguageService = {
+  codeMask,
+  maskNonCode,
+};
+
+/**
+ * Not wired to anything yet. Phase 2 of the language-agnostic plan lands a
+ * tree-sitter-backed implementation here; this stub only reserves the name
+ * and the interface so that phase has somewhere to land, and fails loudly
+ * instead of silently returning a wrong answer if something reaches it
+ * early. No tree-sitter dependency is added in this phase.
+ */
+export const treeSitterLanguageService: LanguageService = {
+  codeMask(): boolean[] {
+    throw new Error("treeSitterLanguageService: not implemented");
+  },
+  maskNonCode(): string {
+    throw new Error("treeSitterLanguageService: not implemented");
+  },
+};
+
+const LANGUAGE_SERVICES = {
+  regex: regexLanguageService,
+  "tree-sitter": treeSitterLanguageService,
+} as const;
+
+export type LanguageServiceName = keyof typeof LANGUAGE_SERVICES;
+
+// The default is the existing scanner, so choosing to change nothing is the
+// out-of-the-box behaviour. Module-level state, not a parameter every
+// caller has to thread through: both callers already reach this file
+// through a single shared import, exactly as they reach `codeMask` today.
+let selectedService: LanguageServiceName = "regex";
+
+/** Switches which implementation `getLanguageService` returns. The one
+ * place later phases flip to change every caller at once. */
+export function selectLanguageService(name: LanguageServiceName): void {
+  selectedService = name;
+}
+
+/** The currently selected implementation. Defaults to the regex scanner
+ * that has always run here. */
+export function getLanguageService(): LanguageService {
+  return LANGUAGE_SERVICES[selectedService];
+}

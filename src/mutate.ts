@@ -15,7 +15,7 @@
 // src/code-mask.ts now, because src/test-diff-separator.ts needs it too and
 // this file already imports from that one.
 
-import { codeMask, IDENT_CHAR } from "./code-mask.ts";
+import { getLanguageService, IDENT_CHAR } from "./code-mask.ts";
 import { classifyTestPath, isCommentLine, isImportLine, type RuleSet } from "./test-diff-separator.ts";
 
 /** The fixed operator set. One mutation per run, one operator per mutation. */
@@ -197,7 +197,7 @@ export interface SourceFile {
  * project. A line inside a block comment is skipped by the mask instead.
  */
 export function planFileMutations(path: string, text: string): Mutation[] {
-  const mask = codeMask(text);
+  const mask = getLanguageService().codeMask(text);
   const mutations: Mutation[] = [];
   const lines = text.split("\n");
   let offset = 0;

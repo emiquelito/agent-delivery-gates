@@ -11,7 +11,14 @@
 // what changed in the test files themselves, separately from the source
 // change that supposedly caused them to pass.
 
-import { maskNonCode } from "./code-mask.ts";
+import { getLanguageService } from "./code-mask.ts";
+
+/** Reaches the currently selected language service on every call, so a
+ * later switch (see selectLanguageService in src/code-mask.ts) takes effect
+ * here without this file threading the choice through every call site. */
+function maskNonCode(text: string): string {
+  return getLanguageService().maskNonCode(text);
+}
 
 export type SignalId =
   | "assertion-removed"
