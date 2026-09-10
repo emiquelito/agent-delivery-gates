@@ -109,14 +109,18 @@ test("/repo-evil is not counted as inside /repo", () => {
 
 // A containment check has two ways to be wrong: too loose, letting a
 // sibling like /repo-evil count as inside /repo (above), and too loose the
-// other direction, letting an ancestor of the root count as inside it. The
-// segment-count guard in isWithin (src/path-allowlist.ts) is what stops the
-// second one: a candidate with fewer segments than the root can never be
-// "at least as deep", whatever its segments say. Without that guard, a
-// mutant comparing only the segments the two paths have in common would
-// still find every one of a root's own leading segments equal to itself
-// and call the ancestor contained -- exactly the parent-counts-as-its-own-child
-// hole this confinement check exists to close.
+// other direction, letting an ancestor of the root count as inside it.
+// isWithin (src/path-allowlist.ts) stops the second one without a
+// separate length check: it compares the root's segments against the
+// candidate's own segments one at a time, and a candidate with fewer
+// segments than the root runs out of segments to compare against, so
+// `innerSegments[i]` is `undefined` for at least one of the root's own
+// segments and `.every` returns false on its own. A mutant that dropped
+// that comparison down to only the segments the two paths have in common
+// would still find every one of a root's own leading segments equal to
+// itself and call the ancestor contained -- exactly the
+// parent-counts-as-its-own-child hole this confinement check exists to
+// close.
 test("a candidate that is an ancestor of the root is denied, not counted as inside it", () => {
   const resolver = fakeResolver({
     [p("repo", "deep", "nested")]: p("repo", "deep", "nested"),

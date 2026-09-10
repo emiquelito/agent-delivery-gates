@@ -7,7 +7,10 @@
 // `isNotRunnable`'s `platform` default, which reads `process.platform` --
 // not I/O, just which command-not-found convention applies -- and every
 // caller can override it, so a test exercises the Windows branch without
-// needing a Windows host.
+// needing a Windows host. `isNotRunnable` also takes an optional
+// `notFoundTemplate`, the shell's own not-found text as captured on the
+// machine actually running; capturing it is I/O and lives in
+// hooks/induce.ts's calibrateNotFoundTemplate, not here.
 //
 // The check this carries, from rules/induced-failure-required.json: a
 // robustness claim needs evidence that the specific failure was made to
@@ -252,14 +255,30 @@ export const NOT_RUNNABLE_EXIT_CODES: readonly number[] = [126, 127];
  * above). cmd.exe is what Node's shell:true spawns on Windows (see
  * src/spawn-command.ts), and it reports "not found" with plain exit code
  * 1, the same code an ordinary failing command uses, so exit code alone
- * cannot tell the two apart there the way 126/127 does on POSIX. Matching
- * this text is a narrower, more targeted fix than trusting exit code 1 on
- * Windows generally, which would misread every ordinary Windows failure as
- * a control that never ran. It is locale-dependent: a non-English Windows
- * reports this in its own language and this pattern will not match it.
- * That gap could not be checked without a Windows runner in a non-English
- * locale; see the induce report for how to confirm it. */
+ * cannot tell the two apart there the way 126/127 does on POSIX.
+ *
+ * This text is locale-dependent -- a non-English Windows prints the same
+ * message in its own language, and this pattern will not match it -- so it
+ * is used only as a fallback. The primary check is `isNotRunnable`'s
+ * `notFoundTemplate` parameter: the message this machine's own shell
+ * actually printed, captured once by spawning a command guaranteed not to
+ * exist through the same shell mechanism (see hooks/induce.ts's
+ * calibrateNotFoundTemplate) and reused for the rest of the run. This
+ * constant is what is matched against instead when there is no calibrated
+ * text to use, because the calibration was never needed yet or because the
+ * calibration spawn itself failed. */
 export const WINDOWS_COMMAND_NOT_FOUND_MESSAGE = /is not recognized as an internal or external command/i;
+
+/** The first line of `result`'s combined output, with leading blank lines
+ * and whitespace stripped. A missing-command banner is the first thing a
+ * shell prints for a command it never started, before anything else could
+ * run; requiring the match to be here, not merely present somewhere in the
+ * buffer, is what keeps a quoted copy of the phrase inside a real failure
+ * (an assertion message, a captured sub-process log) from being read as
+ * the shell's own banner. See isNotRunnable. */
+function firstOutputLine(result: StepResult): string {
+  return combinedOutput(result).replace(/^\s+/, "").split("\n", 1)[0] ?? "";
+}
 
 export interface CommandRun {
   /** The exit code, or null when the command was killed or never ran. */
@@ -294,17 +313,34 @@ export function outcomeFor(run: CommandRun): StepOutcome {
  * ran and failed on purpose. `platform` defaults to the real
  * `process.platform` so ordinary callers need not pass it; tests pass it
  * explicitly to exercise the Windows branch on any host, since it can only
- * ever be reached there in practice. See WINDOWS_COMMAND_NOT_FOUND_MESSAGE
- * above for why exit code alone is not enough on Windows.
+ * ever be reached there in practice.
+ *
+ * `notFoundTemplate`, when given, is the exact not-found text this
+ * machine's own shell was seen to print, from hooks/induce.ts's
+ * calibrateNotFoundTemplate; when absent (calibration was never run, or it
+ * failed), WINDOWS_COMMAND_NOT_FOUND_MESSAGE's English text is used
+ * instead. Either way the match is required at the start of the step's
+ * output, not merely somewhere inside it: a step that ran and failed on
+ * purpose can legitimately quote or log this exact phrase deep in its own
+ * output (a test asserting on a captured sub-process failure, say), and
+ * matching anywhere in the buffer would misread that real failure as a
+ * command that never ran, hiding the actual finding behind a false
+ * could-not-run. The shell's own banner is always the first thing printed
+ * for a command it never started, so anchoring to the first line tells the
+ * two apart.
  */
-export function isNotRunnable(result: StepResult, platform: NodeJS.Platform = process.platform): boolean {
+export function isNotRunnable(
+  result: StepResult,
+  platform: NodeJS.Platform = process.platform,
+  notFoundTemplate?: string,
+): boolean {
   if (result.outcome !== "failed" || result.exitCode === null) return false;
   if (NOT_RUNNABLE_EXIT_CODES.includes(result.exitCode)) return true;
-  return (
-    platform === "win32" &&
-    result.exitCode === 1 &&
-    WINDOWS_COMMAND_NOT_FOUND_MESSAGE.test(combinedOutput(result))
-  );
+  if (platform !== "win32" || result.exitCode !== 1) return false;
+  const firstLine = firstOutputLine(result).toLowerCase();
+  return notFoundTemplate !== undefined
+    ? firstLine.includes(notFoundTemplate.toLowerCase())
+    : WINDOWS_COMMAND_NOT_FOUND_MESSAGE.test(firstLine);
 }
 
 function findStep(steps: StepResult[], step: StepName): StepResult | undefined {
@@ -325,18 +361,19 @@ function findStep(steps: StepResult[], step: StepName): StepResult | undefined {
  * green if the handling produced nothing at all, and it says nothing about
  * whether the handling works.
  *
- * `platform` is threaded through to `isNotRunnable` and defaults the same
- * way; see that function for why.
+ * `platform` and `notFoundTemplate` are threaded through to
+ * `isNotRunnable` and default the same way; see that function for why.
  */
 export function verdictFor(
   steps: StepResult[],
   platform: NodeJS.Platform = process.platform,
+  notFoundTemplate?: string,
 ): { verdict: Verdict; reason?: UnrunReason } {
   const baseline = findStep(steps, "baseline");
   if (baseline !== undefined && baseline.outcome === "failed") {
     return {
       verdict: "could-not-run",
-      reason: isNotRunnable(baseline, platform) ? "command-not-runnable" : "baseline-failed",
+      reason: isNotRunnable(baseline, platform, notFoundTemplate) ? "command-not-runnable" : "baseline-failed",
     };
   }
   if (baseline !== undefined && unjudgedReason(baseline.outcome) !== undefined) {
@@ -352,7 +389,9 @@ export function verdictFor(
     const unjudged = unjudgedReason(result.outcome);
     if (unjudged !== undefined) return { verdict: "could-not-run", reason: unjudged };
     if (result.outcome === "not-run") return { verdict: "could-not-run", reason: "command-not-runnable" };
-    if (isNotRunnable(result, platform)) return { verdict: "could-not-run", reason: "command-not-runnable" };
+    if (isNotRunnable(result, platform, notFoundTemplate)) {
+      return { verdict: "could-not-run", reason: "command-not-runnable" };
+    }
   }
 
   if (inject.outcome !== "passed") return { verdict: "handler-did-not-fire" };
@@ -361,15 +400,16 @@ export function verdictFor(
 }
 
 /** Builds the finished run for one spec from its step results. `platform`
- * is passed through to `verdictFor`; see `isNotRunnable` for why it exists
- * and what it defaults to. */
+ * and `notFoundTemplate` are passed through to `verdictFor`; see
+ * `isNotRunnable` for why they exist and what they default to. */
 export function runFromSteps(
   file: string,
   claim: string,
   steps: StepResult[],
   platform: NodeJS.Platform = process.platform,
+  notFoundTemplate?: string,
 ): SpecRun {
-  const { verdict, reason } = verdictFor(steps, platform);
+  const { verdict, reason } = verdictFor(steps, platform, notFoundTemplate);
   return reason === undefined ? { file, claim, steps, verdict } : { file, claim, steps, verdict, reason };
 }
 

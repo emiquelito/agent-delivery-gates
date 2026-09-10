@@ -27,6 +27,7 @@ import process from "node:process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnCommand, reraiseSignal } from "../src/spawn-command.ts";
+import { calibrateNotFoundTemplate, needsCalibration } from "../src/calibrate-not-found.ts";
 import {
   exitCodeFor,
   formatReportJson,
@@ -385,7 +386,8 @@ async function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: nu
     steps.push(result);
     if (step === "baseline" && outcome !== "passed") stopped = true;
   }
-  return runFromSteps(file, spec.claim, steps);
+  const notFoundTemplate = needsCalibration(steps) ? await calibrateNotFoundTemplate(cwd) : undefined;
+  return runFromSteps(file, spec.claim, steps, process.platform, notFoundTemplate);
 }
 
 /** Whether a SIGINT/SIGTERM has already been handled. induce writes to no

@@ -50,9 +50,12 @@ function segmentsOf(path: string): string[] {
 
 /** True when every segment of `outer` appears, in order, at the start of
  * `inner`'s segments. A string-prefix comparison would let "/repo-evil"
- * count as inside "/repo"; comparing whole segments never does. */
+ * count as inside "/repo"; comparing whole segments never does. An
+ * ancestor of `outer` (fewer segments than `outer`) is denied without a
+ * separate length check: `innerSegments[i]` is `undefined` past the end of
+ * a shorter array, which never `===` a real segment, so `.every` already
+ * returns false on its own. */
 function isWithin(outerSegments: string[], innerSegments: string[]): boolean {
-  if (innerSegments.length < outerSegments.length) return false;
   return outerSegments.every((segment, i) => innerSegments[i] === segment);
 }
 

@@ -208,6 +208,124 @@ test("WINDOWS_COMMAND_NOT_FOUND_MESSAGE matches the exact text cmd.exe printed o
   assert.match(WINDOWS_NOT_FOUND_STDERR, WINDOWS_COMMAND_NOT_FOUND_MESSAGE);
 });
 
+// --- reviewer finding 1: WINDOWS_COMMAND_NOT_FOUND_MESSAGE is English only ---
+//
+// A non-English Windows prints the same "not found" banner in its own
+// language, and the hardcoded English pattern above never matches it, so
+// on most of the world's Windows installations a neutralize step for a
+// command that does not exist would still read as a control that ran.
+// isNotRunnable's `notFoundTemplate` parameter is the fix: the caller
+// (hooks/induce.ts's calibrateNotFoundTemplate) spawns a command guaranteed
+// not to exist through the same shell every step runs through, and hands
+// back whatever THIS machine's shell actually printed. These tests stand
+// in for that machine by handing isNotRunnable a template captured from a
+// simulated non-English (French) shell directly, without ever touching
+// WINDOWS_COMMAND_NOT_FOUND_MESSAGE, and confirm the verdict comes out
+// right from that alone.
+
+// What a French cmd.exe prints for a missing command, and the template
+// calibrateNotFoundTemplate would extract from it (the text right after
+// the command's own name).
+const FRENCH_NOT_FOUND_STDERR =
+  "'une-commande-imaginaire' n'est pas reconnu en tant que commande interne\r\n" +
+  "ou externe, un programme exécutable ou un fichier de commandes.\r\n";
+const FRENCH_NOT_FOUND_TEMPLATE = "n'est pas reconnu en tant que commande interne";
+
+test("a calibrated non-English template matches a failure with that machine's own text, not the English literal", () => {
+  // The hardcoded English pattern never matches this text at all: proof
+  // that only the calibrated template is doing the work below.
+  assert.doesNotMatch(FRENCH_NOT_FOUND_STDERR, WINDOWS_COMMAND_NOT_FOUND_MESSAGE);
+
+  const result = step("neutralize", "failed", 1, { stderr: FRENCH_NOT_FOUND_STDERR });
+  assert.equal(isNotRunnable(result, "win32"), false, "without a template, the English fallback correctly misses it");
+  assert.equal(isNotRunnable(result, "win32", FRENCH_NOT_FOUND_TEMPLATE), true);
+});
+
+test("a calibrated template produces could-not-run, not proven, for a simulated non-English shell", () => {
+  const steps: StepResult[] = [
+    step("inject", "passed", 0),
+    step("neutralize", "failed", 1, { stderr: FRENCH_NOT_FOUND_STDERR }),
+  ];
+  const run = runFromSteps(
+    "retry.json",
+    "a 503 is retried and never comes back as a quote",
+    steps,
+    "win32",
+    FRENCH_NOT_FOUND_TEMPLATE,
+  );
+  assert.equal(run.verdict, "could-not-run");
+  assert.equal(run.reason, "command-not-runnable");
+  assert.notEqual(run.verdict, "proven");
+});
+
+test("a calibrated template is never trusted off win32, the same as the English fallback", () => {
+  assert.equal(
+    isNotRunnable(
+      step("neutralize", "failed", 1, { stderr: FRENCH_NOT_FOUND_STDERR }),
+      "linux",
+      FRENCH_NOT_FOUND_TEMPLATE,
+    ),
+    false,
+  );
+});
+
+// --- reviewer finding 2: a quoted phrase inside a real failure must not read
+// as the shell's own banner --------------------------------------------------
+//
+// isNotRunnable used to match WINDOWS_COMMAND_NOT_FOUND_MESSAGE against the
+// step's whole combined output, with nothing requiring the text to be the
+// shell's own banner and not merely a substring anywhere in the buffer. A
+// step that actually ran and actually failed, and whose own output happens
+// to quote this exact phrase (an assertion message, a captured sub-process
+// log), was misread as a command that never ran -- hiding the real finding
+// behind a false could-not-run, the opposite error and just as wrong. The
+// fix anchors the match to the step's first output line, which is where a
+// shell's own "not found" banner always is, and nowhere a quoted copy of it
+// deeper in a real failure's own output can reach.
+
+test("a real failure that quotes the not-recognized phrase in its own output is not read as a command that never ran", () => {
+  // The reviewer's reproduction, verbatim: a step that ran, failed, and
+  // whose stderr quotes the exact phrase, but not as the shell's own first
+  // line -- it is the second line of an assertion failure's own message.
+  const result: StepResult = {
+    step: "neutralize",
+    command: "npm test",
+    outcome: "failed",
+    exitCode: 1,
+    durationMs: 100,
+    stdout: "",
+    stderr:
+      "AssertionError: expected error handler to catch\n" +
+      "  Actual stderr from subprocess: 'foo' is not recognized as an internal or external command, operable program or batch file.\n" +
+      "  at test (suite.test.js:42)\n",
+  };
+  assert.equal(isNotRunnable(result, "win32"), false);
+});
+
+test("the same quoted-phrase case is not read as could-not-run through verdictFor either", () => {
+  const steps: StepResult[] = [
+    step("inject", "passed", 0),
+    {
+      step: "neutralize",
+      command: "npm test",
+      outcome: "failed",
+      exitCode: 1,
+      durationMs: 100,
+      stdout: "",
+      stderr:
+        "AssertionError: expected error handler to catch\n" +
+        "  Actual stderr from subprocess: 'foo' is not recognized as an internal or external command, operable program or batch file.\n" +
+        "  at test (suite.test.js:42)\n",
+    },
+  ];
+  const run = runFromSteps("retry.json", "a 503 is retried and never comes back as a quote", steps, "win32");
+  // A step that ran and failed on purpose, with the assertion quoting a
+  // subprocess's own not-found text, is a real finding: the handler
+  // neither proved itself nor was ever shown to have not run.
+  assert.notEqual(run.verdict, "could-not-run");
+  assert.equal(run.verdict, "proven");
+});
+
 // --- the four verdicts --------------------------------------------------------
 
 test("proven: inject passed and neutralize failed", () => {
