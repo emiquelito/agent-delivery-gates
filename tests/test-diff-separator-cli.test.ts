@@ -416,6 +416,40 @@ test("a config broadens what the diff separator itself sees, not only --classify
   });
 });
 
+// --- an operational failure past config validation still exits 2 -------------
+
+// Each fragment here is a valid regex by itself, which is all
+// validateFragments in src/test-diff-config.ts checks at load time; --config
+// and --classify both pass with this file. Joined into one bucket regex by
+// compileFragments, which only ever runs once separateTestDiff actually runs,
+// two fragments naming the same capture group collide: "Duplicate capture
+// group name". That throw happens after main() in hooks/test-diff-separator.ts
+// has already awaited warmLanguageServices, so with no `.catch` on the call to
+// main() it used to reach Node's own unhandled-rejection handling: exit 1,
+// with a raw stack trace on stderr, a code this tool does not document. The
+// documented contract is exit 2 for anything that could not run as asked.
+const DUPLICATE_CAPTURE_GROUP_CONFIG = '{"skips": {"add": ["(?<dup>paused)", "(?<dup>halted)"]}}';
+
+test("a config that only breaks once compiled, not at load time, still exits 2, not 1", () => {
+  withConfigFile(DUPLICATE_CAPTURE_GROUP_CONFIG, (configPath) => {
+    const diff = [
+      "diff --git a/tests/widget.test.ts b/tests/widget.test.ts",
+      "index 1111111..2222222 100644",
+      "--- a/tests/widget.test.ts",
+      "+++ b/tests/widget.test.ts",
+      "@@ -1,1 +1,1 @@",
+      "+  x();",
+      "",
+    ].join("\n");
+    withTempFile(diff, (diffPath) => {
+      const result = runCli({ args: ["--diff", diffPath, "--config", configPath] });
+      assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+      assert.notEqual(result.stderr.trim(), "");
+      assert.doesNotMatch(result.stderr, /at compileFragments|at separateTestDiff/, "stderr must not be a raw stack trace");
+    });
+  });
+});
+
 // Git reports a rename as a whole file added and a whole file deleted unless
 // it is asked to detect renames. Without that, the check that a test file
 // left the naming convention never sees a rename at all, and the one case it

@@ -33,23 +33,47 @@ function main(): void {
 
   const rl = createInterface({ input: process.stdin, terminal: false });
 
+  // Every line in flight, so `close` can wait for all of them before this
+  // process exits. handleLine became async in the same commit that added
+  // the tree-sitter Python service: a request needing that grammar now
+  // crosses a real filesystem read before it resolves, and a client that
+  // sends its last request and closes stdin right away used to win that
+  // race against this process, exiting 0 with the reply never written.
+  // Nothing but `close` reads this set; `line` only ever adds to it and
+  // removes what it added, so nothing here can leak across requests.
+  const inFlight = new Set<Promise<void>>();
+
   rl.on("line", (line: string) => {
-    // handleLine never throws: every failure it hits, from a malformed
-    // line to an internal error mid-request, comes back as a JSON-RPC
-    // reply (or null for a notification), never an exception. Nothing here
-    // writes to stdout except that reply. It is async only because
-    // separate_test_diff may need to load the tree-sitter Python service
-    // before it can run; every other method still resolves on the same
-    // tick it always did.
-    void handleLine(line, ctx).then((reply) => {
-      if (reply !== null) {
-        process.stdout.write(`${reply}\n`);
-      }
-    });
+    // handleLine documents that it never throws: every failure it hits,
+    // from a malformed line to an internal error mid-request, comes back
+    // as a JSON-RPC reply (or null for a notification), never an
+    // exception. The `.catch` below is a second line of defense, not
+    // reliance on that promise: if handleLine ever did throw, this still
+    // has to resolve so `close` is never left waiting on a task that can
+    // no longer finish, and the failure still reaches a human instead of
+    // vanishing.
+    const task = handleLine(line, ctx)
+      .then((reply) => {
+        if (reply !== null) {
+          process.stdout.write(`${reply}\n`);
+        }
+      })
+      .catch((e) => {
+        process.stderr.write(`mcp-server: internal error handling a request (${(e as Error).message})\n`);
+      })
+      .finally(() => {
+        inFlight.delete(task);
+      });
+    inFlight.add(task);
   });
 
   rl.on("close", () => {
-    process.exit(0);
+    // Drain every reply already in flight before exiting. A client that
+    // never closes stdin never reaches this at all, so it is unaffected;
+    // one that does gets every reply it is owed first.
+    void Promise.allSettled(inFlight).then(() => {
+      process.exit(0);
+    });
   });
 }
 

@@ -15,7 +15,7 @@
 // src/code-mask.ts now, because src/test-diff-separator.ts needs it too and
 // this file already imports from that one.
 
-import { languageServiceFor, IDENT_CHAR } from "./code-mask.ts";
+import { languageServiceFor, warmLanguageServices, IDENT_CHAR } from "./code-mask.ts";
 import { classifyTestPath, isCommentLine, isImportLine, type RuleSet } from "./test-diff-separator.ts";
 
 /** The fixed operator set. One mutation per run, one operator per mutation. */
@@ -260,6 +260,33 @@ export function planMutations(files: SourceFile[], options: PlanOptions = {}): M
   }
   if (options.max === undefined) return all;
   return all.slice(0, Math.max(0, options.max));
+}
+
+/**
+ * `planMutations`, warmed first. `planFileMutations` reaches
+ * `languageServiceFor` directly (see the comment there), which answers a
+ * `.py` file with the tree-sitter mask only once `warmLanguageServices`
+ * has resolved it for this process; anything asked before that gets the
+ * regex scanner's answer instead, silently. `hooks/test-diff-separator.ts`,
+ * `hooks/test-diff-post-tool-hook.ts`, and `src/mcp-server.ts` each warm
+ * for their own paths before calling into their own synchronous work;
+ * `hooks/mutate.ts` used to call `planMutations` straight, without a
+ * fourth warm call to match, which is why a Python file taken through
+ * `adg mutate` got the regex mask with nothing to say a better one was
+ * ever available.
+ *
+ * This is that fourth warm call, folded into the one function every
+ * caller of `planMutations` should now reach for instead: warming and
+ * planning together, so getting the right mask for whichever languages a
+ * batch of files actually contains no longer depends on the caller
+ * remembering a second, separate step. `planMutations` itself stays
+ * synchronous and unwarmed on purpose, for callers (tests among them)
+ * that already hold files in memory and have no `.py` file in the mix, or
+ * warm some other way; this wrapper is for the ones that do not.
+ */
+export async function planMutationsWarmed(files: SourceFile[], options: PlanOptions = {}): Promise<Mutation[]> {
+  await warmLanguageServices(files.map((file) => file.path));
+  return planMutations(files, options);
 }
 
 /**

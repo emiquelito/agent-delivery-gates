@@ -288,6 +288,36 @@ test("tools/call separate_test_diff: a source-only diff reports no signals", asy
   });
 });
 
+const DIFF_TOUCHING_PYTHON = [
+  "diff --git a/foo.py b/foo.py",
+  "index 1111111..2222222 100644",
+  "--- a/foo.py",
+  "+++ b/foo.py",
+  "@@ -1,2 +1,2 @@",
+  "-x = 1",
+  "+x = 2",
+  "",
+].join("\n");
+
+test("a request needing the Python grammar still gets a reply when the client closes stdin right after sending it", async () => {
+  await withSession(REPO_ROOT, async (s) => {
+    await initialize(s);
+    // No await between the request and closing stdin: this is exactly the
+    // race Finding 1 describes. Loading the tree-sitter Python service to
+    // answer this request crosses a real filesystem read, so a server
+    // that does not wait for in-flight work before exiting can close
+    // before the reply is written, and the request is silently dropped.
+    s.sendRequest("tools/call", { name: "separate_test_diff", arguments: { diff_text: DIFF_TOUCHING_PYTHON } }, 42);
+    const exitCode = await s.close();
+    assert.equal(exitCode, 0);
+    assert.match(
+      s.rawStdout,
+      /"id":42/,
+      `expected a reply for id 42 on stdout before exit, got: ${JSON.stringify(s.rawStdout)}`,
+    );
+  });
+});
+
 // --- Protocol errors -----------------------------------------------------------
 
 test("tools/call with an unknown tool name gives error -32602", async () => {

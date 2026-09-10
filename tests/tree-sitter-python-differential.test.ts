@@ -127,6 +127,80 @@ test("f-string with a nested format expression: regex blanks the whole literal, 
   assert.notEqual(regexMaskNonCode(text), python.maskNonCode(text));
 });
 
+// markNode's own comment says an interpolation "can itself contain another
+// string, ... and so on", but nothing above exercised that nesting. These
+// three do: an escaped brace that opens no interpolation at all, and two
+// interpolations that each hold a real nested string one level down.
+
+test("f-string with an escaped brace: both scanners agree, since {{ opens no interpolation", () => {
+  const text = 'x = f"{{literal}}"\n';
+
+  // Python's own grammar reads a doubled `{` inside an f-string as a
+  // literal `{`, not the start of a replacement field: `{{literal}}` is
+  // ordinary string content from end to end, with no interpolation node
+  // for tree-sitter to recurse into. That makes this f-string, to both
+  // scanners, an ordinary quoted string: the regex scanner never knew
+  // f-strings apart from any other `"..."` string to begin with, and
+  // tree-sitter's `string` node here has no `interpolation` child, so
+  // markNode's whole-span LITERAL fill for `string` stands with nothing
+  // reopened inside it.
+  const expected = blank(text, "{{literal}}");
+  assert.equal(regexMaskNonCode(text), expected);
+  assert.equal(python.maskNonCode(text), expected);
+});
+
+test("an f-string interpolation holding a subscript with a string key: tree-sitter keeps the subscript as code and masks only the nested string", () => {
+  const text = "x = f\"{d['key']}\"\n";
+
+  // Regex reasoning: unchanged from every other f-string case above, this
+  // is one `"`-quoted string to the regex scanner, opening at the first
+  // `"` and closing at the matching one; the single quotes around `key`
+  // are just more string content to a scanner that only ever looks for
+  // the quote character it opened on. Everything between the outer
+  // quotes is blanked, `d['key']` included.
+  const regexExpected = blank(text, "{d['key']}");
+  assert.equal(regexMaskNonCode(text), regexExpected);
+
+  // tree-sitter reasoning: `{d['key']}` is one `interpolation` node,
+  // reopened to CODE and walked again by markNode. Inside it,
+  // `d['key']` is a subscript expression, ordinary code, except `'key'`
+  // itself: a second `string` node, nested one level inside the
+  // interpolation, exactly the case markNode's own comment names
+  // ("it can itself contain another string"). markNode recurses into
+  // that inner node the same way it recurses into anything else, so
+  // `'key'` gets the same whole-span LITERAL fill an outer string node
+  // gets, its quotes stay visible as delimiters, and `d[` and `]` on
+  // either side of it, along with the interpolation's own `{` and `}`,
+  // stay code.
+  const treeExpected = blank(text, "key");
+  assert.equal(python.maskNonCode(text), treeExpected);
+
+  assert.notEqual(regexMaskNonCode(text), python.maskNonCode(text));
+});
+
+test("an f-string interpolation holding a call with a string argument, through a second string level: same result, opposite outer quote", () => {
+  const text = "x = f'{obj.get(\"k\")}'\n";
+
+  // Regex reasoning: the outer f-string is `'`-quoted here instead of
+  // `"`-quoted, so the scanner opens on the first `'` and closes on the
+  // matching one; the double-quoted `"k"` inside is, again, just more
+  // content to a scanner tracking only its own opening quote character.
+  const regexExpected = blank(text, '{obj.get("k")}');
+  assert.equal(regexMaskNonCode(text), regexExpected);
+
+  // tree-sitter reasoning: `{obj.get("k")}` is the interpolation, reopened
+  // to code; `obj.get(` and `)` are an ordinary attribute access and call,
+  // both code, and `"k"` is a second, nested `string` node one level
+  // inside the interpolation. Only its content, the single character `k`,
+  // gets the whole-span LITERAL fill; its own quotes stay visible as
+  // delimiters, the same result as the previous case, with the outer and
+  // inner quote characters swapped.
+  const treeExpected = blank(text, "k");
+  assert.equal(python.maskNonCode(text), treeExpected);
+
+  assert.notEqual(regexMaskNonCode(text), python.maskNonCode(text));
+});
+
 test("a trailing `#` comment: regex leaves it as code, tree-sitter masks it", () => {
   const text = "total = a + b  # add the two together\n";
 

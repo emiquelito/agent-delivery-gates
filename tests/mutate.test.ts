@@ -14,11 +14,13 @@ import {
   isMutablePath,
   planFileMutations,
   planMutations,
+  planMutationsWarmed,
   selectMutablePaths,
   summarize,
   type Mutation,
   type MutationResult,
 } from "../src/mutate.ts";
+import { warmLanguageServices } from "../src/code-mask.ts";
 
 function mutationsFor(line: string): Mutation[] {
   return planFileMutations("src/example.ts", line);
@@ -399,4 +401,51 @@ test("the text report says plainly when nothing survived", () => {
   });
   assert.match(text, /killed 1, survived 0, timeout 0, skipped 0/);
   assert.match(text, /No mutation survived/);
+});
+
+// --- the mutate path and the Python language service --------------------
+
+// planFileMutations is the exact function hooks/mutate.ts reaches through
+// planMutations: `languageServiceFor(path).codeMask(text)` directly, with
+// no way of its own to know whether warmLanguageServices ran first. .py is
+// not in MUTABLE_EXTENSIONS (its operators are True/False and "and"/"or",
+// not this tool's C-family set), so an ordinary `adg mutate` run never
+// selects a .py file; this test drives planFileMutations directly, the
+// same way the reviewer's own reproduction did, to prove what mask a .py
+// file gets when the batch that reaches it was, and was not, warmed.
+//
+// The docstring's interior falls out of the regex scanner's own
+// documented per-line limit: a plain quote unclosed on the line it opened
+// is read as unterminated and abandoned, so the second and third quotes of
+// `"""` are read as one empty string followed by one unterminated string
+// that dies at the end of that same line, and everything after it,
+// including the next line, is ordinary code again to a scanner that never
+// heard of a triple-quoted string. That is what puts a mutation inside the
+// docstring below when nothing warmed the Python service first: the
+// tree-sitter grammar, once loaded, knows the docstring for what it is and
+// the mask this file's own differential test already covers agrees.
+const PY_DOCSTRING_TEXT = ["def f():", '    """', "    a == b", '    """', "    return 1 == 2", ""].join("\n");
+
+test("planFileMutations mutates inside a Python docstring when nothing warmed the Python service first", () => {
+  const mutations = planFileMutations("foo.py", PY_DOCSTRING_TEXT);
+  const lines = mutations.map((m) => m.line);
+  // Line 3 is "    a == b", inside the docstring; line 5 is the real
+  // "return 1 == 2". Only line 5 is an actual mutation candidate; line 3
+  // is the regex scanner's mistake.
+  assert.deepEqual(lines, [3, 5]);
+});
+
+test("planFileMutations mutates only the real code once warmLanguageServices resolved the Python service", async () => {
+  await warmLanguageServices(["foo.py"]);
+  const mutations = planFileMutations("foo.py", PY_DOCSTRING_TEXT);
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].line, 5);
+  assert.equal(mutations[0].after, "    return 1 != 2");
+});
+
+test("planMutationsWarmed plans the same mutations planMutations does for files with no Python in the batch", async () => {
+  const files = [{ path: "src/order.ts", text: "if (a < b) f();" }];
+  const sync = planMutations(files);
+  const warmed = await planMutationsWarmed(files);
+  assert.deepEqual(warmed, sync);
 });

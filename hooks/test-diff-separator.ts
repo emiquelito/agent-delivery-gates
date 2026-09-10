@@ -465,4 +465,12 @@ async function main(): Promise<void> {
   process.exit(result.signals.length === 0 ? 0 : 1);
 }
 
-main();
+main().catch((err) => {
+  // main() became async once it had to warm the Python language service
+  // before separating a diff. A bare `main()` call with no `.catch` hands
+  // an uncaught rejection to Node's default handling: exit 1 with a raw
+  // stack trace, a code this file does not document. The documented
+  // contract is exit 2 for anything this tool could not run as asked; an
+  // uncaught async failure is exactly that.
+  fail(`internal error: ${(err as Error).message}`);
+});

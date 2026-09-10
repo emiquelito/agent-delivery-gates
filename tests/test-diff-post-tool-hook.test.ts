@@ -159,3 +159,33 @@ test("a commit chained with no space before git is recognised", () => {
     assert.match(result.stderr, /assertion-removed/);
   });
 });
+
+// --- an operational failure past config validation still exits 2, not 1 -----
+
+// Each fragment is a valid regex alone, which is all config load-time
+// validation checks; the two only collide once compiled together into one
+// bucket regex, which happens inside separateTestDiff, called from this
+// hook's main() after it has already awaited warmLanguageServices. With no
+// `.catch` on that call, this used to reach Node's own unhandled-rejection
+// handling: exit 1, with a raw stack trace on stderr, a code this hook does
+// not document. The documented contract is exit 2 for a signal or any
+// operational failure.
+test("a config that only breaks once compiled exits 2, not 1, with no raw stack trace", () => {
+  withTempRepo((dir) => {
+    mkdirSync(join(dir, ".adg"), { recursive: true });
+    writeFileSync(
+      join(dir, ".adg", "test-diff.json"),
+      '{"skips": {"add": ["(?<dup>paused)", "(?<dup>halted)"]}}',
+    );
+    runGit(dir, ["add", ".adg/test-diff.json"]);
+    runGit(dir, ["commit", "-q", "-m", "add config"]);
+    commitFile(dir, "src/widget.ts", "return a + b;\n");
+    writeFileSync(join(dir, "src/widget.ts"), "return a - b;\n");
+    runGit(dir, ["add", "src/widget.ts"]);
+    runGit(dir, ["commit", "-q", "-m", "fix the sign"]);
+    const result = runHook({ tool_name: "Bash", tool_input: { command: "git commit -m 'x'" }, cwd: dir });
+    assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    assert.notEqual(result.stderr.trim(), "");
+    assert.doesNotMatch(result.stderr, /at compileFragments|at separateTestDiff/, "stderr must not be a raw stack trace");
+  });
+});

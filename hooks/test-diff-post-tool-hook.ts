@@ -129,4 +129,15 @@ async function main(): Promise<void> {
   block(lines.join("\n"));
 }
 
-main();
+main().catch((err) => {
+  // main() became async once it had to warm the Python language service
+  // before separating a diff that touches a .py file, and a call with no
+  // `.catch` on it hands a rejection to Node's own default handling: exit
+  // 1, with the raw stack trace on stderr, which is a code this hook does
+  // not document and which an agent reading exit status can mistake for
+  // "continue". The documented contract is exit 0 to continue and exit 2
+  // for a signal or any operational failure; an uncaught async failure is
+  // exactly that, and belongs on the same exit code as every other
+  // operational failure block() already reports.
+  block(`test-diff-post-tool-hook: internal error: ${(err as Error).message}`);
+});

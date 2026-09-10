@@ -41,7 +41,7 @@ import {
   exitCodeFor,
   formatReportJson,
   formatReportText,
-  planMutations,
+  planMutationsWarmed,
   selectMutablePaths,
   type MutationResult,
   type SourceFile,
@@ -486,7 +486,11 @@ async function main(): Promise<void> {
   const candidates = resolveCandidatePaths(args, repoRoot);
   const mutablePaths = selectMutablePaths(candidates);
   const files = readSourceFiles(mutablePaths, repoRoot);
-  const planned = planMutations(files);
+  // Warms the language services this batch of files needs (Python's
+  // tree-sitter grammar, when a .py file is in it) before planning a
+  // single mutation, the same way every other entry point that reads a
+  // diff already does. See planMutationsWarmed in src/mutate.ts.
+  const planned = await planMutationsWarmed(files);
   const attempted = planned.slice(0, args.max);
 
   // Nothing to mutate is not a pass. A run that measured nothing has to

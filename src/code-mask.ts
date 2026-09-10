@@ -434,6 +434,20 @@ export async function warmLanguageServices(paths: readonly string[]): Promise<vo
  * it for this process, and the regex scanner otherwise, including for a
  * caller that never called `warmLanguageServices` at all: that keeps every
  * caller written before this function existed working exactly as it did.
+ *
+ * That last case is also what the bug `adg mutate` had looked like: a caller
+ * that reads a `.py` file's mask without ever warming gets the regex
+ * scanner's answer silently, with nothing to say the tree-sitter one was
+ * available and simply never asked for. This function cannot fail loudly
+ * on "never warmed" itself, because src/test-diff-separator.ts calls it
+ * the same way, unwarmed, from tests that intend the regex fallback and
+ * would break if this started throwing (verified: doing so failed 5 tests
+ * in tests/test-diff-separator.test.ts). The fix belongs one level up, at
+ * whichever function actually knows all the paths a batch of work is
+ * about to touch: see `planMutationsWarmed` in src/mutate.ts, the single
+ * warm-then-plan entry point every production caller of mutate's planner
+ * now goes through, so which mask a `.py` file gets no longer depends on
+ * an entry point remembering a second, separate call.
  */
 export function languageServiceFor(path: string): LanguageService {
   if (path.toLowerCase().endsWith(".py") && pythonService !== undefined) return pythonService;
