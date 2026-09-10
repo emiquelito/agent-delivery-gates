@@ -133,9 +133,18 @@ export interface SpawnCommandResult {
 function killTree(pid: number): void {
   if (process.platform === "win32") {
     try {
-      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+      // Bounded so a hung taskkill (a busy runner, antivirus interception,
+      // an unkillable target) degrades to best-effort instead of blocking
+      // this signal handler -- and everything Node cannot run until it
+      // returns, including the caller's own SIGINT/SIGTERM/SIGHUP handler
+      // -- indefinitely. 5s comfortably covers a normally-slow taskkill on
+      // a loaded CI runner while still keeping Ctrl-C responsive; a timeout
+      // throws ETIMEDOUT, which the catch below treats the same as any
+      // other taskkill failure.
+      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", timeout: 5000 });
     } catch {
-      // best effort; nothing to do if the process already exited
+      // best effort; nothing to do if the process already exited or the
+      // call above timed out
     }
     return;
   }
