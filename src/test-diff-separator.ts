@@ -1418,15 +1418,19 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMa
 //
 // Two independent traces are read out of a .rs file's diff:
 //
-// 1. hasRustTestMarker: true when a test-ish token (#[cfg(test)], #[test]
-//    and the #[whatever::test] family, assert_eq!/assert_ne!/assert!) shows
-//    up ANYWHERE in the file's diff, including a context line and a hunk's
-//    `@@ ... @@` section heading, not only an added or removed line. When
-//    true, the whole file's changed lines run through the same weakening
-//    checks a test file gets. This is unchanged in spirit from before,
-//    widened only to read context and headings too, since a marker sitting
-//    two lines above the one that actually changed is real evidence, not
-//    noise.
+// 1. hasRustTestMarker: true when a test-declaring attribute (#[cfg(test)],
+//    #[test], or the #[whatever::test] family) shows up ANYWHERE in the
+//    file's diff, including a context line and a hunk's `@@ ... @@` section
+//    heading, not only an added or removed line. When true, the whole
+//    file's changed lines run through the same weakening checks a test file
+//    gets. Narrowed to these three attribute forms on purpose: each is
+//    test-declaring syntax with no other meaning in Rust, unlike a bare
+//    assert!/assert_eq!/assert_ne! call, which is Rust's everyday way to
+//    state a runtime invariant in ordinary production code (see the removed
+//    "Known gap" this used to name, folded into this fix below). A .rs file
+//    with no attribute marker still falls through to cfgTestRegionMask
+//    below, so an actual #[cfg(test)] module is still found even when this
+//    narrower check answers false for the file as a whole.
 //
 // 2. cfgTestRegionMask: a #[cfg(test)] module's extent, found by brace
 //    matching over the file's ordered line stream (added, removed, and
@@ -1478,37 +1482,39 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMa
 //   treating it as a test region would misclassify code that ships in
 //   the normal build. This is not new: the marker-only check this file
 //   had before cfgTestRegionMask never caught it either.
-// - Known gap, not attempted here, and the same category of problem
-//   Finding 1 closed below for the skips bucket, just broader:
-//   RUST_TEST_MARKER_RE treats a bare `assert!`/`assert_eq!`/`assert_ne!`
-//   as proof the whole file is worth scanning as a test (see
-//   hasRustTestMarker just below), but none of those three macros is
-//   test-only in Rust the way an "assert" call is in most of the other
-//   languages this bucket covers -- they are the standard way to state a
-//   runtime invariant anywhere in ordinary Rust code, not only inside
-//   `#[cfg(test)]`. A source file that asserts an invariant once, nowhere
-//   near a test, still gets its ENTIRE diff run through every check in
+// - Formerly a known gap, now closed: RUST_TEST_MARKER_RE used to treat a
+//   bare `assert!`/`assert_eq!`/`assert_ne!` as proof the whole file was
+//   worth scanning as a test, but none of those three macros is test-only
+//   in Rust the way an "assert" call is in most of the other languages
+//   this bucket covers -- they are the standard way to state a runtime
+//   invariant anywhere in ordinary Rust code, not only inside
+//   `#[cfg(test)]`. A source file that asserted an invariant once, nowhere
+//   near a test, used to get its ENTIRE diff run through every check in
 //   signalsForTestFile (assertion-removed, test-case-removed,
-//   tolerance-widened, timeout-raised -- not only skip-added), the same
-//   over-widening Finding 1 reproduced for skip-added specifically. This
-//   is not fixed here: unlike the skips bucket, which can carve out one
-//   fragment by extension, hasRustTestMarker's premise -- one match
-//   anywhere in the file authorises scanning the whole file -- is the
-//   part that is wrong, and narrowing it is a restructuring of how a .rs
-//   file is classified, not a bucket-scoped fragment change.
+//   tolerance-widened, timeout-raised -- not only skip-added), confirmed
+//   as a real false signal against production Rust with no test code in
+//   the file at all. RUST_TEST_MARKER_RE now recognises only the three
+//   attribute forms (#[cfg(test)], #[test], #[whatever::test]), which are
+//   unambiguous test-declaring syntax with no other meaning in Rust. A
+//   file with a bare assert! and no attribute marker now falls through to
+//   cfgTestRegionMask, which still finds an actual #[cfg(test)] module by
+//   brace matching and scans only that region -- a real source-code
+//   assertion elsewhere in the same file is no longer swept in with it.
 
 // Finding 1: fragments in the skips bucket whose form matches ordinary,
 // idiomatic Rust source, not a disabled test, so they must never run
 // against a `.rs` file at all -- the same false-positive category the long
 // comment on the skips bucket accepts everywhere else on purpose, except
-// here the cost is not a dismissible warning in a test file: hasRustTestMarker
-// below can send a whole SOURCE file's diff through this bucket on nothing
-// more than an ordinary `assert!` call (see the known gap above), so a
-// fragment this common in production Rust reaches code no reviewer would
-// call a test at all. Rust's own idiom for disabling a test is `#[ignore]`,
-// already covered by its own fragment in this same bucket; there is no
-// Rust convention that disables a test through a skip call or a `skip:`
-// field, so both of the fragments below are excluded outright instead of
+// here the cost is not a dismissible warning in a test file: RUST_TEST_MARKER_RE
+// finding an actual #[cfg(test)]/#[test]/::test attribute ANYWHERE in a .rs
+// file's diff sends that file's WHOLE diff through this bucket (see
+// hasRustTestMarker above), including any ordinary source code elsewhere in
+// the same file, outside the test module itself -- so a fragment this common
+// in production Rust reaches code no reviewer would call a test at all.
+// Rust's own idiom for disabling a test is `#[ignore]`, already covered by
+// its own fragment in this same bucket; there is no Rust convention that
+// disables a test through a skip call, a `skip:` field, or a `skip =`
+// assignment, so every fragment below is excluded outright instead of
 // narrowed, the same way narrowing them for every OTHER language kept
 // losing real disabling calls to a reviewer running the actual gate.
 //   - "\\.skip\\s*\\(": Iterator::skip is a standard-library method,
@@ -1519,24 +1525,44 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMa
 //     bare colon ("Config { skip: true, ..Default::default() }"), and a
 //     boolean or numeric field named `skip` (a pagination offset, an
 //     exclusion flag) is exactly as ordinary in Rust as the assignment
-//     form "\\bskip\\s*=\\s*\\S" already accepts as noise elsewhere in
-//     this bucket -- except, again, this is reached from source code here,
-//     not only from a test file, so the same trade is not free the way it
-//     is everywhere else this bucket runs.
+//     form below.
+//   - "\\bskip\\s*=\\s*\\S": the assignment form of the same field, most
+//     often a local binding, not a struct literal ("let skip =
+//     offset + 1;" in a pagination helper). This one was missed the first
+//     time this exclusion was written -- the struct-literal colon form was
+//     carved out but not this one, even though the same field is exactly
+//     as ordinary written either way -- and a reviewer running the real
+//     gate reproduced the miss directly: skip-added on that pagination
+//     line, with a message about a disabled test that made no sense for
+//     plain source code.
+//   - "\\bpending:\\s*\\S": the same struct-literal field-init form as
+//     "skip:" above, just a different field name -- "Job { pending: true,
+//     ..Default::default() }" is exactly as ordinary as "skip: true", and
+//     nothing about "pending" makes it Rust's way to disable a test either.
+//     Excluded on the same reasoning as "skip:", found by auditing this
+//     whole bucket for the same struct-literal-field pattern instead of
+//     trusting the fragments already listed here.
 // Every other skips-bucket fragment was checked against the same question
 // (does its literal form appear in ordinary Rust source?) and found not
 // to: "#[ignore]" and the `#[...]::test` family are Rust attribute syntax
 // with no other meaning; ".only", ".fixme", "xit(", "xdescribe(",
 // "test.todo"/"it.todo", the fragments written for Python, PHP, Go, Java,
-// C#, and .NET generally, "skipTest(", "XCTSkip", and the Elixir "@tag
-// :skip" form are all tied to another language's syntax closely enough
-// that they do not occur in Rust source. The one exception is the bare,
-// unchained "(?<!\\.)\\bskip\\(" fragment (for R's testthat::skip and
-// similar): a free function literally named `skip`, called without a
-// receiver, is conceivable in Rust but negligible next to Iterator::skip
-// and struct-literal field init, both of which are idiomatic and common;
+// C#, and .NET generally, "skipTest(", "XCTSkip", "t.Skip(", "t.SkipNow",
+// and the Elixir "@tag :skip" form are all tied to another language's
+// syntax closely enough that they do not occur in Rust source; "pending("
+// and "pending \"...\""/"skip \"...\"" are call/string forms with no bare
+// Rust equivalent either. The one exception is the bare, unchained
+// "(?<!\\.)\\bskip\\(" fragment (for R's testthat::skip and similar): a
+// free function literally named `skip`, called without a receiver, is
+// conceivable in Rust but negligible next to Iterator::skip and
+// struct-literal field init, both of which are idiomatic and common;
 // left in scope for `.rs` on purpose.
-const RUST_EXCLUDED_SKIP_FRAGMENTS: ReadonlySet<string> = new Set(["\\.skip\\s*\\(", "\\bskip:\\s*\\S"]);
+const RUST_EXCLUDED_SKIP_FRAGMENTS: ReadonlySet<string> = new Set([
+  "\\.skip\\s*\\(",
+  "\\bskip:\\s*\\S",
+  "\\bskip\\s*=\\s*\\S",
+  "\\bpending:\\s*\\S",
+]);
 
 /** The skips bucket, compiled with every fragment in
  * RUST_EXCLUDED_SKIP_FRAGMENTS left out. Used only for a `.rs` file (see
@@ -1556,13 +1582,21 @@ function compileSkipsForRust(skips: string[]): RegExp {
 }
 
 const RUST_PATH_RE = /\.rs$/;
-const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_eq!|\bassert_ne!|\bassert!/;
+// Deliberately narrow to the three attribute forms only. Each is
+// test-declaring syntax with no other meaning in Rust: a bare
+// assert!/assert_eq!/assert_ne! call used to be in this set too, but those
+// macros are Rust's everyday way to state a runtime invariant in ordinary
+// production code, not a test-only idiom, and including them sent a
+// source file's entire diff through every weakening check on nothing more
+// than an ordinary assertion. See the long comment banner above this
+// section for the false signals that produced, confirmed against real
+// Rust code.
+const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]/;
 
 // Both reads below test the masked line, for the same reason every other
-// pattern in this file does: `let s = "assert!";` is a Rust string that
+// pattern in this file does: `let s = "#[test]";` is a Rust string that
 // says nothing about whether this file holds tests. A Rust attribute is
-// code, so `#[cfg(test)]` and `#[test]` come through the mask untouched,
-// and so does `assert_eq!(total, 3)`.
+// code, so `#[cfg(test)]` and `#[test]` come through the mask untouched.
 function hasRustTestMarker(file: RawFileDiff, ctx: FileMaskContext): boolean {
   // Hunk headings are git's own one-line summary of enclosing scope, never
   // a line that itself sits at a known position in either whole file, so
