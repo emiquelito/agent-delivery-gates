@@ -1,6 +1,6 @@
 {
   "name": "agent-delivery-gates",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Delivery gates for AI coding agents, because green tests are not proof. Breaks your code on purpose and reports the breaks no test noticed. Runs a change's new tests against the code from before it. Induces the failure your report says is handled. Git hook, CI step or MCP server. No API key, one sandboxed dependency that cannot open a socket.",
   "license": "Apache-2.0",
   "author": "emiquelito <contact@agentgates.dev>",
