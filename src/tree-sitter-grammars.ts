@@ -196,6 +196,22 @@ const php: GrammarSpec = {
       // where literalTypes is what actually blanks it now.
       "text",
     ]),
+    // tree-sitter-php gives `text` no further structure at all: everything
+    // outside a `<?php ... ?>` span, HTML and any inline <script>/<style>
+    // content alike, is one undifferentiated leaf. Blanking it wholesale,
+    // which is right for the surrounding HTML, also blanks a real
+    // assertion written inside an inline <script> block -- the one thing
+    // this project's test-diff detector exists to keep seeing. `text`
+    // joining scriptStyleAwareTypes tells src/tree-sitter-language-service
+    // .ts's markNode to carve a <script>/<style> element's own content back
+    // out as code before blanking the rest of the node as HTML; see that
+    // file's fillHtmlAwareLiteral for how it stays safe against a
+    // <script> tag written inside a PHP string fooling the scan (short
+    // version: that string is a different node, masked on its own, and
+    // never part of any `text` node's substring in the first place), and
+    // what it still cannot do (an HTML comment around a fake <script>, or
+    // an unescaped `</script>` inside a real script body's own string).
+    scriptStyleAwareTypes: new Set(["text"]),
     // heredoc_start/heredoc_end are the `<<<EOT` tag's own name, repeated
     // at open and close; not code, and not blanked by accident either
     // way since nothing there could satisfy a detector, but listed for

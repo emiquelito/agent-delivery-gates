@@ -124,6 +124,22 @@
 // one object, not two that can drift apart. See that file's own header
 // for why it needed a third classification bucket, delimiterTypes, that
 // the other six grammars do not.
+//
+// A ceiling on the correctness check itself, worth stating plainly rather
+// than leaving a reader to discover it: findMisclassifiedCodeTypes flags a
+// CODE_TYPES entry by reading its own named children for a marker that says
+// "this looks like a literal container", which means it can only ever flag
+// a type that HAS named children to read. An atomic leaf -- no named
+// children at all -- gives the check nothing to signal on, so a leaf
+// misfiled into CODE_TYPES when it should have been a literal cannot be
+// caught by this check, whatever else about it looks wrong. `comment`,
+// `character`, `shebang`, `char_literal`, PHP's `text`, and C#'s
+// `verbatim_string_literal` are all in that class across this file's six
+// grammars: every one of them is a leaf in the grammar that defines it.
+// Checked directly against each grammar's own node-types.json: none of
+// them, or any other leaf type, sits in CODE_TYPES today, so nothing is
+// misfiled and unreachable by this check right now -- but a future one
+// would be, and this check alone would not be the thing to catch it.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -217,6 +233,23 @@ const NODE_TYPES_SUBPATH: Readonly<Record<string, string>> = {
  *     `{$expr}` form, and the other four are its more specific unwrapped
  *     forms ($var, ->member, [subscript], and a dynamic ($$) variable
  *     name).
+ *
+ *     The false-positive reason above is why these five cannot join
+ *     CONTENT_SHAPED_MARKERS (see that constant's own comment): "expression"
+ *     alone is also the entire children list of 27 ordinary PHP statement
+ *     types, so using it as a marker would flag every one of those as a
+ *     literal container the moment it has any child at all. That leaves a
+ *     real hole on the other side, put on the record here instead of only
+ *     being implied by the exclusion: a *literal* container whose own children
+ *     were exclusively these five forms would look, structurally, exactly
+ *     like an ordinary statement to findMisclassifiedCodeTypes, and a
+ *     future PHP literal type filed into CODE_TYPES by mistake, built that
+ *     way, would pass the correctness check undetected -- the same failure
+ *     class subshell was actually caught in, just for the one grammar this
+ *     check cannot close it for. Checked directly against tree-sitter-php's
+ *     own node-types.json at the time of this writing: no CODE_TYPES entry
+ *     has a children list built exclusively from these five, so the hole is
+ *     real but empty today, not exploited.
  */
 const EXCLUSIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   ".rs": new Set(),
