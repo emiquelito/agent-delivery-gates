@@ -1724,29 +1724,65 @@ test("a throw between reset and read closes the batch instead of poisoning every
   assert.equal(Array.isArray(after2.unwarmedExtensions), true, "still not poisoned on a second call after that");
 });
 
-// --- reviewer finding: a PHP documentation line must never gate-block on its own -----
+// --- PHP `text` (raw HTML): why it is never masked, checked at the gate itself ---
 //
-// A round that pulled PHP's `text` node (raw HTML outside `<?php ... ?>`)
-// out of masking entirely, to stop it hiding an assertion inside an inline
-// <script> block, traded that defect for a different one: an ordinary
-// documentation line sitting in template HTML, quoting an assertion's own
-// call form as prose, read as live code once `text` stopped being masked.
-// A reviewer built exactly this file and ran the real gate; changing only
-// the status-code numeral produced a HIGH assertion-weakened signal on a
-// one-character literal edit in a comment, with no reviewer necessarily in
-// the loop before CI acted on the exit code. This is that reproduction,
-// verbatim, run through the same warmed pipeline the gate itself uses.
-//
-// The raw-line pre-filter buys nothing here either: matching() (see
-// src/test-diff-separator.ts) tests the MASKED line, and once `text` goes
-// unmasked the masked line is identical to the raw one -- there was never
-// a second layer of defense underneath the mask.
-test("reviewer finding: an ordinary PHP documentation line naming an assertion's call form produces no signal when only its literal changes", async () => {
+// src/tree-sitter-language-service.ts's own file header has the full
+// account of three rounds that each tried a different answer for PHP's
+// `text` node and each made something worse. The short version, checked
+// directly here: the gate calls maskNonCode ONE DIFF LINE AT A TIME (see
+// `matching` in src/test-diff-separator.ts), never a whole file, so any fix
+// that needs to remember something from an earlier line -- "a <script> tag
+// opened up above" -- cannot work here even if it works against a
+// whole-file corpus. Both directions were tried and both are unsafe per
+// line; this project keeps the one whose failure is visible in a diff
+// instead of invisible. The two tests below pin that choice, not endorse
+// it -- see each one's own name and comment.
+
+// KNOWN LIMITATION (HIGH false positive), pinned, not desired: PHP's `text`
+// stays unmasked, so an ordinary documentation line quoting an assertion's
+// own call form as prose reads as a live assertion, and editing only the
+// literal in it -- a status code in a comment, nothing about test behavior
+// -- trips this project's own gate. A human reading the diff can dismiss
+// it; an automated caller cannot, which is the accepted cost of never
+// hiding a real assertion instead. If this test ever starts asserting an
+// empty signal list, `text` masking changed and this comment is stale, not
+// proof the limitation is gone -- confirm against a real multi-line
+// <script> block (the test below) before believing it.
+test("known limitation: an ordinary PHP documentation line naming an assertion's call form can trip the gate on an unrelated literal edit", async () => {
   const diff = oneFileDiff(
     "tests/LoginTest.php",
     ["        Usage: assert.strictEqual(response.code, 200); matches the API docs."],
     ["        Usage: assert.strictEqual(response.code, 404); matches the API docs."],
   );
   const result = await separateTestDiffWarmed(diff);
-  assert.deepEqual(signalIds(result.signals), [], "a documentation line's own literal changing must never block the gate");
+  assert.deepEqual(
+    signalIds(result.signals),
+    ["assertion-weakened"],
+    "a documentation line's own literal changing is currently indistinguishable from a real assertion's value changing; this is the accepted cost, not a bug to silence here",
+  );
+});
+
+// The other direction, and the reason `text` stays unmasked despite the
+// false positive above: a real assertion inside an ordinary multi-line
+// <script> block must never disappear. This is exactly what a diff hands
+// the gate for that case: the opening <script> tag sits on its own line,
+// nowhere in the one changed line the diff actually carries here, so a
+// per-line scan has no tag on THIS line to tell it "still open" -- the
+// same blindness described in src/tree-sitter-language-service.ts's own
+// header. The round this project tried and reverted read a bare line like
+// this one as still-unopened HTML and masked it away, silently, with no
+// signal where one was required; this line reopens as ordinary code
+// instead, unconditionally, and the weakening is caught.
+test("a real assertion weakened inside an ordinary multi-line <script> block still produces a signal", async () => {
+  const diff = oneFileDiff(
+    "tests/LoginTest.php",
+    ["        assert.strictEqual(response.code, 200);"],
+    ["        assert.equal(response.code, 200);"],
+  );
+  const result = await separateTestDiffWarmed(diff);
+  assert.deepEqual(
+    signalIds(result.signals),
+    ["assertion-weakened"],
+    "an assertion swapped for a weaker check must never go unreported, script tag on an earlier line or not",
+  );
 });

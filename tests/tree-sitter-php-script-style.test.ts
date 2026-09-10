@@ -1,10 +1,11 @@
 // A prior round (Finding 5) put PHP's `text` node in literalTypes so
 // leading and template-only HTML would be masked, then added a scan
-// (fillHtmlAwareLiteral, since removed) to carve an inline <script>/<style>
-// element's own content back out as visible code, since tree-sitter-php
-// gives `text` no child structure of its own for that content to be
-// reopened through the way a real interpolation is. A later round of
-// review found that scan hid a real assertion in two ways:
+// (fillHtmlAwareLiteral) to carve an inline <script>/<style> element's own
+// content back out as visible code, since tree-sitter-php gives `text` no
+// child structure of its own for that content to be reopened through the
+// way a real interpolation is. A later round of review found that scan
+// hid a real assertion in two ways, both reproduced here first as failing
+// (red) proof, then as regression tests against the fix:
 //
 //   - Finding 1 (CRITICAL): tree-sitter-php splits one physical
 //     <script>...</script> element into two separate `text` nodes
@@ -20,26 +21,26 @@
 //     being treated as HTML and gets blanked, including a real assertion
 //     and the real closing tag that follow it.
 //
-// That round reacted by pulling `text` out of literalTypes and contentTypes
-// entirely, so nothing about it was ever masked, by any means. The round
-// after found the actual cost of that: an ordinary documentation line
-// sitting in template HTML, quoting an assertion's own call form as prose,
-// now read as live code, and editing only its literal value tripped this
-// project's own gate at HIGH severity -- an exit-1 block on a documentation
-// edit, not the cosmetic "a human can see and dismiss it" cost it had been
-// described as (see tests/test-diff-separator.test.ts's own reviewer-finding
-// test for the reproduction at the gate level).
-//
-// This round fixes the scan's two real defects instead of abandoning it:
-// `text` is masked again (src/tree-sitter-grammars.ts's php entry lists it
-// in the new `htmlTypes` bucket), with a script/style carve-out that tracks
-// state across sibling `text` spans in document order -- fixing Finding 1 --
-// and resolves an ambiguous close toward the LAST candidate in the current
-// span instead of the first -- fixing Finding 1b. See
+// A round after this one tried fixing the scan directly instead of
+// dropping it -- cross-node state, an ambiguous close resolved toward
+// visible -- and it passed a whole-file corpus. It still shipped broken,
+// because the gate never hands maskNonCode a whole file: every real call
+// site passes one diff line at a time, so the cross-line state that fix
+// depended on never survived from one line to the next, and a multi-line
+// <script> block's own assertion (on a line with no tag of its own) went
+// back to vanishing -- worse than this file's own Finding 1. See
 // src/tree-sitter-language-service.ts's own file header for the full
-// account. Findings 1 and 1b below are unchanged as regression proof: they
-// still pass, now because the fix actually handles them, not because there
-// is nothing left to fool.
+// account of why a fourth attempt is blocked on the gate reading whole
+// files, not diff lines, and why this file settles on: `text` is pulled
+// back out of literalTypes and contentTypes entirely, so it is never
+// masked at all, by any means. This file's tests below now all pass
+// trivially -- there is no scan left to fool -- which is the point: masking
+// PHP's `text` node can no longer hide an assertion, because it no longer
+// hides anything. The cost this leaves, and how it shows up at the gate
+// itself, is pinned as tests/test-diff-separator.test.ts's own
+// known-limitation test, not here: this file is only about what
+// maskNonCode returns for a given text, which does not change whether that
+// text arrives as one call or many.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -107,56 +108,12 @@ test("a <script> tag written inside a PHP string still masks as an ordinary PHP 
   );
 });
 
-test("leading and template-only HTML masks again, now that the scan tracks script/style content instead of being dropped entirely", async () => {
+test("leading and template-only HTML now stays visible, the accepted trade-off of dropping the text scan entirely", async () => {
   const service = await servicePromise;
   const text = ["<!DOCTYPE html>", "<html><body>", "LEADING_HTML_TEXT", "</body></html>", "<?php echo 1; ?>", ""].join("\n");
   const masked = service.maskNonCode(text);
   assert.ok(
-    !masked.includes("LEADING_HTML_TEXT"),
-    `expected leading HTML to mask again, got: ${JSON.stringify(masked)}`,
+    masked.includes("LEADING_HTML_TEXT"),
+    `expected leading HTML to stay visible now that PHP's text node is never masked, got: ${JSON.stringify(masked)}`,
   );
-  assert.ok(masked.includes("echo 1;"), `expected the real PHP code to stay visible, got: ${JSON.stringify(masked)}`);
-});
-
-// Finding 3 (LOW): no test anywhere asserted that <style> content
-// specifically -- not just <script> -- stays visible, restoring the
-// coverage this file's own scanHtmlSpan carve-out needs for both element
-// kinds, not only the one every other test here happens to exercise.
-test("Finding 3: a <style> element's own content stays visible, the same carve-out <script> gets", async () => {
-  const service = await servicePromise;
-  const text = ["<html>", "<style>", "  .ok { color: red; } /* assert STYLE_MARKER visible */", "</style>", ""].join("\n");
-  const masked = service.maskNonCode(text);
-  assert.ok(
-    masked.includes(".ok { color: red; } /* assert STYLE_MARKER visible */"),
-    `expected style content to stay visible, got: ${JSON.stringify(masked)}`,
-  );
-});
-
-test("Finding 3, split by a `<?php ... ?>` span: a <style> element also tracks state across sibling text spans", async () => {
-  const service = await servicePromise;
-  const text = [
-    "<html>",
-    "<style>",
-    "  .box { width: <?php echo $w; ?>px; }",
-    "  /* assert STYLE_AFTER_SPLIT_VISIBLE */",
-    "</style>",
-    "",
-  ].join("\n");
-  const masked = service.maskNonCode(text);
-  assert.ok(
-    masked.includes("assert STYLE_AFTER_SPLIT_VISIBLE"),
-    `expected style content after the php tag to stay visible, got: ${JSON.stringify(masked)}`,
-  );
-});
-
-// The reviewer's own reproduction, at this file's level: a plain
-// documentation line, with no <script>/<style> tag anywhere in it, must
-// mask entirely now that `text` is masked as HTML by default again. See
-// tests/test-diff-separator.test.ts for the same finding reproduced through
-// the actual gate.
-test("an ordinary documentation line mentioning an assertion's call form, with no script/style tag in it, masks like any other HTML text", async () => {
-  const service = await servicePromise;
-  const text = "Usage: assert.strictEqual(response.code, 200); matches the API docs.";
-  const masked = service.maskNonCode(text);
-  assert.equal(masked, " ".repeat(text.length), `expected the whole line to mask, got: ${JSON.stringify(masked)}`);
 });
