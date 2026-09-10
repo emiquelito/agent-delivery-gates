@@ -53,48 +53,88 @@ export function isAlive(pid: number): boolean {
  * exactly what a real Windows failure needed and did not have: without
  * it, an actual partial-tree-kill looked identical to any other flaky
  * process-cleanup failure. `ps -o comm=` covers POSIX (Linux and macOS
- * alike); `tasklist /fi` covers Windows. Best-effort only: a pid that
- * exits between being read as a survivor and being described here, or any
- * other lookup failure, reports as "unknown" instead of throwing, since
- * this exists to add information to a failure, not to become a second way
- * for the test itself to fail. */
+ * alike); `tasklist /fi` covers Windows.
+ *
+ * Two distinct "nothing to report" outcomes are kept apart on purpose,
+ * because collapsing them into one "unknown" is exactly what made a real
+ * Windows run useless for this: `describePid(55116)` returning "unknown"
+ * could mean either "55116 is not running any more" (uninteresting) or
+ * "the lookup itself broke" (which hides real information -- a
+ * process-tree bug describing itself as merely absent). "gone" covers the
+ * first: the lookup ran, and reported, in its own terms, that nothing
+ * matches `pid` (tasklist's "INFO: No tasks..." line; `ps` exiting
+ * non-zero with empty output). "lookup failed: <reason>" covers
+ * everything else -- the tool could not be run, it exited in an
+ * unexpected way, or its output did not parse -- so that failure is
+ * reported on its own, instead of silently reading as "the process was
+ * already gone". */
 export function describePid(pid: number): string {
-  try {
-    if (process.platform === "win32") {
-      const result = spawnSync("tasklist", ["/fi", `PID eq ${pid}`, "/fo", "csv", "/nh"], {
-        encoding: "utf8",
-        timeout: 2000,
-      });
-      const match = result.stdout.trim().match(/^"([^"]+)"/);
-      return match ? match[1] : "unknown";
+  if (process.platform === "win32") {
+    const result = spawnSync("tasklist", ["/fi", `PID eq ${pid}`, "/fo", "csv", "/nh"], {
+      encoding: "utf8",
+      timeout: 2000,
+    });
+    if (result.error) return `lookup failed: ${result.error.message}`;
+    if (result.status !== 0) {
+      return `lookup failed: tasklist exited ${result.status}${result.stderr ? `: ${result.stderr.trim()}` : ""}`;
     }
-    const result = spawnSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
-    const name = result.stdout.trim();
-    return name || "unknown";
-  } catch {
-    return "unknown";
+    const stdout = result.stdout ?? "";
+    const match = stdout.trim().match(/^"([^"]+)"/);
+    if (match) return match[1];
+    if (/^INFO:/im.test(stdout)) return "gone";
+    return `lookup failed: unexpected tasklist output: ${JSON.stringify(stdout.trim().slice(0, 200))}`;
   }
+  const result = spawnSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
+  if (result.error) return `lookup failed: ${result.error.message}`;
+  const name = (result.stdout ?? "").trim();
+  if (name) return name;
+  if (result.status !== 0) return "gone";
+  return "lookup failed: empty ps output";
 }
 
-/** Renders a list of surviving pids as `pid (name)` pairs for a failure
+/** A survivor of `waitForNoneAlive`'s budget, together with what it was
+ * at the moment it was found still alive. See the comment on
+ * waitForNoneAlive below for why the name has to be captured there,
+ * before that function's own force-kill runs, instead of being looked up
+ * later from the bare pid. */
+export interface Survivor {
+  pid: number;
+  name: string;
+}
+
+/** Renders a list of survivors as `pid (name)` pairs for a failure
  * message. Empty input renders as an empty string, cheaply (no process
  * enumeration happens), so call sites can build this unconditionally
  * without an extra branch for the passing case. */
-export function describeSurvivors(pids: number[]): string {
-  return pids.map((pid) => `${pid} (${describePid(pid)})`).join(", ");
+export function describeSurvivors(survivors: Survivor[]): string {
+  return survivors.map(({ pid, name }) => `${pid} (${name})`).join(", ");
 }
 
 /** Polls for up to `budgetMs` for every pid to be gone, then force-kills
  * anything still alive so a test never leaves a process behind, red run
- * or green. Returns the pids still alive when the budget ran out, which
- * is empty exactly when the fix works. */
-export function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
+ * or green. Returns the survivors as of when the budget ran out (each
+ * with the name it had at that moment), which is empty exactly when the
+ * fix works.
+ *
+ * Descriptions are captured here, before the force-kill loop below, not
+ * later by whatever builds the failure message. A real Windows run
+ * showed why that order matters: describePid on a survivor asked about
+ * *after* this function had already SIGKILLed it can only ever answer
+ * "gone" -- correctly, since by then it is -- which is indistinguishable
+ * from a lookup that never worked and useless for telling which link in
+ * the tree (shell, script, worker) actually survived. Naming each
+ * survivor while it is still the thing that outlived the interrupt, and
+ * carrying that name forward instead of the bare pid, is what makes the
+ * diagnostic describe the failure instead of describing its own
+ * cleanup. */
+export function waitForNoneAlive(pids: number[], budgetMs: number): Survivor[] {
   const deadline = Date.now() + budgetMs;
   let stillAlive = pids.filter(isAlive);
   while (stillAlive.length > 0 && Date.now() < deadline) {
     spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { timeout: 200 });
     stillAlive = pids.filter(isAlive);
   }
+  const survivors = stillAlive.map((pid) => ({ pid, name: describePid(pid) }));
   for (const pid of stillAlive) {
     try {
       process.kill(pid, "SIGKILL");
@@ -102,7 +142,7 @@ export function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
       // already gone
     }
   }
-  return stillAlive;
+  return survivors;
 }
 
 /** Removes `path`, the same way these tests always have (retried, since a

@@ -23,11 +23,14 @@
 // and the buffering both handled by hand.
 //
 // Windows has no such thing as a POSIX process group to signal. There,
-// `detached` does not create one, and a negative pid is meaningless. The
-// closest equivalent is `taskkill /pid <pid> /t /f`, which walks and
-// kills the process's own descendant tree; it is used there instead, and
-// nowhere else, so the platform split is a deliberate choice written down
-// here, not an accident of what `detached` happens to do on each OS.
+// `detached` does not create one, and a negative pid is meaningless.
+// killTree's Windows branch instead enumerates every process on the
+// machine (via PowerShell's Win32_Process, the one enumeration mechanism
+// guaranteed present on a plain install -- see the comment on that branch
+// for why a live tree walk cannot be trusted to find everything) and
+// kills by that reconstructed tree; it is used there instead, and nowhere
+// else, so the platform split is a deliberate choice written down here,
+// not an accident of what `detached` happens to do on each OS.
 //
 // This one implementation is shared by all three call sites on purpose:
 // the same subtle bug was independently present in all three, and a
@@ -107,56 +110,163 @@ export interface SpawnCommandResult {
 
 /** Kills the command's whole descendant tree. `pid` is the pid handed
  * back by spawn() for the command itself (the process group leader on
- * POSIX). Errors are swallowed: by the time this runs, the group or the
- * process may already be gone, and that is success, not a failure to
- * report.
+ * POSIX, the shell on Windows). Errors are swallowed: by the time this
+ * runs, the group or the process may already be gone, and that is
+ * success, not a failure to report.
  *
- * The Windows branch runs taskkill synchronously on purpose. It used to
- * fire the async execFile and return immediately, without waiting for the
- * callback: killTree() is called from a SIGINT/SIGTERM/SIGHUP listener
- * registered with prependListener specifically so it runs before whatever
- * the caller does on the same signal (mutate restoring a mutated file and
- * exiting, census removing its worktree and exiting). Node invokes every
- * listener for one signal synchronously in registration order; it does
- * not await one before calling the next, so returning before taskkill's
- * own process had actually finished let the caller's handler reach
- * process.exit while taskkill was still walking the tree in the
- * background. This tool's own process could then be gone -- and a test
- * watching for it could see that exit and move on to removing the
- * directory the still-terminating descendants were still running out of
- * -- before every one of them had actually stopped. execFileSync blocks
- * killTree, and so this listener, until taskkill itself has exited,
- * closing that race; it does not by itself prove the OS has released
- * every handle those processes held (see reraiseSignal's caller for that
- * part), but it does mean the kill was actually issued and taskkill's own
- * process has ended before anything downstream of this signal runs. */
+ * The Windows branch used to run `taskkill /pid <pid> /t /f` and rely on
+ * its own tree walk. A real interrupted run proved that walk cannot be
+ * trusted: sampling every node.exe and cmd.exe on the machine through a
+ * real Ctrl-C (100ms, with command lines, 191 samples) showed the shell
+ * `pid` names here was already dead before the signal handler even ran --
+ * it appears in zero of those samples while it was "alive" by the test's
+ * own accounting, only ever recorded as the parent id stamped on its two
+ * surviving children, in a four-deep tree where the two deepest processes
+ * were the survivors. The same sample shows a live shell for other tests
+ * in the same file, so the sampler was finding shells correctly
+ * elsewhere -- this one really was gone early. `taskkill /t` walks the
+ * *live* tree below the pid it is given; given a pid with no live process
+ * behind it, it finds nothing to walk and reports success having killed
+ * nothing, and everything actually running underneath -- the script the
+ * shell launched, the worker beneath that -- is never touched. No timeout
+ * value fixes this: the kill was never cut short, it was aimed at a
+ * process that no longer existed.
+ *
+ * Unlike POSIX, Windows does not reassign an orphan to a new parent when
+ * that parent dies -- the dead parent's process id stays stamped on the
+ * child for the child's whole life. That is *why* the sampler could still
+ * show the parent/child relationship above, and it is what this fix
+ * relies on: the tree is reconstructable from parent ids after the
+ * parent is gone, even though it cannot be walked live from the parent
+ * down. So instead of asking Windows to walk a live tree from `pid`, this
+ * snapshots every process on the machine (id and parent id) with
+ * PowerShell's `Win32_Process` (via CIM, the successor to the `wmic` this
+ * project has already been burned by assuming was present -- wmic is an
+ * optional, increasingly absent component on current Windows, where
+ * PowerShell is not: Windows PowerShell 5.1 has shipped inside every
+ * Windows install since Windows 7 SP1 / Server 2008 R2 SP1, and unlike
+ * wmic it has never been marked deprecated or removed from a default
+ * image), reconstructs the set of pids descended from `pid` by following
+ * parent ids forward through that snapshot (seeding the set with `pid`
+ * itself whether or not it still appears in the snapshot, since a dead
+ * parent's children are exactly what would otherwise be missed), and
+ * kills each one directly by id -- never by asking Windows to walk from a
+ * parent that might already be gone.
+ *
+ * A job object is the textbook answer to this class of problem, but it
+ * needs a native module, which this project does not take on. Recording
+ * each descendant's pid as it is spawned was considered too: it would
+ * avoid the enumeration call below, but it means tracking spawns at
+ * arbitrary depth for the life of every command this module runs, for a
+ * case (interrupt arriving between the parent's death and the kill) that
+ * only matters at kill time, and it still cannot see a grandchild the
+ * command spawned that this module was never told about. Enumerating
+ * once, at kill time, costs one process launch instead, only when a kill
+ * actually happens, and needs no bookkeeping while the command runs.
+ *
+ * This one PowerShell invocation does the snapshot, the reconstruction,
+ * and the kill together, and runs synchronously via execFileSync on
+ * purpose. It used to fire the async execFile and return immediately,
+ * without waiting for the callback: killTree() is called from a
+ * SIGINT/SIGTERM/SIGHUP listener registered with prependListener
+ * specifically so it runs before whatever the caller does on the same
+ * signal (mutate restoring a mutated file and exiting, census removing
+ * its worktree and exiting). Node invokes every listener for one signal
+ * synchronously in registration order without awaiting one before the
+ * next, so returning before the kill had actually finished would let the
+ * caller's handler reach process.exit while descendants were still being
+ * torn down in the background -- and a test watching for this tool's own
+ * exit could move on to removing a directory a still-terminating
+ * descendant was still running out of, before every one of them had
+ * actually stopped. execFileSync blocks killTree, and so this listener,
+ * until the PowerShell process itself has exited, closing that race; it
+ * does not by itself prove the OS has released every handle those
+ * processes held (see reraiseSignal's caller for that part), but it does
+ * mean the kill was actually issued and PowerShell's own process has
+ * ended before anything downstream of this signal runs.
+ *
+ * Bounded at 5000ms, the same number `taskkill` was widened back to after
+ * a real Windows run showed a shorter bound (1500ms) cutting a tree-kill
+ * off mid-walk and abandoning whatever it had not yet reached -- alive,
+ * which is worse than doing nothing, since the caller's own cleanup that
+ * runs right after (mutate writing mutated files back, census removing
+ * its worktree) can then fail against a directory a surviving process
+ * still holds as its working directory. That mechanism still applies
+ * here even though the walk itself moved out of taskkill: the script
+ * below still does its kill as a loop of individual Stop-Process calls
+ * over the reconstructed set, so a bound that lands mid-loop abandons the
+ * targets after the cut the same way a truncated taskkill walk did.
+ *
+ * Keeping the same number is not "because it was already there" --
+ * this operation is not the same cost taskkill was bounded for, and
+ * widening from 5000ms was considered and rejected:
+ *
+ *   - What changed: this now pays PowerShell's process-launch cost
+ *     (hosting the CLR-based engine, not the small native taskkill.exe)
+ *     before the kill can even begin, on top of one Win32_Process query
+ *     over CIM/WMI. Both are documented as capable of running into the
+ *     hundreds of milliseconds on an ordinary machine, and measurably
+ *     worse under the antivirus interception or busy-runner conditions
+ *     1500ms was already found too short for. This project cannot run
+ *     Windows to measure either figure directly, so that cost is
+ *     inference, not a measurement: reason enough to leave the bound
+ *     alone, not to widen it further on top of it.
+ *   - What did not change, measured here on Linux as a lower-bound
+ *     proxy (a different mechanism -- /proc via `ps`, not WMI via CIM --
+ *     so this bounds the floor, not PowerShell's actual cost): spawning a
+ *     process and listing every pid/ppid on this machine both complete in
+ *     single-digit milliseconds. The snapshot-and-reconstruct logic
+ *     itself is not what a slow run would be spending time on; the
+ *     platform's process-launch and WMI-provider overhead is.
+ *   - The bound this tool's own tests already hold the whole real-SIGINT
+ *     path to: waitForNoneAlive gives 10s for the interrupted process to
+ *     exit and 5s more for its descendants to be confirmed gone (see
+ *     census-cli.test.ts, induce-cli.test.ts, mutate-cli.test.ts). Going
+ *     past 5000ms here would eat directly into that budget's remaining
+ *     headroom for the parts of the shutdown this bound does not cover
+ *     (the rest of the process actually exiting, streams closing), for a
+ *     Windows cost this project cannot measure to confirm needs it.
+ *     5000ms is the widest bound that still leaves that headroom meaningful.
+ *
+ * A PowerShell invocation that hits the bound has already killed whatever
+ * part of the reconstructed set it reached before being cut off, which is
+ * bounded, partial orphan cleanup, never less than doing nothing; a
+ * timeout throws, which the catch below treats the same as any other
+ * failure of this call. */
 function killTree(pid: number): void {
   if (process.platform === "win32") {
+    // One CIM snapshot of every process's id and parent id, a
+    // breadth-first walk forward from `pid` through those parent ids
+    // (added even if `pid` itself is not in the snapshot -- see the
+    // comment above), and a Stop-Process of everything found, all in one
+    // script so only one PowerShell process is launched. -ErrorAction
+    // SilentlyContinue on Stop-Process means a pid that exits between the
+    // snapshot and the kill (or was never real to begin with) does not
+    // abort the rest of the set.
+    const script = `
+$targets = @{ ${pid} = $true }
+$rows = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId
+$changed = $true
+while ($changed) {
+  $changed = $false
+  foreach ($row in $rows) {
+    $child = [int]$row.ProcessId
+    $parent = [int]$row.ParentProcessId
+    if ($targets.ContainsKey($parent) -and -not $targets.ContainsKey($child)) {
+      $targets[$child] = $true
+      $changed = $true
+    }
+  }
+}
+foreach ($id in $targets.Keys) {
+  Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+}
+`;
     try {
-      // Bounded, but not at 1500ms: a real Windows run proved that value
-      // wrong. execFileSync's timeout does not wait for taskkill to reach
-      // a natural stopping point -- when the bound elapses, Node sends
-      // taskkill itself a kill signal mid-walk. taskkill /t terminates the
-      // tree entry by entry as it walks it, not atomically, so cutting
-      // taskkill off does not mean "whatever it had already killed stays
-      // dead and the bound is simply exceeded" the way the 1500ms comment
-      // this replaces assumed -- it means whatever taskkill had not yet
-      // reached is abandoned alive. On a real machine that left two
-      // processes of a four-deep tree running after a real SIGINT: the
-      // exact runaway-process failure this tool exists to prevent (see the
-      // top of this file). A timeout that cuts a tree-kill short is not
-      // "bounded, partial orphan cleanup, never less than doing nothing" --
-      // it can be worse than doing nothing, since the caller's own cleanup
-      // that runs right after (mutate writing mutated files back, census
-      // removing its worktree) can then fail against a directory a
-      // surviving process still holds as its working directory. Ctrl-C
-      // responsiveness matters, but not more than that: 1500ms was chosen
-      // for a busy runner or antivirus interception, not for the ordinary
-      // case, and the ordinary case is what a shortened bound put at risk.
-      // Back to the wider bound taskkill was given before that trade was
-      // made; a timeout still throws ETIMEDOUT, caught below the same as
-      // any other taskkill failure.
-      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", timeout: 5000 });
+      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: "ignore",
+        timeout: 5000,
+      });
     } catch {
       // best effort; nothing to do if the process already exited or the
       // call above timed out
