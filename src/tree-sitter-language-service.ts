@@ -116,6 +116,20 @@
 // the hook every existing user runs, already planned as its own phase of
 // this project.
 //
+// UPDATE: that phase has shipped. src/test-diff-separator.ts's
+// `readWholeFile` option (see its own doc comment, and the KNOWN LIMIT
+// note this replaces in src/code-mask.ts's header) reads the file at the
+// commit and masks it once, so the per-line blindness this section's own
+// root-cause account describes is gone for a caller that supplies it --
+// every production caller now does. That closes the blocker, but does NOT
+// by itself make masking `text` safe again: reopening that question needs
+// its own evidence against the corpus that broke three earlier rounds
+// (tests/tree-sitter-php-script-style.test.ts), run with the whole-file
+// mask actually in place, not an assumption that the earlier failures
+// were only ever about line boundaries. `text` stays out of literalTypes
+// and contentTypes below until that evidence exists; this update records
+// that the blocker naming this file as the reason is lifted, nothing more.
+//
 // Given that, `text` is deliberately left out of both literalTypes and
 // contentTypes below (Route B, same as Round 2): a false "still code"
 // signal is visible in a diff and a person can dismiss it; a hidden
@@ -214,7 +228,11 @@ function makeService(parser: Parser, config: GrammarConfig): LanguageService {
     maskNonCode(text: string): string {
       const kinds = classify(parser, text, config);
       let out = "";
-      for (let i = 0; i < text.length; i++) out += kinds[i] === LITERAL ? " " : text[i];
+      // A newline is kept verbatim even inside a literal span, so a
+      // multi-line string or comment never merges two lines into one in
+      // the masked output; see src/code-mask.ts's own maskNonCode for why
+      // this matters to a whole-file caller.
+      for (let i = 0; i < text.length; i++) out += kinds[i] === LITERAL && text[i] !== "\n" ? " " : text[i];
       return out;
     },
   };

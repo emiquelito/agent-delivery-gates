@@ -293,6 +293,33 @@ export interface SeparateOptions {
    * direction that reports more, never less.
    */
   readFileText?: (path: string) => string | undefined;
+  /**
+   * Returns the whole content of `path` on one side of the diff, or
+   * undefined when that side cannot be supplied: the file does not exist
+   * there (added has no old side, deleted has no new side), the caller has
+   * no commit to read from, or the read failed for any other reason. "old"
+   * is the pre-image a removed line came from; "new" is the post-image an
+   * added line lands in.
+   *
+   * This is what lets a detector see a construct spanning more than one
+   * diff line -- a Python docstring, a PHP <script> block that opened
+   * above the hunk's own context window -- because the line is masked
+   * against the whole file it actually sits in, not read in isolation. See
+   * `buildFileMaskContext` and `maskDiffLine` below for how a line is
+   * matched back to its place in that whole file, and src/code-mask.ts's
+   * file header for what this replaces.
+   *
+   * This file does no I/O of its own, so a caller with nothing to supply
+   * here (raw diff text with no known revision -- see hooks/test-diff-
+   * separator.ts's --diff/stdin mode, and src/mcp-server.ts's diff_text
+   * argument) may simply omit this option. Every check then runs exactly
+   * as it did before this option existed: one diff line at a time, masked
+   * alone. A caller that supplies a reader for only one side (a brand new
+   * file has no useful "old" reader to write) gets whole-file context for
+   * the side it can answer and per-line context for the side it cannot,
+   * line by line, not as an all-or-nothing switch.
+   */
+  readWholeFile?: (path: string, side: "old" | "new") => string | undefined;
 }
 
 export interface SeparateResult {
@@ -508,13 +535,28 @@ export interface DiffLine {
   kind: DiffLineKind;
   /** The line's content, with its leading +/-/space marker stripped. */
   content: string;
+  /**
+   * The line's 1-based line number in the file's pre-image (the old side),
+   * or null when it has none: an added line exists only in the new file.
+   * Read off the hunk header's own `-a,b` count and advanced one line at a
+   * time; used to find this exact line inside a whole file's own text (see
+   * `readWholeFile` on SeparateOptions and `maskDiffLine` below), never
+   * printed or compared against anything else.
+   */
+  oldLineNo: number | null;
+  /**
+   * The line's 1-based line number in the file's post-image (the new
+   * side), or null when it has none: a removed line exists only in the old
+   * file. Read off the hunk header's own `+c,d` count.
+   */
+  newLineNo: number | null;
 }
 
 interface RawFileDiff {
   path: string;
   oldPath: string | null;
-  addedLines: string[];
-  removedLines: string[];
+  addedLines: DiffLine[];
+  removedLines: DiffLine[];
   /**
    * Every hunk line for this file, in file order, added/removed/context
    * lines alike. Context lines are dropped from addedLines/removedLines
@@ -539,17 +581,29 @@ function stripAbPrefix(path: string): string {
 }
 
 const GIT_HEADER_RE = /^diff --git a\/(.+?) b\/(.+)$/;
-const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@[ \t]?(.*)$/;
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@[ \t]?(.*)$/;
 
 interface FileSection {
   path: string | null;
   pathA: string | null;
   oldPath: string | null;
-  addedLines: string[];
-  removedLines: string[];
+  addedLines: DiffLine[];
+  removedLines: DiffLine[];
   lines: DiffLine[];
   hunkHeadings: string[];
   inHunk: boolean;
+  /**
+   * The line number the NEXT context or removed line will carry in the old
+   * file, and the next context or added line will carry in the new file.
+   * Both are set from the hunk header's own `-a,b +c,d` counts when a hunk
+   * opens, and each advances independently as lines are read: a removed
+   * line advances only oldLine, an added line only newLine, a context line
+   * both. Null before the first hunk header of the file is seen, so a line
+   * read outside any hunk (never happens; parseDiff only builds DiffLine
+   * entries inside a hunk) cannot be mistaken for a numbered one.
+   */
+  oldLine: number | null;
+  newLine: number | null;
 }
 
 function newSection(): FileSection {
@@ -562,6 +616,8 @@ function newSection(): FileSection {
     lines: [],
     hunkHeadings: [],
     inHunk: false,
+    oldLine: null,
+    newLine: null,
   };
 }
 
@@ -639,7 +695,11 @@ function parseDiff(text: string): RawFileDiff[] {
       if (line.startsWith("@@")) {
         section.inHunk = true;
         const heading = HUNK_HEADER_RE.exec(line);
-        if (heading && heading[1].trim() !== "") section.hunkHeadings.push(heading[1].trim());
+        if (heading) {
+          section.oldLine = Number(heading[1]);
+          section.newLine = Number(heading[2]);
+          if (heading[3].trim() !== "") section.hunkHeadings.push(heading[3].trim());
+        }
         continue;
       }
       // Other pre-hunk metadata: "index ...", "new file mode ...",
@@ -654,20 +714,32 @@ function parseDiff(text: string): RawFileDiff[] {
     if (line.startsWith("@@")) {
       // A later hunk in the same file: its own changed-line counts are
       // unaffected, but its heading is its own trace of enclosing scope.
+      // Its own `-a,b +c,d` counts restart the running line numbers too,
+      // since a second hunk is not a continuation of the first one's.
       const heading = HUNK_HEADER_RE.exec(line);
-      if (heading && heading[1].trim() !== "") section.hunkHeadings.push(heading[1].trim());
+      if (heading) {
+        section.oldLine = Number(heading[1]);
+        section.newLine = Number(heading[2]);
+        if (heading[3].trim() !== "") section.hunkHeadings.push(heading[3].trim());
+      }
       continue;
     }
     if (line.startsWith("+")) {
       const content = line.slice(1);
-      section.addedLines.push(content);
-      section.lines.push({ kind: "added", content });
+      const newLineNo = section.newLine;
+      if (section.newLine !== null) section.newLine++;
+      const entry: DiffLine = { kind: "added", content, oldLineNo: null, newLineNo };
+      section.addedLines.push(entry);
+      section.lines.push(entry);
       continue;
     }
     if (line.startsWith("-")) {
       const content = line.slice(1);
-      section.removedLines.push(content);
-      section.lines.push({ kind: "removed", content });
+      const oldLineNo = section.oldLine;
+      if (section.oldLine !== null) section.oldLine++;
+      const entry: DiffLine = { kind: "removed", content, oldLineNo, newLineNo: null };
+      section.removedLines.push(entry);
+      section.lines.push(entry);
       continue;
     }
     // A context line (leading space), "\ No newline at end of file", or a
@@ -679,7 +751,11 @@ function parseDiff(text: string): RawFileDiff[] {
       continue; // "\ No newline at end of file": diff metadata, not content
     }
     const content = line.startsWith(" ") ? line.slice(1) : line;
-    section.lines.push({ kind: "context", content });
+    const oldLineNo = section.oldLine;
+    const newLineNo = section.newLine;
+    if (section.oldLine !== null) section.oldLine++;
+    if (section.newLine !== null) section.newLine++;
+    section.lines.push({ kind: "context", content, oldLineNo, newLineNo });
   }
   finalize();
 
@@ -729,36 +805,162 @@ export function isImportLine(line: string): boolean {
   return IMPORT_LINE_RE.test(line);
 }
 
+// --- Whole-file mask context ---------------------------------------------
+//
+// Every real call site used to hand maskNonCode one diff line at a time,
+// which is what src/code-mask.ts's header long called a KNOWN LIMIT: a
+// string, a docstring, an HTML script block, anything that opens on an
+// earlier line, is invisible to a scan that only ever sees the one line
+// that changed. This section is the fix. A caller that can read a whole
+// file at the commit (see `readWholeFile` on SeparateOptions) gets that
+// file masked ONCE, and every line the diff touches is answered from that
+// one masked file by its own line number, not re-masked alone.
+//
+// A removed line has no post-image: it only ever existed in the file
+// before this diff, so it is read and masked from the OLD side. An added
+// line has no pre-image and is read and masked from the NEW side. A
+// context line is unchanged, so it exists on both sides with the same
+// content; the new side is preferred (it is the file as it stands after
+// the diff, the more useful one to have masked for anything downstream
+// that also wants it), the old side is tried if the new side has nothing
+// for this line, and per-line masking is the last resort, exactly the
+// behaviour every caller already had before this section existed.
+//
+// A reader is trusted only as far as it can be checked: the whole file's
+// own line at the position the hunk header says this line sits at must
+// read back the SAME raw text the diff itself carries. A stale read (the
+// working tree moved on, the wrong revision was handed in, an off-by-one
+// in the hunk arithmetic) fails that check and falls back to per-line
+// masking instead of applying some other line's mask to this one, which
+// would be worse than the limit this section closes.
+
+/** One side's precomputed whole-file text, split into lines twice: once
+ * raw, for the reader-trust check above, and once masked, what a line
+ * lookup actually returns. Both null when this side could not be
+ * supplied at all -- no reader given, the file does not exist on this
+ * side, or the read failed. */
+interface SideMask {
+  raw: string[] | null;
+  masked: string[] | null;
+}
+
+/** Everything one changed file needs to mask any of its own diff lines,
+ * built once per file and reused across every check that runs against it. */
+interface FileMaskContext {
+  old: SideMask;
+  new: SideMask;
+  /** The path a removed line's own extension is chosen from: the file's
+   * pre-rename path when this file was renamed, its own path otherwise. */
+  oldPath: string;
+  /** The path an added or context line's own extension is chosen from. */
+  newPath: string;
+}
+
+const EMPTY_SIDE_MASK: SideMask = { raw: null, masked: null };
+
+function buildSideMask(text: string | undefined, path: string): SideMask {
+  if (text === undefined) return EMPTY_SIDE_MASK;
+  return { raw: splitLines(text), masked: splitLines(maskNonCode(text, path)) };
+}
+
 /**
- * Counts and collects the code lines in `lines` that match `re`.
+ * Builds `file`'s mask context, reading whole-file text through
+ * `readWholeFile` only for the sides this file could actually need: the
+ * old side when it carries any removed line, the new side when it carries
+ * any added line, and both sides unconditionally for a `.rs` file, since
+ * Rust's own test detection (`hasRustTestMarker`, `cfgTestRegionMask`
+ * below) reads context lines too, on either side, not only added/removed
+ * ones. A plain source file with no removed or added lines worth masking
+ * -- most of a large commit, ordinarily -- triggers no read at all: this
+ * is the bound that keeps a fifty-file commit from paying for fifty whole
+ * files it was never going to mask a single line of.
+ *
+ * `readWholeFile` undefined (no commit to read from) returns a context
+ * whose every lookup falls through to per-line masking, unchanged from
+ * how this file always worked before this option existed.
+ */
+function buildFileMaskContext(
+  file: RawFileDiff,
+  readWholeFile: ((path: string, side: "old" | "new") => string | undefined) | undefined,
+): FileMaskContext {
+  const oldPath = file.oldPath ?? file.path;
+  const newPath = file.path;
+  if (readWholeFile === undefined) {
+    return { old: EMPTY_SIDE_MASK, new: EMPTY_SIDE_MASK, oldPath, newPath };
+  }
+  const isRust = RUST_PATH_RE.test(newPath);
+  const wantOld = isRust || file.removedLines.length > 0;
+  const wantNew = isRust || file.addedLines.length > 0;
+  const oldText = wantOld ? readWholeFile(oldPath, "old") : undefined;
+  const newText = wantNew ? readWholeFile(newPath, "new") : undefined;
+  return {
+    old: buildSideMask(oldText, oldPath),
+    new: buildSideMask(newText, newPath),
+    oldPath,
+    newPath,
+  };
+}
+
+/**
+ * The masked form of one diff line, read from whichever side of `ctx` has
+ * it: the new side for an added or context line, the old side for a
+ * removed or context line (new preferred when both could answer a context
+ * line), falling back to masking this line alone when neither side has a
+ * trustworthy answer -- no whole-file text for that side, this line's own
+ * number missing or out of range (should not happen; recorded loudly if
+ * it ever does, not silently misapplied), or the whole file's own line at
+ * that number no longer reading back the exact text this diff line
+ * carries.
+ */
+function maskDiffLine(line: DiffLine, ctx: FileMaskContext): string {
+  if (line.kind !== "removed" && line.newLineNo !== null && ctx.new.raw !== null && ctx.new.masked !== null) {
+    const idx = line.newLineNo - 1;
+    if (idx >= 0 && idx < ctx.new.raw.length && ctx.new.raw[idx] === line.content) return ctx.new.masked[idx];
+  }
+  if (line.kind !== "added" && line.oldLineNo !== null && ctx.old.raw !== null && ctx.old.masked !== null) {
+    const idx = line.oldLineNo - 1;
+    if (idx >= 0 && idx < ctx.old.raw.length && ctx.old.raw[idx] === line.content) return ctx.old.masked[idx];
+  }
+  const path = line.kind === "removed" ? ctx.oldPath : ctx.newPath;
+  return maskNonCode(line.content, path);
+}
+
+/** One line kept twice: the text to test against, and the text to report. */
+interface MaskedLine {
+  raw: string;
+  masked: string;
+}
+
+/**
+ * Counts and collects the code lines in `lines` that match `re`, each kept
+ * alongside the masked text it matched on.
  *
  * The pattern is tested against the line with every string, template,
  * regular expression, and trailing comment blanked out (see
- * src/code-mask.ts), because a detector word written inside a literal is
- * fixture text or a test's own name, not a weakening of anything. The
- * ORIGINAL line is what comes back and what gets reported: a person
- * reading a signal has to see the real text, never a line with holes cut
- * in it. A line whose code half is empty once masked matches nothing,
- * which is the point.
+ * src/code-mask.ts and `maskDiffLine` above), because a detector word
+ * written inside a literal is fixture text or a test's own name, not a
+ * weakening of anything. The ORIGINAL line is what comes back and what
+ * gets reported: a person reading a signal has to see the real text,
+ * never a line with holes cut in it. A line whose code half is empty once
+ * masked matches nothing, which is the point.
  *
  * The whole-line comment and import checks run first, not instead: the
  * mask knows the C-family comment forms only, and an import line is never
  * an assertion whatever word it carries.
- *
- * KNOWN LIMIT: this masks one line at a time, so a string that opened on an
- * earlier line is invisible to it. In
- *
- *     const xml = `
- *       <skipped type="pytest.skip"/>
- *     `;
- *
- * the middle line carries no quote of its own and reads as code, so its
- * detector words still fire. A diff line is all this file ever holds, so
- * there is no whole file to scan instead. For a test file where that is
- * common, the fixture marker (FIXTURE_MARKER above) is the answer.
  */
-function matching(lines: string[], re: RegExp, path: string): string[] {
-  return lines.filter((line) => !isCommentLine(line) && !isImportLine(line) && re.test(maskNonCode(line, path)));
+function matchingMasked(lines: DiffLine[], re: RegExp, ctx: FileMaskContext): MaskedLine[] {
+  const out: MaskedLine[] = [];
+  for (const line of lines) {
+    if (isCommentLine(line.content) || isImportLine(line.content)) continue;
+    const masked = maskDiffLine(line, ctx);
+    if (re.test(masked)) out.push({ raw: line.content, masked });
+  }
+  return out;
+}
+
+/** `matchingMasked`, for a caller that only wants the raw text back. */
+function matching(lines: DiffLine[], re: RegExp, ctx: FileMaskContext): string[] {
+  return matchingMasked(lines, re, ctx).map((m) => m.raw);
 }
 
 // An assertion that stays in place but stops proving as much. The net-count
@@ -781,26 +983,17 @@ function blankLiterals(line: string): string {
     .trim();
 }
 
-/** One line kept twice: the text to test against, and the text to report. */
-interface MaskedLine {
-  raw: string;
-  masked: string;
-}
-
-function withMask(raw: string, path: string): MaskedLine {
-  return { raw, masked: maskNonCode(raw, path) };
-}
-
 /**
  * Two ways an assertion gets quieter without disappearing. A strong check is
  * swapped for a weaker one, or the same check keeps its form while the value
  * it expects changes, which is how a test gets edited to match a bug.
  */
-function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules): Signal[] {
+function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules, ctx: FileMaskContext): Signal[] {
   // Every pattern below is tested against the masked half of the line and
-  // reported from the raw half, for the reason given on `matching` above.
-  const removed = matching(file.removedLines, rules.assertions, file.path).map((line) => withMask(line, file.path));
-  const added = matching(file.addedLines, rules.assertions, file.path).map((line) => withMask(line, file.path));
+  // reported from the raw half, for the reason given on `matchingMasked`
+  // above.
+  const removed = matchingMasked(file.removedLines, rules.assertions, ctx);
+  const added = matchingMasked(file.addedLines, rules.assertions, ctx);
   if (removed.length === 0 || added.length === 0) return [];
   const signals: Signal[] = [];
 
@@ -924,9 +1117,10 @@ function netRemovalSignal(
   severity: FindingSeverity,
   re: RegExp,
   message: string,
+  ctx: FileMaskContext,
 ): Signal[] {
-  const removed = matching(file.removedLines, re, file.path);
-  const added = matching(file.addedLines, re, file.path);
+  const removed = matching(file.removedLines, re, ctx);
+  const added = matching(file.addedLines, re, ctx);
   if (removed.length <= added.length) return [];
   return removed.map((line) => ({ id, severity, file: file.path, line, message }));
 }
@@ -944,16 +1138,17 @@ function changedValueSignal(
   severity: FindingSeverity,
   re: RegExp,
   message: string,
+  ctx: FileMaskContext,
 ): Signal[] {
-  const removed = matching(file.removedLines, re, file.path);
-  const added = matching(file.addedLines, re, file.path);
+  const removed = matching(file.removedLines, re, ctx);
+  const added = matching(file.addedLines, re, ctx);
   if (removed.length === 0 || added.length === 0) return [];
   return added.map((line) => ({ id, severity, file: file.path, line, message }));
 }
 
 /** skip-added fires on any added line naming a skip or exclusion, unconditionally. */
-function skipAddedSignal(file: RawFileDiff, rules: CompiledRules): Signal[] {
-  return matching(file.addedLines, rules.skips, file.path).map((line) => ({
+function skipAddedSignal(file: RawFileDiff, rules: CompiledRules, ctx: FileMaskContext): Signal[] {
+  return matching(file.addedLines, rules.skips, ctx).map((line) => ({
     id: "skip-added" as const,
     severity: "high" as const,
     file: file.path,
@@ -962,15 +1157,16 @@ function skipAddedSignal(file: RawFileDiff, rules: CompiledRules): Signal[] {
   }));
 }
 
-function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
+function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMaskContext): Signal[] {
   return [
-    ...assertionWeakenedSignals(file, rules),
+    ...assertionWeakenedSignals(file, rules, ctx),
     ...netRemovalSignal(
       file,
       "assertion-removed",
       "high",
       rules.assertions,
       "an assertion was removed with no equivalent added in this file; confirm this check was not deleted to reach green",
+      ctx,
     ),
     ...netRemovalSignal(
       file,
@@ -978,14 +1174,16 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
       "high",
       rules.testCases,
       "a test case was removed with no equivalent added in this file; confirm this test was not deleted to reach green",
+      ctx,
     ),
-    ...skipAddedSignal(file, rules),
+    ...skipAddedSignal(file, rules, ctx),
     ...changedValueSignal(
       file,
       "tolerance-widened",
       "medium",
       rules.tolerance,
       "a tolerance-related line changed; a human must read the before and after values to confirm this was not loosened to reach green",
+      ctx,
     ),
     ...changedValueSignal(
       file,
@@ -993,6 +1191,7 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules): Signal[] {
       "low",
       rules.timeout,
       "a timeout or retry count changed; a human must read the before and after values to confirm this was not raised to reach green",
+      ctx,
     ),
   ];
 }
@@ -1075,9 +1274,13 @@ const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_
 // says nothing about whether this file holds tests. A Rust attribute is
 // code, so `#[cfg(test)]` and `#[test]` come through the mask untouched,
 // and so does `assert_eq!(total, 3)`.
-function hasRustTestMarker(file: RawFileDiff): boolean {
+function hasRustTestMarker(file: RawFileDiff, ctx: FileMaskContext): boolean {
+  // Hunk headings are git's own one-line summary of enclosing scope, never
+  // a line that itself sits at a known position in either whole file, so
+  // this reads unconditionally per-line -- the same bound named on
+  // maskDiffLine above for a line with nowhere else to look.
   if (file.hunkHeadings.some((heading) => RUST_TEST_MARKER_RE.test(maskNonCode(heading, file.path)))) return true;
-  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(maskNonCode(line.content, file.path)));
+  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(maskDiffLine(line, ctx)));
 }
 
 // Matches "#[cfg(test)]" and "#[cfg(all(test, feature = \"x\"))]" (or any
@@ -1173,11 +1376,11 @@ function locateModOpener(lines: DiffLine[], attrIdx: number): { idx: number; pun
  * comment banner above this section for the brace-counting approximation
  * and its limits.
  */
-function cfgTestRegionMask(lines: DiffLine[], path: string): boolean[] {
+function cfgTestRegionMask(lines: DiffLine[], ctx: FileMaskContext): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
   let i = 0;
   while (i < lines.length) {
-    if (!CFG_TEST_ATTR_RE.test(maskNonCode(lines[i].content, path))) {
+    if (!CFG_TEST_ATTR_RE.test(maskDiffLine(lines[i], ctx))) {
       i++;
       continue;
     }
@@ -1295,6 +1498,19 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
       return true;
     };
 
+    // Built at most once per file, and only for a file some check below
+    // actually needs it for: a test file, or a .rs file (checked for a
+    // Rust test marker whether or not it turns out to hold one). Every
+    // other source file in the same commit never calls readWholeFile at
+    // all, which is the bound that keeps a large commit from paying to
+    // read files it was never going to mask a line of. See
+    // buildFileMaskContext's own comment for the read itself.
+    let maskCtx: FileMaskContext | null = null;
+    const getMaskCtx = (): FileMaskContext => {
+      if (maskCtx === null) maskCtx = buildFileMaskContext(file, options.readWholeFile);
+      return maskCtx;
+    };
+
     const declassified = declassifiedTestSignals(file, rules.testPaths);
     // Classification is decided before the marker is ever read, and the
     // marker never enters this decision: an exempt file is still a test
@@ -1305,7 +1521,7 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
       testRemoved += stats.removed;
       if (!skipChecks()) {
         signals.push(...declassified);
-        signals.push(...signalsForTestFile(file, rules));
+        signals.push(...signalsForTestFile(file, rules, getMaskCtx()));
       }
     } else {
       sourceFiles.push(stats);
@@ -1313,16 +1529,17 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
       sourceRemoved += stats.removed;
       if (declassified.length > 0 && !skipChecks()) signals.push(...declassified);
       if (RUST_PATH_RE.test(file.path)) {
-        if (hasRustTestMarker(file)) {
-          if (!skipChecks()) signals.push(...signalsForTestFile(file, rules));
+        const rustCtx = getMaskCtx();
+        if (hasRustTestMarker(file, rustCtx)) {
+          if (!skipChecks()) signals.push(...signalsForTestFile(file, rules, rustCtx));
         } else {
-          const mask = cfgTestRegionMask(file.lines, file.path);
-          const regionAdded: string[] = [];
-          const regionRemoved: string[] = [];
+          const mask = cfgTestRegionMask(file.lines, rustCtx);
+          const regionAdded: DiffLine[] = [];
+          const regionRemoved: DiffLine[] = [];
           file.lines.forEach((line, idx) => {
             if (!mask[idx]) return;
-            if (line.kind === "added") regionAdded.push(line.content);
-            else if (line.kind === "removed") regionRemoved.push(line.content);
+            if (line.kind === "added") regionAdded.push(line);
+            else if (line.kind === "removed") regionRemoved.push(line);
           });
           if ((regionAdded.length > 0 || regionRemoved.length > 0) && !skipChecks()) {
             signals.push(
@@ -1336,6 +1553,7 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
                   hunkHeadings: [],
                 },
                 rules,
+                rustCtx,
               ),
             );
           }

@@ -17,18 +17,37 @@
 // nothing at module load and pulls in nothing mutate.ts or
 // test-diff-separator.ts would circle back through.
 //
-// KNOWN LIMIT, per line. A caller that hands over one line at a time cannot
-// be told about a string that opened on an earlier line:
+// FORMER KNOWN LIMIT, per line, now closed for a caller that can supply
+// one. A caller that hands over one line at a time cannot be told about a
+// string that opened on an earlier line:
 //
 //   const xml = `
 //     <skipped type="pytest.skip"/>
 //   `;
 //
 // The middle line carries no quote of its own, so scanned alone it reads as
-// ordinary code and its detector words stand. Handing whole files in would
-// fix it, and the diff callers have no whole file to hand in: a diff line is
-// all they hold. For a test file where this is common, the fixture marker
-// (`adg-test-diff: fixtures`) is the answer, not this scanner.
+// ordinary code and its detector words stand. This function itself still
+// only ever sees the text it is handed -- it has no memory of an earlier
+// call -- but its one caller, src/test-diff-separator.ts, no longer hands
+// it one diff line at a time when it can help it. A caller that can read
+// the file at the commit (see `readWholeFile` on SeparateOptions there)
+// masks the WHOLE file once and answers every diff line from that single
+// masked text by its own line number, so the middle line above is read in
+// the context of the backtick that opened two lines earlier, wherever that
+// caller's read reaches. A caller with no commit to read from -- raw diff
+// text and no known revision -- still gets the old, per-line behaviour:
+// the fixture marker (`adg-test-diff: fixtures`) remains the answer for a
+// test file where that is common.
+//
+// This also lifts the blocker src/tree-sitter-language-service.ts's own
+// file header names for PHP's `text` node (raw HTML outside `<?php ... ?>`):
+// that account calls the per-line call site "the root cause" and says
+// masking `text` safely is "blocked on the gate reading whole files at the
+// commit instead of individual diff hunks". That gate now exists. Turning
+// `text` masking back on is deliberately NOT done in the same change that
+// unblocks it: it is a separate decision with its own evidence to gather
+// (the corpus tests that history's three rounds each broke a different
+// way), not a side effect of this file gaining a whole-file caller.
 
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -214,7 +233,18 @@ export function maskNonCode(text: string): string {
   // miss and a word left visible only costs someone a look. See isLoneTick.
   const kinds = classify(text, true);
   let out = "";
-  for (let i = 0; i < text.length; i++) out += kinds[i] === LITERAL ? " " : text[i];
+  // A newline is kept verbatim even where it falls inside a literal span (a
+  // multi-line template literal, a block comment): blanking it to a space
+  // would merge two physical lines into one in the masked output, and
+  // src/test-diff-separator.ts's whole-file mask context (`maskDiffLine`)
+  // depends on every masked line lining up with the same line number the
+  // raw text has. Losing that alignment does not merely mis-mask one
+  // line -- it silently drags every line after the first multi-line
+  // literal in the file out of position, hiding real signals across the
+  // rest of the file. Blanking a newline to a space never made a
+  // difference for the single-line callers this function had before that
+  // option existed, since a lone line carries no embedded newline to lose.
+  for (let i = 0; i < text.length; i++) out += kinds[i] === LITERAL && text[i] !== "\n" ? " " : text[i];
   return out;
 }
 

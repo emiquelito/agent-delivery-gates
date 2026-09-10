@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { checkPathAllowed } from "./path-allowlist.ts";
 import { validateReport, formatFindingText } from "./report-validator.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
+import { makeGitWholeFileReader, splitRange } from "./git-blob-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
 import { installHintFor } from "./tree-sitter-grammars.ts";
 
@@ -286,14 +287,28 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
   }
 
   let diffText: string;
+  // The two revisions this diff sits between, for a whole-file reader (see
+  // src/git-blob-reader.ts and src/test-diff-separator.ts's own
+  // FileMaskContext): a single revision's own first parent and itself, or
+  // a range's two ends. undefined for diff_text, which names no revision
+  // at all -- every mask then falls back to per-line, exactly as this
+  // tool worked before this option existed. A --range-style string with
+  // no ".." in it (splitRange returns null) degrades the same way, never
+  // a hard failure: the diff itself still runs through `git diff` as
+  // given, unaffected by whether a reader could be built from it.
+  let revisions: { oldRev: string; newRev: string } | undefined;
   if (typeof args.diff_text === "string") {
     diffText = args.diff_text;
   } else {
     try {
-      diffText =
-        typeof args.revision === "string"
-          ? runGit(["diff-tree", "-p", "--no-color", "--root", "-r", args.revision], ctx.workingDir)
-          : runGit(["diff", "--no-color", args.range as string], ctx.workingDir);
+      if (typeof args.revision === "string") {
+        diffText = runGit(["diff-tree", "-p", "--no-color", "--root", "-r", args.revision], ctx.workingDir);
+        revisions = { oldRev: `${args.revision}^1`, newRev: args.revision };
+      } else {
+        const range = args.range as string;
+        diffText = runGit(["diff", "--no-color", range], ctx.workingDir);
+        revisions = splitRange(range) ?? undefined;
+      }
     } catch (e) {
       const detail = (e as { stderr?: string; message?: string }).stderr || (e as Error).message;
       return toolError(`git failed: ${detail}`);
@@ -307,10 +322,15 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
   const rules = resolveRules(ctx);
   if ("error" in rules) return toolError(rules.error);
 
+  const readWholeFile =
+    revisions === undefined
+      ? undefined
+      : makeGitWholeFileReader({ cwd: ctx.workingDir, env: gitEnv(), oldRev: revisions.oldRev, newRev: revisions.newRev });
+
   // separateTestDiffWarmed warms the Python language service ahead of the
   // plain synchronous separateTestDiff call, so a .py file in this diff
   // gets the tree-sitter mask instead of the regex fallback silently.
-  const result = await separateTestDiffWarmed(diffText, { rules });
+  const result = await separateTestDiffWarmed(diffText, { rules, readWholeFile });
 
   const lines: string[] = [];
   lines.push(

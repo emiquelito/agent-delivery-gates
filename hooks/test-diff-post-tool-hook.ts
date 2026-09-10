@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { readSync } from "node:fs";
 import { formatSignalText, separateTestDiffWarmed, type RuleSet } from "../src/test-diff-separator.ts";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
+import { makeGitWholeFileReader } from "../src/git-blob-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
 import { installHintFor } from "../src/tree-sitter-grammars.ts";
 
@@ -114,10 +115,18 @@ async function main(): Promise<void> {
   // fixtures marker is answered the same way by both. Without it this hook
   // reported signals the command had already been told to leave alone.
   const readFileText = repoRoot === undefined ? undefined : makeFileTextReader(repoRoot);
+  // This hook always checks one just-made commit, HEAD, against its own
+  // first parent -- never a range, never the index -- so the two
+  // revisions a whole-file reader needs are fixed. A root commit has no
+  // parent; git show "HEAD^1:path" then fails for every path, which reads
+  // as "no old side", exactly right for a commit whose diff (--root) never
+  // carries a removed line in the first place.
+  const readWholeFile =
+    repoRoot === undefined ? undefined : makeGitWholeFileReader({ cwd, env: gitEnv(), oldRev: "HEAD^1", newRev: "HEAD" });
   // separateTestDiffWarmed warms the Python language service ahead of the
   // plain synchronous separateTestDiff call, so a .py file in this diff
   // gets the tree-sitter mask instead of the regex fallback silently.
-  const result = await separateTestDiffWarmed(diffText, { rules, readFileText });
+  const result = await separateTestDiffWarmed(diffText, { rules, readFileText, readWholeFile });
   // Same gap Finding 2 found in src/agent-adapter.ts's runTestDiffGate:
   // this hook is the other production entry point that scans a commit's
   // diff, and it read result.signals without ever checking whether a

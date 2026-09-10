@@ -1578,6 +1578,106 @@ test("a string that opened on an earlier line is not seen: the known limit", () 
   assert.equal(signals[0].line, '    it.skip("x");');
 });
 
+// --- Phase: whole-file mask context (readWholeFile) -------------------------
+//
+// The same known limit above, closed for a caller that can supply the
+// file. oneFileDiff's hunk always opens at line 1 on both sides (see its
+// own "@@ -1,N +1,M @@"), so a reader that hands back exactly the added
+// (or removed) lines, joined with newlines, is the whole file the diff
+// itself describes -- convenient for a test, and also exactly what a real
+// git-backed reader would return for a brand new file.
+
+function wholeFileReaderFor(sideToText: Partial<Record<"old" | "new", string>>): (path: string, side: "old" | "new") => string | undefined {
+  return (_path, side) => sideToText[side];
+}
+
+test("with a whole-file reader, a string that opened on an earlier line IS seen", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  const signals = separateTestDiff(diff, { readWholeFile: wholeFileReaderFor({ new: lines.join("\n") }) }).signals;
+  assert.deepEqual(signalIds(signals), [], "the middle line is inside the template literal in its real file");
+});
+
+test("a removed line is masked from the OLD side: a removed assertion inside a template literal is not falsely reported", () => {
+  const lines = ["  const src = `", "    assert.ok(x);", "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", lines, []);
+  const signals = separateTestDiff(diff, { readWholeFile: wholeFileReaderFor({ old: lines.join("\n") }) }).signals;
+  assert.deepEqual(signalIds(signals), [], "the removed line is fixture text in the file it was removed from");
+});
+
+test("a removed line is masked from the OLD side: a real removed assertion is still reported", () => {
+  const diff = oneFileDiff("tests/holder.test.ts", ["  assert.ok(x);"], []);
+  // The old side is a whole file with nothing around the assertion to mask
+  // it; supplying it must not somehow make a real removal disappear.
+  const signals = separateTestDiff(diff, { readWholeFile: wholeFileReaderFor({ old: "  assert.ok(x);\n" }) }).signals;
+  assert.deepEqual(signalIds(signals), ["assertion-removed"]);
+});
+
+test("a new file has no old side to read: readWholeFile('old', ...) is never even asked for one, and added lines still mask from the new side", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  let oldRequested = false;
+  const reader = (_path: string, side: "old" | "new"): string | undefined => {
+    if (side === "old") {
+      oldRequested = true;
+      return undefined; // a brand new file: nothing to read on the old side
+    }
+    return lines.join("\n");
+  };
+  const signals = separateTestDiff(diff, { readWholeFile: reader }).signals;
+  assert.deepEqual(signalIds(signals), []);
+  assert.equal(oldRequested, false, "a file with no removed lines never asks for its old side");
+});
+
+test("a stale reader (its line does not match the diff's own line) falls back to per-line masking instead of misapplying another line's mask", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  // The reader hands back completely different content than the diff
+  // itself carries -- as if the working tree moved on since the diff was
+  // captured. The line-content check in maskDiffLine must refuse this and
+  // mask the diff's own line alone, which still finds the real skip.
+  const staleText = ["  const other = 1;", "  const another = 2;", "  const third = 3;"].join("\n");
+  const signals = separateTestDiff(diff, { readWholeFile: wholeFileReaderFor({ new: staleText }) }).signals;
+  assert.deepEqual(signalIds(signals), ["skip-added"], "a stale whole-file read must not hide a real signal");
+});
+
+test("a renamed file reads its old side from the OLD path and its new side from the NEW path", () => {
+  const path = "tests/renamed.test.ts";
+  const oldPath = "tests/original.test.ts";
+  const diffLines = [
+    `diff --git a/${oldPath} b/${path}`,
+    `similarity index 90%`,
+    `rename from ${oldPath}`,
+    `rename to ${path}`,
+    `index 1111111..2222222 100644`,
+    `--- a/${oldPath}`,
+    `+++ b/${path}`,
+    `@@ -1,3 +1,3 @@`,
+    " const src = `",
+    '-  it.skip("old");',
+    '+  it.skip("new");',
+    " `;",
+  ];
+  const diff = `${diffLines.join("\n")}\n`;
+  const requestedPaths: Array<{ path: string; side: string }> = [];
+  const reader = (p: string, side: "old" | "new"): string | undefined => {
+    requestedPaths.push({ path: p, side });
+    const body = side === "old" ? ["const src = `", '  it.skip("old");', "`;"] : ["const src = `", '  it.skip("new");', "`;"];
+    return body.join("\n");
+  };
+  const signals = separateTestDiff(diff, { readWholeFile: reader }).signals;
+  assert.deepEqual(signalIds(signals), [], "both the removed and added skip are template text in their own file");
+  assert.ok(requestedPaths.some((r) => r.path === oldPath && r.side === "old"), "the old side is read from the pre-rename path");
+  assert.ok(requestedPaths.some((r) => r.path === path && r.side === "new"), "the new side is read from the post-rename path");
+});
+
+test("no readWholeFile option at all behaves exactly as before this phase: per-line masking, unconditionally", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  const signals = separateTestDiff(diff).signals;
+  assert.deepEqual(signalIds(signals), ["skip-added"], "omitting the option is the same as never having it");
+});
+
 test("a Rust attribute is code, so the mask leaves the Rust marker paths alone", () => {
   const diff = oneFileDiff("src/order.rs", [], [
     "#[cfg(test)]",
@@ -1815,5 +1915,32 @@ test("known limitation: a documentation line sitting BETWEEN two php tags, not j
     signalIds(result.signals),
     ["assertion-weakened"],
     "HTML between two php tags is exactly as unmasked as leading/trailing HTML now, including inside this project's own gate; this is the accepted cost, not a bug to silence here",
+  );
+});
+
+// Placed at the end of this file on purpose, not next to the other
+// readWholeFile tests above: it is the one test in this file that calls
+// separateTestDiffWarmed on a `.py` path, which resolves and permanently
+// caches this process's Python language service (src/code-mask.ts's
+// resolvedServices map has no per-test reset). Run any earlier than this,
+// it silently warms Python for every test after it in this same process,
+// including "Finding 6: unwarmed, ..." above, which depends on Python
+// never having been warmed yet to prove its own point.
+test("a Python docstring word is no longer read as a real removal, once the tree-sitter mask sees the whole docstring", async () => {
+  const lines = ['    """', "    call assert_equal(a, b) to compare", '    """', "    return a + b"];
+  const diff = oneFileDiff("tests/test_util.py", lines, []);
+  const withoutReader = await separateTestDiffWarmed(diff);
+  assert.deepEqual(
+    signalIds(withoutReader.signals),
+    ["assertion-removed"],
+    "unchanged from before this phase: a docstring line with no quote of its own reads as code, one line at a time",
+  );
+  const withReader = await separateTestDiffWarmed(diff, {
+    readWholeFile: wholeFileReaderFor({ old: lines.join("\n") + "\n" }),
+  });
+  assert.deepEqual(
+    signalIds(withReader.signals),
+    [],
+    "the whole docstring is masked once the mask sees the triple-quote that opened it, on the line above",
   );
 });

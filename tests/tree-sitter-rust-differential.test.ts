@@ -95,32 +95,10 @@ const cases: DifferentialCase[] = [
     blank("/* /* nested */ still ok */\nfn f() {}\n", "/* /* nested */"),
     blank("/* /* nested */ still ok */\nfn f() {}\n", "/* /* nested */ still ok */"),
   ),
-  disagree(
-    "a `///` doc comment: tree-sitter's own node span swallows the trailing newline, regex's does not",
-    // Regex reasoning: classify's line-comment case does not care what
-    // follows the second `/`; `///` opens the same as `//` does, and the
-    // whole line, marker included, is blanked up to but not onto the
-    // newline -- that newline itself is left for the main loop's plain
-    // fallthrough branch, which marks it CODE. The next line stays on
-    // its own line, visible and untouched.
-    // tree-sitter reasoning: verified directly against the grammar: a
-    // `///` or `//!` line_comment node's own span runs through and
-    // includes its trailing newline, unlike a plain `//` comment's
-    // (below, where the newline survives). Blanking that whole span
-    // erases the newline along with the comment text, so the following
-    // line runs on right after it with no line break between them in
-    // the masked text -- the kind of grammar-specific surprise this
-    // phase's node-name verification exists to catch.
-    "/// doc comment\nfn f() {}\n",
-    blank("/// doc comment\nfn f() {}\n", "/// doc comment"),
-    blank("/// doc comment\nfn f() {}\n", "/// doc comment\n"),
-  ),
-  disagree(
-    "an `//!` inner doc comment: the same trailing-newline surprise as `///`",
-    "//! doc\nfn f() {}\n",
-    blank("//! doc\nfn f() {}\n", "//! doc"),
-    blank("//! doc\nfn f() {}\n", "//! doc\n"),
-  ),
+  // The `///`/`//!` cases that used to live here (both kinds, "disagree"
+  // and "agree") are below as their own standalone tests, not run through
+  // the shared harness: neither case kind fits what is actually true of
+  // them any more. See the comment above those tests for why.
   agree(
     "a plain `//` line comment with no doc marker: both scanners blank the same characters, and both leave its newline alone",
     "// plain\nfn f() {}\n",
@@ -144,4 +122,51 @@ test("rust codeMask: a raw string's embedded 'world' is code to regex and not to
   const worldIndex = text.indexOf("world");
   assert.equal(regexCodeMask(text)[worldIndex], true, "regex reads 'world' as a real identifier between two strings");
   assert.equal(service.codeMask(text)[worldIndex], false, "tree-sitter reads the whole raw string as one literal");
+});
+
+// --- `///`/`//!` doc comments: split, not "agree" or "disagree" whole -------
+//
+// A `///` or `//!` line_comment node's own span runs through and includes
+// its trailing newline (verified directly against the grammar), unlike a
+// plain `//` comment's, where the newline sits outside the comment node.
+// codeMask still marks that newline character LITERAL for tree-sitter and
+// CODE for regex, so the two scanners still disagree there for real --
+// unaffected by anything in this phase, and the reason this case cannot be
+// an `agree()` case (which checks codeMask).
+//
+// maskNonCode's own answer changed, though: it used to blank a literal
+// span's newline to a space along with everything else in the span, so a
+// `///` comment's trailing newline vanished from the masked text and the
+// line after it ran on with no line break in between. Fixed because a
+// whole-file caller (src/test-diff-separator.ts's FileMaskContext) needs
+// every masked line to line up with the same line number the raw text
+// has, which a swallowed newline breaks -- and the fix means maskNonCode
+// no longer disagrees with regex here either, which is why this case
+// cannot be a `disagree()` case (which checks maskNonCode differs).
+//
+// Neither case kind the shared harness offers fits a construct that
+// disagrees on codeMask but agrees on maskNonCode, so this is two plain
+// tests instead of two corpus entries.
+test("rust: a `///` doc comment -- codeMask still disagrees on the trailing newline, maskNonCode no longer does", async () => {
+  const service = await loadTreeSitterLanguageService(spec.packageName, spec.wasmFileName, spec.config);
+  const text = "/// doc comment\nfn f() {}\n";
+  const newlineIndex = text.indexOf("\n");
+  assert.equal(regexCodeMask(text)[newlineIndex], true, "regex reads the newline after a line comment as code");
+  assert.equal(service.codeMask(text)[newlineIndex], false, "tree-sitter's line_comment node span includes the newline");
+  assert.equal(
+    regexLanguageService.maskNonCode(text),
+    service.maskNonCode(text),
+    "both scanners now keep the newline itself verbatim in the masked text, whatever they think it is",
+  );
+  assert.equal(service.maskNonCode(text), blank(text, "/// doc comment"));
+});
+
+test("rust: an `//!` inner doc comment -- the same split as `///` above", async () => {
+  const service = await loadTreeSitterLanguageService(spec.packageName, spec.wasmFileName, spec.config);
+  const text = "//! doc\nfn f() {}\n";
+  const newlineIndex = text.indexOf("\n");
+  assert.equal(regexCodeMask(text)[newlineIndex], true);
+  assert.equal(service.codeMask(text)[newlineIndex], false);
+  assert.equal(regexLanguageService.maskNonCode(text), service.maskNonCode(text));
+  assert.equal(service.maskNonCode(text), blank(text, "//! doc"));
 });

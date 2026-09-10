@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readFileSync, readSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
+import { makeGitWholeFileReader, splitRange } from "../src/git-blob-reader.ts";
 import {
   classifyTestPath,
   FIXTURE_MARKER,
@@ -257,6 +258,52 @@ function gitInvocationArgs(args: ParsedArgs): string[] | undefined {
   return ["diff-tree", "-p", "--no-color", "--root", "-r", "--find-renames", rev];
 }
 
+/**
+ * The two revisions bounding the diff the parsed arguments ask for, for
+ * building a whole-file reader (see src/git-blob-reader.ts). Undefined for
+ * --diff/stdin, which names no revision at all -- this CLI has no commit
+ * to read a whole file from in that mode, so separateTestDiffWarmed below
+ * gets no readWholeFile option and every line is masked alone, exactly as
+ * this file worked before that option existed.
+ *
+ * --staged's new side is the index, not a commit: "" is git's own way of
+ * naming it in `git show :path`. --range's two ends come from the range
+ * string itself; splitRange gives up on a string with no ".." in it, which
+ * degrades to the same no-reader case, never a hard failure. --rev and the
+ * default both read one commit's own diff, so the old side is that
+ * commit's first parent -- absent for a root commit, which is fine: a root
+ * commit's diff (--root, diffed against the empty tree) never carries a
+ * removed line for that missing side to matter to.
+ */
+function revisionsFor(args: ParsedArgs): { oldRev: string | null; newRev: string | null } | undefined {
+  if (args.diffPath !== undefined) return undefined;
+  if (args.range !== undefined) {
+    const split = splitRange(args.range);
+    return split === null ? undefined : { oldRev: split.oldRev, newRev: split.newRev };
+  }
+  if (args.staged) {
+    return { oldRev: "HEAD", newRev: "" };
+  }
+  const rev = args.rev ?? "HEAD";
+  return { oldRev: `${rev}^1`, newRev: rev };
+}
+
+/**
+ * Builds the whole-file reader main() passes to separateTestDiffWarmed, or
+ * undefined when one cannot be built: no repository root to run git
+ * against, or revisionsFor above found no revision to read from (--diff/
+ * stdin, or a --range string with no ".." in it).
+ */
+function buildWholeFileReader(
+  args: ParsedArgs,
+  repoRoot: string | undefined,
+): ((path: string, side: "old" | "new") => string | undefined) | undefined {
+  if (repoRoot === undefined) return undefined;
+  const revisions = revisionsFor(args);
+  if (revisions === undefined) return undefined;
+  return makeGitWholeFileReader({ cwd: repoRoot, env: gitEnv(), ...revisions });
+}
+
 /** Resolves the diff text to check from the parsed arguments. */
 function resolveDiffText(args: ParsedArgs): string {
   if (args.diffPath !== undefined) {
@@ -317,6 +364,7 @@ function widerClassificationSignals(
   narrowDiffText: string,
   rules: RuleSet,
   readFileText: (path: string) => string | undefined,
+  readWholeFile: ((path: string, side: "old" | "new") => string | undefined) | undefined,
 ): Signal[] | undefined {
   const gitArgs = gitInvocationArgs(args);
   if (gitArgs === undefined) return undefined;
@@ -324,8 +372,11 @@ function widerClassificationSignals(
   const wideText = runGitAllowFail(widenContext(gitArgs));
   if (wideText === undefined) return undefined;
   // Same reader, so a file exempt in the narrow run is exempt here too: the
-  // wide re-run must never reintroduce a signal the marker suppressed.
-  return separateTestDiff(wideText, { rules, readFileText }).signals;
+  // wide re-run must never reintroduce a signal the marker suppressed. The
+  // whole-file reader is the same one too -- the wider context window only
+  // changes how much of the diff's own hunks are visible, never which
+  // commits bound "old" and "new", so there is nothing for it to recompute.
+  return separateTestDiff(wideText, { rules, readFileText, readWholeFile }).signals;
 }
 
 // Only the head of a file is ever read: the marker has to sit within the
@@ -479,7 +530,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  const readFileText = makeFileTextReader(tryResolveRepoRoot(process.cwd()) ?? process.cwd());
+  const repoRoot = tryResolveRepoRoot(process.cwd());
+  const readFileText = makeFileTextReader(repoRoot ?? process.cwd());
+
+  // The two commits (or commit and index) this diff sits between, so a
+  // changed file can be read and masked whole instead of one diff line at
+  // a time; see src/git-blob-reader.ts and src/test-diff-separator.ts's
+  // own FileMaskContext. undefined in --diff/stdin mode, where there is no
+  // revision to read from at all, and every mask then falls back to
+  // per-line, exactly as this CLI worked before this option existed. Also
+  // undefined with no repository root to run git against.
+  const readWholeFile = buildWholeFileReader(args, repoRoot);
 
   const diffText = resolveDiffText(args);
   // A .py file is masked by the tree-sitter service once it is loaded for
@@ -487,13 +548,13 @@ async function main(): Promise<void> {
   // ahead of separateTestDiff, which stays a plain synchronous function.
   // separateTestDiffWarmed does both, in order, so this call site cannot
   // forget the warm the way src/agent-adapter.ts once did.
-  const result = await separateTestDiffWarmed(diffText, { rules, readFileText });
+  const result = await separateTestDiffWarmed(diffText, { rules, readFileText, readWholeFile });
 
   // A .rs file's #[cfg(test)] module can sit outside the default context
   // window; a wide re-run only ever adds signals the narrow diff missed,
   // never touches sourceFiles/testFiles/counts, and degrades silently to
   // nothing found when it cannot run at all. See widerClassificationSignals.
-  const wideSignals = widerClassificationSignals(args, diffText, rules, readFileText);
+  const wideSignals = widerClassificationSignals(args, diffText, rules, readFileText, readWholeFile);
   if (wideSignals !== undefined) {
     const seen = new Set(result.signals.map(signalKey));
     for (const signal of wideSignals) {

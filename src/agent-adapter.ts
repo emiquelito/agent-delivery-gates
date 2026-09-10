@@ -29,6 +29,7 @@ import {
 } from "./clean-tree-gate.ts";
 import { checkPathAllowed } from "./path-allowlist.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
+import { makeGitWholeFileReader } from "./git-blob-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
 import { validateReport, formatFindingText, parsePriorFindingIds } from "./report-validator.ts";
 import { installHintFor } from "./tree-sitter-grammars.ts";
@@ -318,7 +319,18 @@ export async function runTestDiffGate(payload: CanonicalPayload): Promise<Adapte
   // function every caller of this scanner already goes through, so it
   // catches a future bypass of separateTestDiffWarmed too, not only this
   // one.
-  const result = await separateTestDiffWarmed(diffText, { rules });
+  // This gate always checks one just-made commit, HEAD, against its own
+  // first parent, the same fixed pair hooks/test-diff-post-tool-hook.ts
+  // reads from; see makeGitWholeFileReader's own comment for what a root
+  // commit (no parent) does here. repoRoot undefined (not a git checkout,
+  // which should not be reachable this far since the diff-tree call above
+  // already needs one, but is not assumed) means no reader at all, and
+  // every line falls back to per-line masking.
+  const readWholeFile =
+    repoRoot === undefined
+      ? undefined
+      : makeGitWholeFileReader({ cwd, env: gitEnv(), oldRev: "HEAD^1", newRev: "HEAD" });
+  const result = await separateTestDiffWarmed(diffText, { rules, readWholeFile });
   // Finding: hadLanguageLoadFailure (src/code-mask.ts) used to be read only
   // by src/mutate.ts, so a grammar that failed to load -- a missing
   // devDependency, or ADG_TEST_FORCE_GRAMMAR_FAILURE below -- left this

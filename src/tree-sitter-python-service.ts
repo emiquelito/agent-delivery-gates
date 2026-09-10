@@ -180,7 +180,11 @@ function makeService(parser: Parser): LanguageService {
     maskNonCode(text: string): string {
       const kinds = classify(parser, text);
       let out = "";
-      for (let i = 0; i < text.length; i++) out += kinds[i] === LITERAL ? " " : text[i];
+      // A newline is kept verbatim even inside a literal span (a docstring,
+      // most commonly), so a multi-line literal never merges two lines
+      // into one in the masked output; see src/code-mask.ts's own
+      // maskNonCode for why this matters to a whole-file caller.
+      for (let i = 0; i < text.length; i++) out += kinds[i] === LITERAL && text[i] !== "\n" ? " " : text[i];
       return out;
     },
   };

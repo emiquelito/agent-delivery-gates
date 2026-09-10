@@ -820,3 +820,44 @@ test("the marker is not honoured past the first 20 lines of a file", () => {
     assert.match(result.stdout, /skip-added high tests\/late\.test\.ts:/);
   });
 });
+
+// --- Phase: whole-file mask context, end to end through --rev --------------
+//
+// The CLI reads the commit's own parent and the commit itself from real
+// git (src/git-blob-reader.ts), unlike every other test in this file, which
+// only ever hands the separator a diff with no repository behind it at
+// all. This is the one test that proves the wiring itself -- not just the
+// pure core -- actually reaches into the repository, masks the whole file,
+// and changes what the CLI reports.
+
+test("--rev masks a new test file's own template literal as a whole file, not one diff line at a time", () => {
+  withTempRepo((dir) => {
+    const content = ["const src = `", '  it.skip("x");', "`;", ""].join("\n");
+    commitFile(dir, "tests/widget.test.ts", content);
+
+    const result = runCli({ args: ["--rev", "HEAD"], cwd: dir });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(
+      result.stdout,
+      /skip-added/,
+      "the skip lives inside a template literal in the real file; --rev can read that whole file and see it",
+    );
+  });
+});
+
+test("--staged masks a removed assertion against the committed (old) side of the file", () => {
+  withTempRepo((dir) => {
+    const content = ["const src = `", "  assert.ok(x);", "`;", ""].join("\n");
+    commitFile(dir, "tests/widget.test.ts", content);
+    writeFileSync(join(dir, "tests/widget.test.ts"), "const src = ``;\n");
+    runGit(dir, ["add", "tests/widget.test.ts"]);
+
+    const result = runCli({ args: ["--staged"], cwd: dir });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.doesNotMatch(
+      result.stdout,
+      /assertion-removed/,
+      "the removed line is fixture text in the committed file it was removed from, read from the old (HEAD) side",
+    );
+  });
+});

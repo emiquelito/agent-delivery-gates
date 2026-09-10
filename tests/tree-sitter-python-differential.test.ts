@@ -51,7 +51,15 @@ function blank(source: string, substring: string): string {
   const at = source.indexOf(substring);
   assert.notEqual(at, -1, `expected to find ${JSON.stringify(substring)} in the fixture`);
   assert.equal(source.indexOf(substring, at + 1), -1, `${JSON.stringify(substring)} must appear exactly once`);
-  return source.slice(0, at) + " ".repeat(substring.length) + source.slice(at + substring.length);
+  // Every character of the matched substring is replaced with a space
+  // except a newline, which is kept verbatim: this is what maskNonCode
+  // actually blanks a literal span to (see src/code-mask.ts's own
+  // maskNonCode), so a newline inside a multi-line construct never merges
+  // two physical lines into one in the masked output. A whole-file caller
+  // (src/test-diff-separator.ts's FileMaskContext) depends on that
+  // alignment.
+  const blanked = substring.replace(/[^\n]/g, " ");
+  return source.slice(0, at) + blanked + source.slice(at + substring.length);
 }
 
 test("triple-quoted docstring: regex cannot see it at all, tree-sitter masks the whole thing", () => {

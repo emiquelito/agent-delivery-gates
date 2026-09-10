@@ -19,19 +19,35 @@ import assert from "node:assert/strict";
 import type { LanguageService } from "../../src/code-mask.ts";
 
 /**
- * Blanks a known substring of `source` to the same number of spaces,
- * failing loudly if that substring is not found exactly once. The same
- * helper tests/tree-sitter-python-differential.test.ts defines for
- * itself, lifted here so every language's corpus can share it: counting
- * spaces out by hand is exactly the transcription mistake this
- * sidesteps, since the space count always comes from the substring's own
- * length, not from someone recounting characters in a fixture.
+ * Every character of `text` replaced with a space, except a newline, which
+ * stays a newline. This is what maskNonCode actually blanks a literal span
+ * to (see src/code-mask.ts's own maskNonCode): a newline is kept verbatim
+ * even inside a multi-line string or comment, so a whole-file caller's line
+ * numbers stay aligned with the raw text's own. Before that fix, a
+ * newline inside a masked span was blanked to a space like everything
+ * else, which is what every `blank`/`blankNth` call below used to
+ * reproduce; a multi-line fixture's expected value must reproduce the
+ * fixed behaviour instead.
+ */
+function blankedForm(text: string): string {
+  return text.replace(/[^\n]/g, " ");
+}
+
+/**
+ * Blanks a known substring of `source` to spaces, one newline in the
+ * substring kept as a newline, failing loudly if that substring is not
+ * found exactly once. The same helper
+ * tests/tree-sitter-python-differential.test.ts defines for itself, lifted
+ * here so every language's corpus can share it: counting spaces out by
+ * hand is exactly the transcription mistake this sidesteps, since the
+ * blanked form always comes from the substring's own text, not from
+ * someone recounting characters in a fixture.
  */
 export function blank(source: string, substring: string): string {
   const at = source.indexOf(substring);
   assert.notEqual(at, -1, `expected to find ${JSON.stringify(substring)} in the fixture`);
   assert.equal(source.indexOf(substring, at + 1), -1, `${JSON.stringify(substring)} must appear exactly once`);
-  return source.slice(0, at) + " ".repeat(substring.length) + source.slice(at + substring.length);
+  return source.slice(0, at) + blankedForm(substring) + source.slice(at + substring.length);
 }
 
 /**
@@ -50,7 +66,7 @@ export function blankNth(source: string, substring: string, occurrence: number):
     at = source.indexOf(substring, at + 1);
     assert.notEqual(at, -1, `expected at least ${occurrence + 1} occurrence(s) of ${JSON.stringify(substring)}`);
   }
-  return source.slice(0, at) + " ".repeat(substring.length) + source.slice(at + substring.length);
+  return source.slice(0, at) + blankedForm(substring) + source.slice(at + substring.length);
 }
 
 /**
