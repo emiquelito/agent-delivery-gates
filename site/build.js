@@ -753,6 +753,7 @@ ${jsonLdText}
       <li><a href="#tally">What the gates caught here</a></li>
       <li><a href="#install">Install</a></li>
       <li><a href="#where-it-runs">Where it runs</a></li>
+      <li><a href="#platforms">Platforms</a></li>
       <li><a href="#rules">The ${escapeHtml(words(rules.length))} rules</a></li>
       <li><a href="#questions">Questions</a></li>
       <li><a href="${REPO_URL}">Source on GitHub</a></li>
@@ -865,6 +866,38 @@ git config core.hooksPath .githooks</code></pre>
         as best guesses. Only the Claude Code plugin has run against the real tool,
         so the other three configs have not been loaded and confirmed by the coding
         tool they target.</p>
+    </section>
+
+    <section id="platforms">
+      <h2>Platforms</h2>
+      <div class="scroller">
+        <table>
+          <caption>What passes where</caption>
+          <thead>
+            <tr><th scope="col">OS</th><th scope="col">Node</th><th scope="col">Result</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Linux</th><td>22</td><td>passes</td></tr>
+            <tr><th scope="row">macOS</th><td>22</td><td>passes</td></tr>
+            <tr><th scope="row">Linux</th><td>24</td><td>passes</td></tr>
+            <tr><th scope="row">Windows</th><td>22</td><td>passes, with a few tests skipped (see below)</td></tr>
+            <tr><th scope="row">Windows</th><td>23, 24</td><td>broken on exit (see below); use Node 22</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Node 22.18 or newer is required on every platform.</p>
+      <p>On Windows, a few tests are skipped for a real limitation: Windows has no
+        way to deliver an interrupt to another process the way Unix does. Asking
+        Node to send one terminates the target process instead of letting its own
+        interrupt handler run, so those particular tests cannot pass as written on
+        this platform. A real Ctrl-C typed in a terminal takes a different route
+        and does reach the handler, so ordinary use is unaffected; what is skipped
+        is only the path that simulates sending the signal from outside, which is
+        not tested on Windows.</p>
+      <p>Windows on Node 23 and 24 hits an unfixed Node bug that aborts these tools
+        on exit (nodejs/node#56645). It is merged into Node's main branch but not
+        backported to any released Node 24. Node 22 is not affected. Use Node 22 on
+        Windows until a fixed Node 24 ships.</p>
     </section>
 
     <section id="rules">
