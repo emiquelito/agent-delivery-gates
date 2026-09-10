@@ -199,7 +199,10 @@ function writeExecutable(dir: string, relPath: string, content: string): void {
   execFileSync("chmod", ["+x", join(dir, relPath)]);
   // See the matching comment in tests/precommit-hook.test.ts: without a
   // `.cmd` shim beside it, this stub is invisible to `npx tsc` on Windows,
-  // which then runs whichever real `tsc` is next on PATH instead.
+  // which then runs whichever real `tsc` is next on PATH instead. The shim
+  // shells out to `bash`, which assumes bash is on PATH -- true on
+  // GitHub's windows-latest runners, not stated or guaranteed anywhere
+  // else this suite might run on Windows.
   if (process.platform === "win32") {
     writeFile(dir, `${relPath}.cmd`, `@echo off\r\nbash "%~dpn0" %*\r\n`);
   }

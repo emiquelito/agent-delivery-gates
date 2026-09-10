@@ -65,6 +65,11 @@ function writeExecutable(dir: string, relPath: string, content: string): void {
   // same lookup a real install would use, so without the shim it resolves
   // to nothing local on Windows and falls through to whatever real `tsc`
   // is next on PATH instead -- the fixture's stub was never seen at all.
+  //
+  // The shim itself shells out to `bash`, which assumes bash is on PATH.
+  // True on GitHub's windows-latest runners (Git for Windows ships one and
+  // puts it there); not stated, and not guaranteed, anywhere else this
+  // suite might run on Windows.
   if (process.platform === "win32") {
     writeFile(dir, `${relPath}.cmd`, `@echo off\r\nbash "%~dpn0" %*\r\n`);
   }

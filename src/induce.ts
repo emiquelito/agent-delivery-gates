@@ -3,7 +3,11 @@
 // the commands it declares into a verdict, and formats the report. No I/O,
 // no subprocess, no process exit: the CLI in hooks/induce.ts does all of
 // that, so the rule that decides what counts as proof lives in one place
-// and can be tested without running anything.
+// and can be tested without running anything. The one exception is
+// `isNotRunnable`'s `platform` default, which reads `process.platform` --
+// not I/O, just which command-not-found convention applies -- and every
+// caller can override it, so a test exercises the Windows branch without
+// needing a Windows host.
 //
 // The check this carries, from rules/induced-failure-required.json: a
 // robustness claim needs evidence that the specific failure was made to
@@ -21,6 +25,8 @@
 // without it a run proves nothing, and a tool that reported "proven" from
 // the inject step alone would be the exact failure this project exists to
 // catch.
+
+import process from "node:process";
 
 /** The steps a spec can declare, in the order they are run. */
 export type StepName = "baseline" | "inject" | "neutralize";
@@ -237,6 +243,24 @@ export function parseSpec(text: string): ParsedSpec {
  * apart is a command that chooses to exit 127 on its own. */
 export const NOT_RUNNABLE_EXIT_CODES: readonly number[] = [126, 127];
 
+/** What cmd.exe prints, in English, when the command named does not exist
+ * as a builtin, an alias, or an executable on PATH: "'x' is not recognized
+ * as an internal or external command, operable program or batch file."
+ * Windows CI confirmed this directly: a neutralize step naming a command
+ * that does not exist came back exit 1 with exactly this text on stderr,
+ * where the same spec on POSIX comes back 127 (see NOT_RUNNABLE_EXIT_CODES
+ * above). cmd.exe is what Node's shell:true spawns on Windows (see
+ * src/spawn-command.ts), and it reports "not found" with plain exit code
+ * 1, the same code an ordinary failing command uses, so exit code alone
+ * cannot tell the two apart there the way 126/127 does on POSIX. Matching
+ * this text is a narrower, more targeted fix than trusting exit code 1 on
+ * Windows generally, which would misread every ordinary Windows failure as
+ * a control that never ran. It is locale-dependent: a non-English Windows
+ * reports this in its own language and this pattern will not match it.
+ * That gap could not be checked without a Windows runner in a non-English
+ * locale; see the induce report for how to confirm it. */
+export const WINDOWS_COMMAND_NOT_FOUND_MESSAGE = /is not recognized as an internal or external command/i;
+
 export interface CommandRun {
   /** The exit code, or null when the command was killed or never ran. */
   status: number | null;
@@ -265,8 +289,22 @@ export function outcomeFor(run: CommandRun): StepOutcome {
   return run.status === 0 ? "passed" : "failed";
 }
 
-export function isNotRunnable(result: StepResult): boolean {
-  return result.outcome === "failed" && result.exitCode !== null && NOT_RUNNABLE_EXIT_CODES.includes(result.exitCode);
+/**
+ * Whether `result` is a command that never ran at all, as against one that
+ * ran and failed on purpose. `platform` defaults to the real
+ * `process.platform` so ordinary callers need not pass it; tests pass it
+ * explicitly to exercise the Windows branch on any host, since it can only
+ * ever be reached there in practice. See WINDOWS_COMMAND_NOT_FOUND_MESSAGE
+ * above for why exit code alone is not enough on Windows.
+ */
+export function isNotRunnable(result: StepResult, platform: NodeJS.Platform = process.platform): boolean {
+  if (result.outcome !== "failed" || result.exitCode === null) return false;
+  if (NOT_RUNNABLE_EXIT_CODES.includes(result.exitCode)) return true;
+  return (
+    platform === "win32" &&
+    result.exitCode === 1 &&
+    WINDOWS_COMMAND_NOT_FOUND_MESSAGE.test(combinedOutput(result))
+  );
 }
 
 function findStep(steps: StepResult[], step: StepName): StepResult | undefined {
@@ -286,11 +324,20 @@ function findStep(steps: StepResult[], step: StepName): StepResult | undefined {
  * came back green with the handling taken away, so it would come back
  * green if the handling produced nothing at all, and it says nothing about
  * whether the handling works.
+ *
+ * `platform` is threaded through to `isNotRunnable` and defaults the same
+ * way; see that function for why.
  */
-export function verdictFor(steps: StepResult[]): { verdict: Verdict; reason?: UnrunReason } {
+export function verdictFor(
+  steps: StepResult[],
+  platform: NodeJS.Platform = process.platform,
+): { verdict: Verdict; reason?: UnrunReason } {
   const baseline = findStep(steps, "baseline");
   if (baseline !== undefined && baseline.outcome === "failed") {
-    return { verdict: "could-not-run", reason: isNotRunnable(baseline) ? "command-not-runnable" : "baseline-failed" };
+    return {
+      verdict: "could-not-run",
+      reason: isNotRunnable(baseline, platform) ? "command-not-runnable" : "baseline-failed",
+    };
   }
   if (baseline !== undefined && unjudgedReason(baseline.outcome) !== undefined) {
     return { verdict: "could-not-run", reason: unjudgedReason(baseline.outcome) };
@@ -305,7 +352,7 @@ export function verdictFor(steps: StepResult[]): { verdict: Verdict; reason?: Un
     const unjudged = unjudgedReason(result.outcome);
     if (unjudged !== undefined) return { verdict: "could-not-run", reason: unjudged };
     if (result.outcome === "not-run") return { verdict: "could-not-run", reason: "command-not-runnable" };
-    if (isNotRunnable(result)) return { verdict: "could-not-run", reason: "command-not-runnable" };
+    if (isNotRunnable(result, platform)) return { verdict: "could-not-run", reason: "command-not-runnable" };
   }
 
   if (inject.outcome !== "passed") return { verdict: "handler-did-not-fire" };
@@ -313,9 +360,16 @@ export function verdictFor(steps: StepResult[]): { verdict: Verdict; reason?: Un
   return { verdict: "proven" };
 }
 
-/** Builds the finished run for one spec from its step results. */
-export function runFromSteps(file: string, claim: string, steps: StepResult[]): SpecRun {
-  const { verdict, reason } = verdictFor(steps);
+/** Builds the finished run for one spec from its step results. `platform`
+ * is passed through to `verdictFor`; see `isNotRunnable` for why it exists
+ * and what it defaults to. */
+export function runFromSteps(
+  file: string,
+  claim: string,
+  steps: StepResult[],
+  platform: NodeJS.Platform = process.platform,
+): SpecRun {
+  const { verdict, reason } = verdictFor(steps, platform);
   return reason === undefined ? { file, claim, steps, verdict } : { file, claim, steps, verdict, reason };
 }
 

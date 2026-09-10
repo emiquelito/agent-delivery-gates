@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkPathAllowed, type PathResolver } from "../src/path-allowlist.ts";
+import { checkPathAllowed, resolveWithinRoot, type PathResolver } from "../src/path-allowlist.ts";
 import { mkdtempSync, writeFileSync, symlinkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -107,6 +107,34 @@ test("/repo-evil is not counted as inside /repo", () => {
   assert.equal(result.allowed, false);
 });
 
+// A containment check has two ways to be wrong: too loose, letting a
+// sibling like /repo-evil count as inside /repo (above), and too loose the
+// other direction, letting an ancestor of the root count as inside it. The
+// segment-count guard in isWithin (src/path-allowlist.ts) is what stops the
+// second one: a candidate with fewer segments than the root can never be
+// "at least as deep", whatever its segments say. Without that guard, a
+// mutant comparing only the segments the two paths have in common would
+// still find every one of a root's own leading segments equal to itself
+// and call the ancestor contained -- exactly the parent-counts-as-its-own-child
+// hole this confinement check exists to close.
+test("a candidate that is an ancestor of the root is denied, not counted as inside it", () => {
+  const resolver = fakeResolver({
+    [p("repo", "deep", "nested")]: p("repo", "deep", "nested"),
+    [p("repo", "deep")]: p("repo", "deep"),
+  });
+  const result = checkPathAllowed(p("repo", "deep"), [p("repo", "deep", "nested")], resolver, CWD);
+  assert.equal(result.allowed, false);
+});
+
+test("the filesystem root is denied against a deeper allowed root", () => {
+  const resolver = fakeResolver({
+    [p("repo", "deep", "nested")]: p("repo", "deep", "nested"),
+    [p()]: p(),
+  });
+  const result = checkPathAllowed(p(), [p("repo", "deep", "nested")], resolver, CWD);
+  assert.equal(result.allowed, false);
+});
+
 test("a relative path is resolved against the working directory", () => {
   const resolver = fakeResolver({
     [p("srv", "project")]: p("srv", "project"),
@@ -115,6 +143,39 @@ test("a relative path is resolved against the working directory", () => {
   const result = checkPathAllowed(join("src", "a.ts"), [p("srv", "project")], resolver, CWD);
   assert.equal(result.allowed, true);
   assert.equal(result.realPath, p("srv", "project", "src", "a.ts"));
+});
+
+// realCwd (src/path-allowlist.ts) realpaths cwd itself before a relative
+// root or candidate is ever joined onto it: this is the fix for a Windows
+// short name like RUNNER~1 in process.cwd() disagreeing with the long form
+// git already resolved.
+//
+// A relative path nested *under* cwd cannot tell this apart from cwd being
+// left alone: resolveRealOrPending's own ancestor walk, given an
+// unresolved candidate, always eventually revisits the literal cwd string
+// as an ancestor and resolves it there anyway, arriving at the same
+// answer. The gap only shows for a relative root or candidate that steps
+// *above* cwd with "..": the lexical join then walks up through cwd's own
+// parent, never through cwd itself, so nothing forces that walk through
+// the resolver entry realCwd already used. The fake resolver below maps
+// only the short cwd and the fully-resolved sibling paths, not any
+// unresolved ancestor in between, so without realCwd the walk finds
+// nothing to resolve through and falls back to the raw short-named
+// string; with it, both the root and the candidate come back through the
+// long form.
+test("a working directory that resolves to a different real path is realpathed before a relative root or candidate that steps above it is joined on", () => {
+  const shortCwd = p("RUNNER~1", "project");
+  const longCwd = p("runneradmin", "project");
+  const resolver = fakeResolver({
+    [shortCwd]: longCwd,
+    [longCwd]: longCwd,
+    [p("runneradmin", "sibling")]: p("runneradmin", "sibling"),
+    [p("runneradmin", "sibling", "file.ts")]: p("runneradmin", "sibling", "file.ts"),
+  });
+  const result = resolveWithinRoot(join("..", "sibling"), join("..", "sibling", "file.ts"), resolver, shortCwd);
+  assert.equal(result.realRoot, p("runneradmin", "sibling"));
+  assert.equal(result.realPath, p("runneradmin", "sibling", "file.ts"));
+  assert.equal(result.contained, true);
 });
 
 test("a candidate equal to the root itself is allowed", () => {

@@ -28,6 +28,7 @@ import {
   unreadableSpecRun,
   validateSpec,
   verdictFor,
+  WINDOWS_COMMAND_NOT_FOUND_MESSAGE,
   type SpecRun,
   type StepName,
   type StepOutcome,
@@ -149,6 +150,62 @@ test("exit 126 and 127 read as a command that never ran, any other non-zero does
   assert.equal(isNotRunnable(step("neutralize", "failed", 126)), true);
   assert.equal(isNotRunnable(step("neutralize", "failed", 1)), false);
   assert.equal(isNotRunnable(step("neutralize", "passed", 0)), false);
+});
+
+// --- Windows: a missing command is exit 1, not 126/127 (reviewer finding 3) ---
+//
+// cmd.exe, which Node's shell:true spawns on Windows, reports a command
+// that does not exist with plain exit code 1 -- indistinguishable by exit
+// code alone from an ordinary command that ran and failed on purpose. On
+// Windows CI, `induce`'s own could-not-run test proved this directly: a
+// neutralize step naming a nonexistent command came back "failed (exit 1)"
+// and the whole spec was reported "proven" instead of "could-not-run",
+// which is exactly the false robustness claim this tool exists to catch.
+// `platform` is injected so this is exercised here, without a Windows
+// host; see the induce report for what still needs confirming on one.
+
+const WINDOWS_NOT_FOUND_STDERR =
+  "'definitely-not-a-real-command-here' is not recognized as an internal or external command,\r\n" +
+  "operable program or batch file.\r\n";
+
+test("on win32, exit 1 with cmd.exe's not-recognized text reads as a command that never ran", () => {
+  assert.equal(
+    isNotRunnable(step("neutralize", "failed", 1, { stderr: WINDOWS_NOT_FOUND_STDERR }), "win32"),
+    true,
+  );
+});
+
+test("on win32, exit 1 without that text is an ordinary failure, not a command that never ran", () => {
+  // An exit 1 a command chose on purpose must not be misread as never
+  // having run at all: that would hide a real handler-did-not-fire or
+  // check-does-not-measure finding behind could-not-run instead.
+  assert.equal(isNotRunnable(step("neutralize", "failed", 1, { stderr: "assertion failed\n" }), "win32"), false);
+  assert.equal(isNotRunnable(step("neutralize", "failed", 1)), false);
+});
+
+test("the win32 not-recognized text is never trusted off win32", () => {
+  assert.equal(
+    isNotRunnable(step("neutralize", "failed", 1, { stderr: WINDOWS_NOT_FOUND_STDERR }), "linux"),
+    false,
+  );
+});
+
+test("reproduces the Windows CI transcript: a missing neutralize command must not read as proven", () => {
+  // Taken verbatim from the captured win-clean.txt CI log for
+  // tests/induce-cli.test.ts:218, where these same steps, on real
+  // Windows, were reported "proven" instead of "could-not-run".
+  const steps: StepResult[] = [
+    step("inject", "passed", 0),
+    step("neutralize", "failed", 1, { stderr: WINDOWS_NOT_FOUND_STDERR }),
+  ];
+  const run = runFromSteps("retry.json", "a 503 is retried and never comes back as a quote", steps, "win32");
+  assert.equal(run.verdict, "could-not-run");
+  assert.equal(run.reason, "command-not-runnable");
+  assert.notEqual(run.verdict, "proven");
+});
+
+test("WINDOWS_COMMAND_NOT_FOUND_MESSAGE matches the exact text cmd.exe printed on CI", () => {
+  assert.match(WINDOWS_NOT_FOUND_STDERR, WINDOWS_COMMAND_NOT_FOUND_MESSAGE);
 });
 
 // --- the four verdicts --------------------------------------------------------
