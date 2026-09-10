@@ -179,59 +179,49 @@ const php: GrammarSpec = {
       // encapsed_string (string_content, escape_sequence, and PHP's five
       // interpolation forms), so it needs the same treatment.
       "shell_command_expression",
-      // text_interpolation only wraps raw HTML found *between* two PHP
-      // spans, or after the last one: per tree-sitter-php's own
-      // node-types.json, `program`'s own children can include a bare
-      // `text` node directly, unwrapped, for HTML before the first
-      // `<?php` tag, or for a template-only file with no PHP tag at all.
-      // That bare text was invisible to this walk the same way any
-      // unlisted named child is: `program` is not itself a literalType,
-      // so its bare `text` child was never blanked, only ever reopened
-      // by the walk's ordinary recursion, which reads as "stays code" for
-      // a leaf with nothing further inside it. Listing `text` here too,
-      // not only in contentTypes below, means the walk blanks it
-      // directly wherever it appears as its own node -- inside a
-      // text_interpolation, where it is still reached via contentTypes
-      // and its parent's own wholesale fill, or bare under `program`,
-      // where literalTypes is what actually blanks it now.
-      "text",
     ]),
-    // tree-sitter-php gives `text` no further structure at all: everything
-    // outside a `<?php ... ?>` span, HTML and any inline <script>/<style>
-    // content alike, is one undifferentiated leaf. Blanking it wholesale,
-    // which is right for the surrounding HTML, also blanks a real
-    // assertion written inside an inline <script> block -- the one thing
-    // this project's test-diff detector exists to keep seeing. `text`
-    // joining scriptStyleAwareTypes tells src/tree-sitter-language-service
-    // .ts's markNode to carve a <script>/<style> element's own content back
-    // out as code before blanking the rest of the node as HTML; see that
-    // file's fillHtmlAwareLiteral for how it stays safe against a
-    // <script> tag written inside a PHP string fooling the scan (short
-    // version: that string is a different node, masked on its own, and
-    // never part of any `text` node's substring in the first place), and
-    // what it still cannot do (an HTML comment around a fake <script>, or
-    // an unescaped `</script>` inside a real script body's own string).
-    scriptStyleAwareTypes: new Set(["text"]),
+    // A prior round put PHP's `text` here too, so that HTML before the
+    // first `<?php` tag (and a template-only file with none at all) would
+    // be masked the same as the HTML already caught between two PHP spans
+    // via text_interpolation below. The round after found that decision
+    // hid a real assertion: tree-sitter-php gives `text` no further
+    // structure at all, so an inline <script>/<style> element sitting
+    // inside one has no child of its own to reopen the way a real
+    // interpolation does, and a scan added to carve that content back out
+    // by pattern-matching tags had two ways to fail. Worst: tree-sitter-php
+    // splits a single <script>...</script> element into two separate
+    // `text` nodes whenever a `<?php ... ?>` span sits between its open and
+    // close tags, so a per-node scan never saw both tags at once and an
+    // assertion sitting between them vanished outright. Also real: a fake
+    // `</script>` inside the script's own JavaScript string closed the scan
+    // early and blanked the real assertion that followed it. Both hid an
+    // assertion that was visible before any of this started -- the one
+    // outcome this project exists to prevent -- so `text` is deliberately
+    // left out of literalTypes (and out of contentTypes below) entirely.
+    // The accepted cost, stated plainly: leading HTML, trailing HTML, and a
+    // template-only PHP file with no `<?php` tag at all now read as
+    // ordinary code under this walk's default, unmasked, a false "this is
+    // still code" signal a human reviewing a diff can see and dismiss --
+    // never a false "nothing here" the way a hidden assertion is. See
+    // src/tree-sitter-language-service.ts's own file header for the fuller
+    // account of why fixing the scan instead was rejected.
+    //
     // heredoc_start/heredoc_end are the `<<<EOT` tag's own name, repeated
     // at open and close; not code, and not blanked by accident either
     // way since nothing there could satisfy a detector, but listed for
     // the same reason as everything else here: an unlisted named child
     // gets reopened as code, and a heredoc's tag name is not that.
     //
-    // text, php_tag, and php_end_tag are text_interpolation's own three
-    // possible children: the actual raw text, and the literal `<?php`/
-    // `?>` tags bracketing it. None of the three is code, so all three
-    // stay blanked instead of being reopened.
-    contentTypes: new Set([
-      "string_content",
-      "escape_sequence",
-      "nowdoc_string",
-      "heredoc_start",
-      "heredoc_end",
-      "text",
-      "php_tag",
-      "php_end_tag",
-    ]),
+    // php_tag and php_end_tag are text_interpolation's own literal `<?php`/
+    // `?>` tags bracketing its actual content; neither is code, so both
+    // stay blanked instead of being reopened. `text`, text_interpolation's
+    // third possible child and the actual raw HTML itself, is deliberately
+    // left out here too -- see the comment above literalTypes for why: a
+    // `text` child reopens to ordinary code the same way an unlisted named
+    // child anywhere else in this walk does, which is what keeps an inline
+    // <script>/<style> block sitting inside it, between two PHP spans,
+    // visible.
+    contentTypes: new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end", "php_tag", "php_end_tag"]),
   },
 };
 

@@ -23,6 +23,35 @@
 // `"{$d['key']}"`) get masked correctly too: the inner string node is
 // still in literalTypes, so recursing into it blanks it again from
 // scratch.
+//
+// A round of review found this file once carried a second layer for PHP
+// specifically: PHP's `text` node (raw HTML outside `<?php ?>`) has no
+// child structure of its own, so an inline <script>/<style> element sitting
+// inside it had no node to reopen the way a real interpolation does, and a
+// scan (fillHtmlAwareLiteral) tried to carve that content back out by
+// pattern-matching <script>/<style> tags inside one `text` node's own
+// span. Two defects followed directly from scanning one node at a time:
+// tree-sitter-php splits a single <script>...</script> element into two
+// separate `text` nodes whenever a `<?php ... ?>` span sits between its
+// open and close tags, so neither half's scan ever saw both tags and the
+// assertion in between vanished; and a fake `</script>` inside the
+// script's own JavaScript string closed the scan early, blanking the real
+// assertion that followed. Both hid an assertion that plain HTML masking
+// had never hidden before -- exactly the outcome this project exists to
+// prevent. Fixing that scan correctly needs cross-node state (tracking
+// whether a script/style element is still open as the walk moves from one
+// `text` node to the next in document order) with any ambiguity resolved
+// toward leaving content visible, which is real complexity bought for
+// keeping *incidental* HTML masked. Simpler, and argued for directly: PHP's
+// `text` node no longer has any special handling here at all, and
+// src/tree-sitter-grammars.ts's php entry no longer lists `text` in either
+// literalTypes or contentTypes, so raw HTML in a `.php` file -- leading,
+// trailing, template-only, or holding a real inline <script>/<style> block
+// -- stays visible under this walk's ordinary default the same way it did
+// for years before that work started. The trade a static HTML page might
+// now read as a false "still code" signal a human can see and dismiss;
+// nothing about it can ever read as a false "nothing here", which hiding
+// an assertion would.
 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -53,67 +82,6 @@ function fill(kinds: Uint8Array, start: number, end: number, value: number): voi
 export interface GrammarConfig {
   literalTypes: ReadonlySet<string>;
   contentTypes: ReadonlySet<string>;
-  /**
-   * Literal types whose own span is not uniformly non-code, because the
-   * grammar itself never subdivides it. PHP's `text` is the one member
-   * today: everything outside a `<?php ... ?>` span is one undifferentiated
-   * leaf, so an inline `<script>` or `<style>` element's content sits
-   * inside that same node with no child of its own for the walk to reopen
-   * the way a real interpolation gets reopened. A type listed here is
-   * still blanked wholesale like any other literalType, except that
-   * fillHtmlAwareLiteral (below) carves its script/style element bodies
-   * back out as CODE first. Optional because every other grammar's literal
-   * containers are exactly as uniform as the name says.
-   */
-  scriptStyleAwareTypes?: ReadonlySet<string>;
-}
-
-// Matches one <script>...</script> or <style>...</style> element and splits
-// it into three groups: the opening tag (with any attributes), the element's
-// own content, and the closing tag. Case-insensitive because HTML tag names
-// are. Non-greedy on the content so `<script>a</script><script>b</script>`
-// closes each element on its own tag instead of spanning both.
-const SCRIPT_OR_STYLE_ELEMENT_RE = /(<(?:script|style)\b[^>]*>)([\s\S]*?)(<\/(?:script|style)\s*>)/gi;
-
-/**
- * Blanks `text[start, end)` as HTML the way a plain literal span always
- * was, except that any <script> or <style> element's own content inside it
- * is left as CODE, so a real assertion written in an inline script block
- * stays visible to a detector that reads masked text.
- *
- * This scans only the substring tree-sitter has already isolated as one
- * `text` node's own span -- never the file's raw, unmasked source as a
- * whole. That is what keeps it safe against the obvious way a tag scan
- * like this could be fooled: a `<script>` written inside a PHP string
- * literal (`$x = "<script>...</script>";`) lives in a completely different
- * node, a `string`/`encapsed_string`, already masked wholesale on its own
- * terms by the ordinary literalTypes handling in markNode below. That
- * node's characters are never part of any `text` node's substring, so this
- * function never reads them and can never mistake them for a real script
- * element, whatever they say.
- *
- * What it does not handle, stated plainly: it does not understand HTML
- * comments, so `<!-- <script>fake</script> -->` reopens its content as
- * code the same as a real element would. It also closes on the first
- * `</script>`/`</style>` it finds, so a script body containing that literal
- * text inside its own string (`document.write("<\/script>")`, unescaped)
- * closes the element early, the same ambiguity a browser's own HTML parser
- * resolves with rules this scan does not implement. Both are the same kind
- * of miss this project already accepts elsewhere: a false "still masked"
- * costs nothing a plain HTML page would have hidden anyway, never a false
- * "reopen this random text as code".
- */
-function fillHtmlAwareLiteral(text: string, kinds: Uint8Array, start: number, end: number): void {
-  fill(kinds, start, end, LITERAL);
-  const span = text.slice(start, end);
-  SCRIPT_OR_STYLE_ELEMENT_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = SCRIPT_OR_STYLE_ELEMENT_RE.exec(span)) !== null) {
-    const [, openTag, content] = match;
-    const contentStart = start + match.index + openTag.length;
-    const contentEnd = contentStart + content.length;
-    fill(kinds, contentStart, contentEnd, CODE);
-  }
 }
 
 /**
@@ -123,35 +91,20 @@ function fillHtmlAwareLiteral(text: string, kinds: Uint8Array, start: number, en
  * hardcoded pair of node types ("comment", "string") to a per-language
  * `GrammarConfig`.
  */
-function markNode(node: TSNode, kinds: Uint8Array, config: GrammarConfig, text: string): void {
+function markNode(node: TSNode, kinds: Uint8Array, config: GrammarConfig): void {
   if (config.literalTypes.has(node.type)) {
-    if (config.scriptStyleAwareTypes?.has(node.type)) {
-      fillHtmlAwareLiteral(text, kinds, node.startIndex, node.endIndex);
-    } else {
-      fill(kinds, node.startIndex, node.endIndex, LITERAL);
-    }
+    fill(kinds, node.startIndex, node.endIndex, LITERAL);
     for (const child of node.children) {
       if (!child) continue;
       if (!child.isNamed) continue; // anonymous punctuation: stays blanked
-      // A content-type child that is itself script/style-aware (PHP's
-      // `text`, reached this way as text_interpolation's own child rather
-      // than visited directly) needs the same html-aware scan the branch
-      // above gives a node visited on its own: left to the plain
-      // contentTypes check below, it would just be swept into the
-      // parent's uniform blank above and a script/style element sitting in
-      // *this* span would never be carved back out.
-      if (config.scriptStyleAwareTypes?.has(child.type)) {
-        fillHtmlAwareLiteral(text, kinds, child.startIndex, child.endIndex);
-        continue;
-      }
       if (config.contentTypes.has(child.type)) continue; // plain text: stays blanked
       fill(kinds, child.startIndex, child.endIndex, CODE);
-      markNode(child, kinds, config, text);
+      markNode(child, kinds, config);
     }
     return;
   }
   for (const child of node.children) {
-    if (child) markNode(child, kinds, config, text);
+    if (child) markNode(child, kinds, config);
   }
 }
 
@@ -169,7 +122,7 @@ function classify(parser: Parser, text: string, config: GrammarConfig): Uint8Arr
     kinds.fill(LITERAL);
     return kinds;
   }
-  markNode(tree.rootNode, kinds, config, text);
+  markNode(tree.rootNode, kinds, config);
   return kinds;
 }
 

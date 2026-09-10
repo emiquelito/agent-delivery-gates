@@ -133,13 +133,25 @@
 // children at all -- gives the check nothing to signal on, so a leaf
 // misfiled into CODE_TYPES when it should have been a literal cannot be
 // caught by this check, whatever else about it looks wrong. `comment`,
-// `character`, `shebang`, `char_literal`, PHP's `text`, and C#'s
+// `character`, `shebang`, `char_literal`, and C#'s
 // `verbatim_string_literal` are all in that class across this file's six
 // grammars: every one of them is a leaf in the grammar that defines it.
 // Checked directly against each grammar's own node-types.json: none of
 // them, or any other leaf type, sits in CODE_TYPES today, so nothing is
 // misfiled and unreachable by this check right now -- but a future one
 // would be, and this check alone would not be the thing to catch it.
+//
+// A later round found a hidden-assertion defect in the scan a prior round
+// had added to keep an inline <script>/<style> block visible inside PHP's
+// `text` node (raw HTML outside `<?php ?>`), and reverted that scan rather
+// than fixing it in place: `text` no longer sits in literalTypes or
+// contentTypes at all, in either src/tree-sitter-grammars.ts's php entry or
+// this file's own CONTENT_SHAPED_MARKERS below, and instead joins
+// CODE_TYPES.php -- ordinary code by this walk's default, the same as any
+// other unlisted named child. Leading HTML, trailing HTML, and a
+// template-only `.php` file all read as visible code now, not masked; see
+// src/tree-sitter-language-service.ts's own file header for the fuller
+// account of why.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -348,7 +360,7 @@ const CODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
     "reference_assignment_expression", "reference_modifier", "relative_name", "relative_scope",
     "require_expression", "require_once_expression", "return_statement", "scoped_call_expression",
     "scoped_property_access_expression", "sequence_expression", "simple_parameter", "static_modifier",
-    "static_variable_declaration", "switch_block", "switch_statement", "throw_expression", "trait_declaration",
+    "static_variable_declaration", "switch_block", "switch_statement", "text", "throw_expression", "trait_declaration",
     "try_statement", "type_list", "unary_op_expression", "union_type", "unset_statement", "update_expression",
     "use_as_clause", "use_declaration", "use_instead_of_clause", "use_list", "var_modifier", "variadic_parameter",
     "variadic_placeholder", "variadic_unpacking", "visibility_modifier", "while_statement", "yield_expression",
@@ -673,7 +685,7 @@ const ROOT_LITERAL_TYPE: Readonly<Record<string, string>> = {
 const CONTENT_SHAPED_MARKERS: Readonly<Record<string, ReadonlySet<string>>> = {
   ".rs": new Set(["string_content", "escape_sequence"]),
   ".rb": new Set(["string_content", "escape_sequence", "heredoc_content", "heredoc_end", "interpolation"]),
-  ".php": new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end", "text", "php_tag", "php_end_tag"]),
+  ".php": new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end", "php_tag", "php_end_tag"]),
   ".go": new Set(["interpreted_string_literal_content", "raw_string_literal_content", "escape_sequence"]),
   ".java": new Set(["string_fragment", "multiline_string_fragment", "escape_sequence", "string_interpolation"]),
   ".cs": new Set([
@@ -724,17 +736,17 @@ const CORRECTNESS_EXCEPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   // is not a literal in disguise: per tree-sitter-php's own node-types.json,
   // `program`'s children can be `php_tag`, `statement`, or a bare `text`
   // node directly -- so "some child is a content marker" is trivially true
-  // of the root of every PHP file that has any HTML in it at all, the same
-  // way it would be true of any container that legitimately mixes code and
-  // text as siblings instead of being a text container itself. The actual
-  // bug this pointed at was real, though: that bare `text` child (Finding
-  // 3, leading HTML before the first `<?php` tag, or a template-only file
-  // with none at all) was never masked, because nothing in literalTypes
-  // matched it and `program` itself is not a literal container to recurse
-  // out of. The fix is `text` itself joining php's literalTypes in
-  // src/tree-sitter-grammars.ts, not relabelling `program`, which stays
-  // ordinary code -- masking `program` itself would blank an entire file's
-  // real statements along with its HTML.
+  // of the root of every PHP file that has any HTML in it at all (`php_tag`
+  // alone, a direct child of `program` on any file with a PHP tag, already
+  // satisfies it), the same way it would be true of any container that
+  // legitimately mixes code and text as siblings instead of being a text
+  // container itself. `text` is not part of that trigger any more --
+  // it is deliberately absent from both literalTypes and
+  // CONTENT_SHAPED_MARKERS.php, having been found to hide an assertion when
+  // it was masked as HTML (see src/tree-sitter-grammars.ts's php entry) --
+  // but `program` still needs this exception on `php_tag`'s account alone.
+  // `program` itself stays ordinary code either way: masking it would blank
+  // an entire file's real statements along with its HTML.
   ".php": new Set(["program"]),
   ".go": new Set(),
   ".java": new Set(),

@@ -1,16 +1,33 @@
-// Finding 5: adding PHP's `text` to literalTypes (see src/tree-sitter-grammars.ts's
-// php entry) correctly masks leading and template-only HTML, but
-// tree-sitter-php gives that same `text` node no further structure --
-// everything outside a `<?php ?>` span is one undifferentiated leaf, script
-// and style content included. Masking `text` wholesale therefore blanks a
-// real assertion sitting inside an inline `<script>` block along with the
-// surrounding HTML, and assertionWeakenedSignals in
-// src/test-diff-separator.ts can no longer see it.
+// A prior round (Finding 5) put PHP's `text` node in literalTypes so
+// leading and template-only HTML would be masked, then added a scan
+// (fillHtmlAwareLiteral) to carve an inline <script>/<style> element's own
+// content back out as visible code, since tree-sitter-php gives `text` no
+// child structure of its own for that content to be reopened through the
+// way a real interpolation is. A later round of review found that scan
+// hid a real assertion in two ways, both reproduced here first as failing
+// (red) proof, then as regression tests against the fix:
 //
-// This file proves the detector can still see such an assertion after the
-// fix, and separately proves a `<script>` tag written inside a PHP string
-// (a different node entirely, already masked on its own) cannot fool the
-// scan that keeps real script/style content visible.
+//   - Finding 1 (CRITICAL): tree-sitter-php splits one physical
+//     <script>...</script> element into two separate `text` nodes
+//     whenever a `<?php ... ?>` span sits between its open and close tags.
+//     A scan running per node, over one node's own span at a time, never
+//     sees both tags in the same call: the node holding the opening tag
+//     has no closing tag in its span to reopen on, and the node holding
+//     the assertion and the closing tag has no opening tag in its span to
+//     anchor on either. The assertion vanishes.
+//   - Finding 1b: the scan closed on the first `</script>`/`</style>` it
+//     found, even one sitting inside the script's own JavaScript string.
+//     That is not harmless: everything after the fake close reverts to
+//     being treated as HTML and gets blanked, including a real assertion
+//     and the real closing tag that follow it.
+//
+// The fix (see src/tree-sitter-language-service.ts's own file header, and
+// src/tree-sitter-grammars.ts's php entry) is not a smarter scan: `text` is
+// pulled back out of literalTypes and contentTypes entirely, so it is never
+// masked at all, by any means. This file's tests below now all pass
+// trivially -- there is no scan left to fool -- which is the point: masking
+// PHP's `text` node can no longer hide an assertion, because it no longer
+// hides anything.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,76 +37,70 @@ import { GRAMMAR_SPECS } from "../src/tree-sitter-grammars.ts";
 const spec = GRAMMAR_SPECS[".php"];
 const servicePromise = loadTreeSitterLanguageService(spec.packageName, spec.wasmFileName, spec.config);
 
-test("a template-only PHP file with an inline <script> keeps the assertion inside it visible after masking", async () => {
+test("Finding 1: a <script> element split by a `<?php ... ?>` span no longer hides the assertion after it", async () => {
   const service = await servicePromise;
   const text = [
-    "<!DOCTYPE html>",
-    "<html><body>",
+    "<html>",
     "<script>",
-    "  assert.strictEqual(result, expected);",
+    "  var config = <?php echo json_encode($config); ?>;",
+    "  assert.strictEqual(config.mode, 'prod');",
     "</script>",
-    "</body></html>",
     "",
   ].join("\n");
   const masked = service.maskNonCode(text);
   assert.ok(
-    masked.includes("assert.strictEqual(result, expected);"),
-    `expected the inline <script> assertion to stay visible after masking, got: ${JSON.stringify(masked)}`,
-  );
-  // The surrounding HTML is still masked: this is not "give up and leave
-  // the whole file visible", it is "keep script/style content visible
-  // while the HTML around it stays blanked".
-  assert.ok(!masked.includes("DOCTYPE"), `expected the surrounding HTML to stay masked, got: ${JSON.stringify(masked)}`);
-  assert.ok(!masked.includes("<html>"), `expected the surrounding HTML to stay masked, got: ${JSON.stringify(masked)}`);
-});
-
-test("an inline <style> block's content stays visible too, the same as <script>'s", async () => {
-  const service = await servicePromise;
-  const text = ["<html><head>", "<style>", "  .secret-class { color: DANGEROUS_TOKEN; }", "</style>", "</head></html>", ""].join(
-    "\n",
-  );
-  const masked = service.maskNonCode(text);
-  assert.ok(
-    masked.includes("DANGEROUS_TOKEN"),
-    `expected inline <style> content to stay visible after masking, got: ${JSON.stringify(masked)}`,
+    masked.includes("assert.strictEqual(config.mode, 'prod')"),
+    `expected the assertion after the php tag to stay visible, got: ${JSON.stringify(masked)}`,
   );
 });
 
-test("a <script> tag written inside a PHP string cannot fool the scan into treating unrelated HTML as script content", async () => {
+test("Finding 1, short echo form: `<?= ... ?>` splits the script the same way and must not hide the assertion either", async () => {
   const service = await servicePromise;
-  // The <script>...</script> text below lives entirely inside a PHP
-  // double-quoted string -- its own node, already masked wholesale on its
-  // own terms -- never inside the bare `text` node the fix's script/style
-  // scan actually looks at. A scan that ran over the whole raw file
-  // instead of one isolated `text` node's own substring could be fooled by
-  // this into either leaving the string's content visible, or by using it
-  // to mis-pair with a real closing tag elsewhere in the file. Neither
-  // happens here because the scan never sees text belonging to a different
-  // node at all.
   const text = [
-    "<?php",
-    '$x = "<script>NOT_REAL_JS_SHOULD_STAY_MASKED</script>";',
-    "?>",
+    "<html>",
     "<script>",
-    "  assert.strictEqual(real, code);",
+    "  var config = <?= json_encode($config) ?>;",
+    "  assert.strictEqual(config.mode, 'prod');",
     "</script>",
     "",
   ].join("\n");
+  const masked = service.maskNonCode(text);
+  assert.ok(
+    masked.includes("assert.strictEqual(config.mode, 'prod')"),
+    `expected the assertion after the short echo tag to stay visible, got: ${JSON.stringify(masked)}`,
+  );
+});
+
+test("Finding 1b: a fake `</script>` inside the script's own JavaScript string no longer hides the real assertion that follows it", async () => {
+  const service = await servicePromise;
+  const text = ["<script>", "var s = '<script>nested</script>';", "assert.ok(x);", "</script>", ""].join("\n");
+  const masked = service.maskNonCode(text);
+  assert.ok(masked.includes("assert.ok(x)"), `expected the real assertion to stay visible, got: ${JSON.stringify(masked)}`);
+});
+
+test("an escaped `<\\/script>` inside the script's own string, the standard way to write it, does not hide the real assertion either", async () => {
+  const service = await servicePromise;
+  const text = ["<script>", 'document.write("<\\/script>");', "assert.ok(y);", "</script>", ""].join("\n");
+  const masked = service.maskNonCode(text);
+  assert.ok(masked.includes("assert.ok(y)"), `expected the real assertion to stay visible, got: ${JSON.stringify(masked)}`);
+});
+
+test("a <script> tag written inside a PHP string still masks as an ordinary PHP string, independent of any text handling", async () => {
+  const service = await servicePromise;
+  const text = ["<?php", '$x = "<script>NOT_REAL_JS_SHOULD_STAY_MASKED</script>";', "?>", ""].join("\n");
   const masked = service.maskNonCode(text);
   assert.ok(
     !masked.includes("NOT_REAL_JS_SHOULD_STAY_MASKED"),
-    `expected the PHP string's own <script> text to stay masked, got: ${JSON.stringify(masked)}`,
-  );
-  assert.ok(
-    masked.includes("assert.strictEqual(real, code);"),
-    `expected the real inline <script> block's assertion to stay visible, got: ${JSON.stringify(masked)}`,
+    `expected the PHP string's own content to stay masked, got: ${JSON.stringify(masked)}`,
   );
 });
 
-test("mixed content: HTML on both sides of a php tag still masks correctly with a real <script> block present", async () => {
+test("leading and template-only HTML now stays visible, the accepted trade-off of dropping the text scan entirely", async () => {
   const service = await servicePromise;
-  const text = ["<html>", "<script>assert.ok(SIGNAL_HERE);</script>", "<?php echo 1; ?>", "</html>", ""].join("\n");
+  const text = ["<!DOCTYPE html>", "<html><body>", "LEADING_HTML_TEXT", "</body></html>", "<?php echo 1; ?>", ""].join("\n");
   const masked = service.maskNonCode(text);
-  assert.ok(masked.includes("assert.ok(SIGNAL_HERE)"), `expected the script content to stay visible, got: ${JSON.stringify(masked)}`);
-  assert.ok(!masked.includes("<html>"), `expected surrounding HTML to stay masked, got: ${JSON.stringify(masked)}`);
+  assert.ok(
+    masked.includes("LEADING_HTML_TEXT"),
+    `expected leading HTML to stay visible now that PHP's text node is never masked, got: ${JSON.stringify(masked)}`,
+  );
 });
