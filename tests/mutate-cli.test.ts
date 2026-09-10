@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,21 +25,6 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "mutate.ts");
 const REPO_ROOT = join(HERE, "..");
 const NODE_MODULES = join(REPO_ROOT, "node_modules");
-
-/** A test whose command spawns a worker that mutate (or this test's own
- * cleanup) just killed can still be mid-teardown on Windows: the process
- * is gone from the process list, but the kernel has not yet let go of the
- * handle it held on this directory as its own current working directory,
- * and a bare rmSync lands inside that window often enough to fail with
- * EBUSY. tests/census-cli.test.ts and tests/induce-cli.test.ts hit the
- * same thing and settled on 10 retries at 300ms (Node's own linear
- * backoff, up to ~16.5s) as enough headroom without being unbounded; this
- * repeats those same numbers instead of picking a new one, and this
- * file's own rmSync calls did not have any retry at all before, which on
- * its own accounted for most of this file's EBUSY failures. */
-function rmSyncResilient(path: string): void {
-  rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
-}
 
 interface RunResult {
   status: number | null;
@@ -118,7 +103,7 @@ function withRepo(dir: string, fn: () => void): void {
   try {
     fn();
   } finally {
-    rmSyncResilient(dir);
+    cleanupTempDir(dir);
   }
 }
 
@@ -276,7 +261,7 @@ test("a run interrupted partway restores every file it wrote to", async () => {
     assert.deepEqual(readFileSync(join(dir, "src/order.mjs")), before);
     assert.equal(runGit(dir, ["status", "--porcelain"]), "", "the tree is clean again");
   } finally {
-    rmSyncResilient(dir);
+    cleanupTempDir(dir);
   }
 });
 
@@ -682,7 +667,7 @@ test("a timed-out mutation leaves no descendant running", () => {
       const survivors = waitForNoneAlive(pids, 5_000);
       assert.deepEqual(survivors, [], "a worker process outlived the timed-out mutation");
     } finally {
-      rmSyncResilient(pidDir);
+      cleanupTempDir(pidDir);
     }
   });
 });
@@ -803,8 +788,8 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
     // A directory rmSync cannot remove here is a cleanup problem, not
     // evidence that anything survived -- that claim is already settled
     // above, by waitForNoneAlive, before this ever runs. cleanupTempDir
-    // retries the same way rmSyncResilient always has, then logs a note
-    // and moves on instead of failing this test over it.
+    // retries, then logs a note and moves on instead of failing this test
+    // over it.
     cleanupTempDir(pidDir);
     cleanupTempDir(dir);
   }
@@ -936,8 +921,8 @@ test("a hung baseline run is timed out, reported plainly, and leaves no descenda
     assert.ok(pids.length > 0, `expected the baseline to spawn a worker; got: ${result.stdout}\n${result.stderr}`);
     assert.deepEqual(survivors, [], "a worker process outlived the timed-out baseline run");
   } finally {
-    rmSyncResilient(pidDir);
-    rmSyncResilient(dir);
+    cleanupTempDir(pidDir);
+    cleanupTempDir(dir);
   }
 });
 
@@ -1519,8 +1504,8 @@ await new Promise((r) => setTimeout(r, 60_000));
         // already gone
       }
     }
-    rmSyncResilient(pidDir);
-    rmSyncResilient(dir);
+    cleanupTempDir(pidDir);
+    cleanupTempDir(dir);
   }
 });
 
