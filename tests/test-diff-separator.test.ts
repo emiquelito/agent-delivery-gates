@@ -206,10 +206,18 @@ test("an ordinary added line with no skip wording does not fire skip-added", () 
 // but the skips bucket compiles case-insensitively (see bucketFlags in
 // src/test-diff-separator.ts), so the unanchored form also matched an
 // ordinary variable declaration -- "const skip = new Set(...)" fired a
-// high-severity skip-added on this repository's own commit. The fragment
-// now requires an unclosed "[" earlier on the line, since the real
-// attribute is always written inside a square-bracket attribute list and a
-// plain assignment never is.
+// high-severity skip-added on this repository's own commit. A first fix
+// anchored the fragment to an unclosed "[" earlier on the same line, since
+// the real attribute is always written inside a square-bracket attribute
+// list and a plain assignment never is. That anchor itself then missed two
+// ordinary forms a reviewer found by running the real gate (see the
+// comment on the "Skip = " fragment in src/test-diff-separator.ts): a
+// wrapped multi-line attribute, and an array-typed argument earlier in the
+// same attribute list closing the bracket class early. The fragment is now
+// anchored to the value instead of the bracket: "Skip" followed by "="
+// followed directly by a quote, which is what the real attribute's value
+// always is and a plain assignment to something else, such as "new
+// Set(...)", never is.
 
 test("a variable named skip does not fire skip-added", () => {
   const diff = oneFileDiff("tests/widget.test.ts", [], ['const skip = new Set(["a.ts", "b.ts"]);']);
@@ -233,6 +241,71 @@ test("an added [Fact(Skip = \"reason\")] fires skip-added across its spacing var
 
 test("an added [Theory(Skip = \"reason\")] still fires skip-added", () => {
   const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Theory(Skip = "not ready")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Finding 1: the bracket anchor above required an unclosed "[" earlier on
+// the SAME diff line, which a reviewer found misses ordinary style. Each
+// case below is one of the reproductions the reviewer ran through the real
+// gate, not the regex alone.
+
+test("a multi-line attribute with Skip on its own continuation line still fires skip-added", () => {
+  // The "[" that opens the attribute list sits on a different diff line
+  // than "Skip = ", and this bucket masks and tests one diff line at a
+  // time (see the per-line limit named on maskDiffLine in
+  // src/test-diff-separator.ts), so no single line here ever holds both.
+  const diff = oneFileDiff(
+    "tests/WidgetTests.cs",
+    [],
+    ["[Theory(", '  DisplayName = "x",', '  Skip = "flaky")]'],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("an array-typed argument earlier in the attribute list still lets Skip fire", () => {
+  // "new[]" closes a real "]" earlier on the line, which the old bracket
+  // anchor read as closing the whole attribute class before "Skip =" was
+  // ever reached.
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Theory(Data = new[] {1,2}, Skip = "x")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("a closing bracket inside an unrelated string argument does not hide a later Skip", () => {
+  const diff = oneFileDiff(
+    "tests/WidgetTests.cs",
+    [],
+    ['[Fact(DisplayName = "note: see appendix]", Skip = "x")]'],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Finding 2: "\.skip\b" and the bare "\bskip\(" fragment were both
+// unanchored to a test-declaration identifier, so each matched a
+// non-disabling ".Skip(n)"/".skip(n)" call: C# LINQ's pagination method and
+// the JS Iterator Helpers method of the same name.
+
+test("C# LINQ's .Skip(20) pagination call does not fire skip-added", () => {
+  const diff = oneFileDiff(
+    "tests/WidgetTests.cs",
+    [],
+    ["var page = items.OrderBy(x => x.Id).Skip(20).Take(10).ToList();"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("the JS Iterator Helpers .skip(5) method does not fire skip-added", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["const rest = iter.skip(5);"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("test.describe.skip (Playwright's nested form) still fires skip-added", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["test.describe.skip('flaky group', () => {});"]);
   const result = separateTestDiff(diff);
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
