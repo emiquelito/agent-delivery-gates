@@ -10,6 +10,7 @@ import {
   applyMutation,
   exitCodeFor,
   formatReportText,
+  grammarUnavailablePaths,
   hasMutableExtension,
   isMutablePath,
   planFileMutations,
@@ -18,6 +19,7 @@ import {
   selectMutablePaths,
   summarize,
   unsupportedLanguagePaths,
+  warmAndSplitByGrammar,
   type Mutation,
   type MutationResult,
 } from "../src/mutate.ts";
@@ -250,6 +252,43 @@ test("unsupportedLanguagePaths reports a non-test file in a known language with 
   assert.deepEqual(unsupportedLanguagePaths(paths), ["app/main.rb"]);
 });
 
+// unsupportedLanguagePaths used to allowlist a fixed set of "languages
+// this project already recognises" (Python plus the six tree-sitter
+// languages). A file in any other real language -- Elixir here -- fell
+// outside that allowlist and vanished without a trace, exactly the
+// silence this function exists to close, just moved one language further
+// out; the reviewer's own reproduction used lib/discount.ex next to
+// lib/main.rb and watched the .ex file disappear entirely, not even
+// counted. It is a denylist of known non-source extensions now (see
+// NON_SOURCE_EXTENSIONS in src/mutate.ts), so nothing selected has to be
+// on a list of known languages to be reported; only a config, markup, or
+// data extension buys silence.
+test("unsupportedLanguagePaths reports a language this tool has never heard of, next to one it has: neither vanishes", () => {
+  const paths = ["lib/discount.ex", "lib/main.rb"];
+  assert.deepEqual(unsupportedLanguagePaths(paths), ["lib/discount.ex", "lib/main.rb"]);
+});
+
+test("unsupportedLanguagePaths still keeps common data, config, and markup extensions silent", () => {
+  const paths = [
+    "README.md",
+    "package-lock.json",
+    "yarn.lock",
+    ".github/workflows/ci.yml",
+    "styles/app.css",
+    "assets/logo.svg",
+    "notes.txt",
+  ];
+  assert.deepEqual(unsupportedLanguagePaths(paths), []);
+});
+
+test("unsupportedLanguagePaths does not flag an extensionless file", () => {
+  // A Makefile, a Dockerfile, a bare LICENSE: overwhelmingly build
+  // metadata or documentation, not program source, and with no extension
+  // to say otherwise. Flagging every one of these would be exactly the
+  // noise NON_SOURCE_EXTENSIONS exists to keep out.
+  assert.deepEqual(unsupportedLanguagePaths(["Makefile", "Dockerfile", "LICENSE"]), []);
+});
+
 test("planMutations never plans a mutation in a test file", () => {
   const files = [
     { path: "tests/order.test.ts", text: "if (a < b) f();" },
@@ -374,6 +413,19 @@ test("a survivor still wins over an unsupported-language file", () => {
   assert.equal(exitCodeFor([resultWith("survived")], ["app/main.rb"]), 1);
 });
 
+// CRITICAL fix: a file whose tree-sitter grammar failed to load has an
+// operator table (unlike an unsupported-language file) but no trustworthy
+// mask to apply it through, so it is exactly as unmeasured as the other
+// two exit-3 reasons and must keep a run out of exit 0 the same way.
+test("exit code is 3 when nothing survived but a candidate's grammar failed to load", () => {
+  assert.equal(exitCodeFor([], [], ["lib/discount.py"]), 3);
+  assert.equal(exitCodeFor([resultWith("killed")], [], ["lib/discount.py"]), 3);
+});
+
+test("a survivor still wins over a grammar-unavailable file", () => {
+  assert.equal(exitCodeFor([resultWith("survived")], [], ["lib/discount.py"]), 1);
+});
+
 test("no mutable file found and every mutation killed both read differently in the report", () => {
   const noneFound = formatReportText({
     command: "npm test",
@@ -401,6 +453,61 @@ test("no mutable file found and every mutation killed both read differently in t
   });
   assert.doesNotMatch(allKilled, /No operator set for these/);
   assert.match(allKilled, /No mutation survived: every break this tool made was caught\./);
+});
+
+test("a grammar-unavailable file gets its own section and its own exit-3 explanation", () => {
+  const report = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: [],
+    planned: 0,
+    attempted: 0,
+    results: [],
+    grammarUnavailableFiles: ["lib/discount.py"],
+  });
+  assert.match(report, /Grammar failed to load for these \(1\):/);
+  assert.match(report, /lib\/discount\.py/);
+  assert.match(report, /1 file\(s\) could not be trusted because their grammar failed to load.*\(exit 3\)/);
+  assert.doesNotMatch(report, /No operator set for these/);
+});
+
+test("all three exit-3 reasons at once are joined into one sentence, and the existing two-reason wording is untouched", () => {
+  const allThree = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.py"],
+    planned: 1,
+    attempted: 1,
+    results: [resultWith("timeout")],
+    unsupportedFiles: ["app/main.rb"],
+    grammarUnavailableFiles: ["lib/discount.py"],
+  });
+  assert.match(allThree, /No verdict on these \(1\):/);
+  assert.match(allThree, /No operator set for these \(1\):/);
+  assert.match(allThree, /Grammar failed to load for these \(1\):/);
+  assert.match(
+    allThree,
+    /No mutation survived, but 1 never got a verdict, 1 file\(s\) had no operator set for their language, and 1 file\(s\) could not be trusted because their grammar failed to load: all of that is unmeasured \(exit 3\)\./,
+  );
+
+  // The existing two-reason (unmeasured + unsupported, no grammar failure)
+  // wording is pinned exactly as it was before this change, unchanged.
+  const twoReasons = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts"],
+    planned: 1,
+    attempted: 1,
+    results: [resultWith("timeout")],
+    unsupportedFiles: ["app/main.rb"],
+  });
+  assert.match(
+    twoReasons,
+    /No mutation survived, but 1 never got a verdict and 1 file\(s\) had no operator set for their language: both are unmeasured \(exit 3\)\./,
+  );
 });
 
 test("a timeout is its own verdict, not a kill and not a survivor", () => {
@@ -600,4 +707,30 @@ test("planMutationsWarmed never mutates inside a Python docstring, an f-string l
       [7, "=="],
     ],
   );
+});
+
+// --- grammarUnavailablePaths / warmAndSplitByGrammar ------------------------
+//
+// The CRITICAL fix: a file whose tree-sitter grammar failed to load must
+// never be handed to planMutations, because there is no correct mask for
+// it, only the C-family regex scanner applied to a language it was never
+// written for. Reproducing an actual load failure needs tree-sitter-python
+// and web-tree-sitter absent from node_modules in a fresh process --
+// resolvedServices in src/code-mask.ts caches a resolved service for the
+// life of a process, so nothing in this same test process can make .py's
+// grammar fail here once anything else in this file has warmed it
+// successfully. That real reproduction, matching what an adopter's install
+// leaves, is tests/mutate-cli.test.ts's own subprocess tests, which rename
+// the real packages out of this repository's real node_modules and
+// restore them afterward. What is tested here, in-process, is the ordinary path: a
+// grammar that did load leaves both functions reporting no failure at all.
+
+test("grammarUnavailablePaths reports nothing when every extension's grammar loaded (or needed none)", async () => {
+  await warmLanguageServices(["src/order.ts", "lib/discount.py"]);
+  assert.deepEqual(grammarUnavailablePaths(["src/order.ts", "lib/discount.py"]), []);
+});
+
+test("warmAndSplitByGrammar puts every mutable path in `trustworthy` when nothing failed to load", async () => {
+  const result = await warmAndSplitByGrammar(["src/order.ts", "lib/discount.py"]);
+  assert.deepEqual(result, { trustworthy: ["src/order.ts", "lib/discount.py"], grammarUnavailable: [] });
 });

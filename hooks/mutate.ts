@@ -12,11 +12,12 @@
 // at least one mutation survived. Exit 2: could not run as asked, which
 // includes a dirty working tree, a baseline run that was already failing,
 // no command to run, and a tree left dirty afterwards. Exit 3: nothing
-// survived, but at least one mutation never got a verdict, or at least one
-// selected file's language had no operator set to try it with. A run that
-// could not happen, and a run that could not judge part of its own work,
-// must never read the same as a run that judged all of it and found
-// nothing.
+// survived, but at least one mutation never got a verdict, at least one
+// selected file's language had no operator set to try it with, or at least
+// one selected file's grammar failed to load, so its mask could not be
+// trusted. A run that could not happen, and a run that could not judge part
+// of its own work, must never read the same as a run that judged all of it
+// and found nothing.
 //
 // This tool writes to the caller's own source files, so the safety rules
 // come first and are not optional:
@@ -43,9 +44,10 @@ import {
   exitCodeFor,
   formatReportJson,
   formatReportText,
-  planMutationsWarmed,
+  planMutations,
   selectMutablePaths,
   unsupportedLanguagePaths,
+  warmAndSplitByGrammar,
   type MutationResult,
   type SourceFile,
 } from "../src/mutate.ts";
@@ -153,8 +155,12 @@ Exit codes:
      timed out, printed more than this tool will hold, was killed by a
      signal that had nothing to do with the suite, or was skipped, so that
      part of the run is unmeasured. Also used when a selected file's
-     extension has no operator set this tool speaks yet: that file is
-     reported by name and counted as unmeasured, not passed over in silence
+     extension has no operator set this tool speaks yet, or when a
+     selected file's tree-sitter grammar failed to load (an adopter's
+     install with no devDependency for that language, most commonly):
+     either way that file is reported by name and counted as unmeasured,
+     not passed over in silence, and never mutated with an untrustworthy
+     mask
 
 A run stopped by SIGINT or SIGTERM does not use any of the codes above. On
 POSIX it exits with that signal's own convention instead (130 for SIGINT,
@@ -503,23 +509,34 @@ async function main(): Promise<void> {
   // clean and found nothing" (see unsupportedLanguagePaths in
   // src/mutate.ts).
   const unsupportedPaths = unsupportedLanguagePaths(candidates);
-  const files = readSourceFiles(mutablePaths, repoRoot);
-  // Warms the language services this batch of files needs (Python's
-  // tree-sitter grammar, when a .py file is in it) before planning a
-  // single mutation, the same way every other entry point that reads a
-  // diff already does. See planMutationsWarmed in src/mutate.ts.
-  const planned = await planMutationsWarmed(files);
+  // Warms every mutable path's language service, then tells apart a file
+  // whose grammar actually loaded from one that fell back to the regex
+  // scanner because the load failed -- an adopter's install with no
+  // tree-sitter devDependencies, most visibly. A path in the second group
+  // is never read into `files` below and never planned: masking it with
+  // the regex scanner would apply C-family assumptions to a language that
+  // scanner was never written for, which is exactly how a Python
+  // docstring's True/False and and/or got rewritten on a machine that
+  // never installed tree-sitter-python. See warmAndSplitByGrammar and
+  // grammarUnavailablePaths in src/mutate.ts.
+  const { trustworthy: trustworthyPaths, grammarUnavailable: grammarUnavailablePaths } =
+    await warmAndSplitByGrammar(mutablePaths);
+  const files = readSourceFiles(trustworthyPaths, repoRoot);
+  // Already warmed above, so this plans synchronously against whichever
+  // mask each trustworthy path's extension actually resolved to.
+  const planned = planMutations(files);
   const attempted = planned.slice(0, args.max);
 
   // Nothing to mutate is not a pass. A run that measured nothing has to
   // read as a run that could not happen, or an empty selector (--staged on
   // a clean tree names no file at all) would report the same exit code as a
-  // suite that caught every break. The one exception is a selection that
-  // held nothing to mutate only because every candidate's language has no
-  // operator set: that is not "could not run", it is a run that did happen
-  // and measured nothing, so it falls through to the ordinary report below
-  // and comes out exit 3, with those files named, instead of exit 2.
-  if (attempted.length === 0 && unsupportedPaths.length === 0) {
+  // suite that caught every break. The exception is a selection that held
+  // nothing to mutate only because every candidate's language has no
+  // operator set, or its grammar failed to load: that is not "could not
+  // run", it is a run that did happen and measured nothing, so it falls
+  // through to the ordinary report below and comes out exit 3, with those
+  // files named, instead of exit 2.
+  if (attempted.length === 0 && unsupportedPaths.length === 0 && grammarUnavailablePaths.length === 0) {
     fail(
       candidates.length === 0
         ? "the selector named no files, so there was nothing to mutate"
@@ -648,6 +665,7 @@ async function main(): Promise<void> {
     attempted: attempted.length,
     results,
     unsupportedFiles: unsupportedPaths,
+    grammarUnavailableFiles: grammarUnavailablePaths,
   };
   process.stdout.write(args.format === "json" ? formatReportJson(report) : `${formatReportText(report)}\n`);
 
@@ -666,7 +684,7 @@ async function main(): Promise<void> {
     fail("the working tree is dirty after the run; check these paths before trusting anything above");
   }
 
-  process.exit(exitCodeFor(results, unsupportedPaths));
+  process.exit(exitCodeFor(results, unsupportedPaths, grammarUnavailablePaths));
 }
 
 main().catch((err: unknown) => {

@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, renameSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,8 @@ import process from "node:process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "mutate.ts");
+const REPO_ROOT = join(HERE, "..");
+const NODE_MODULES = join(REPO_ROOT, "node_modules");
 
 interface RunResult {
   status: number | null;
@@ -1159,5 +1161,163 @@ test("a test file with an unsupported extension is dropped silently, same as any
     const report = JSON.parse(result.stdout) as { unsupportedFiles: string[] };
     assert.deepEqual(report.unsupportedFiles, []);
     assert.equal(result.status, 0, result.stdout);
+  });
+});
+
+// --- Finding 2, redone: an unknown language does not vanish next to a
+// known one --------------------------------------------------------------
+//
+// KNOWN_LANGUAGE_EXTENSIONS used to be an allowlist naming Python and the
+// six tree-sitter languages: a file in any other real language fell
+// outside it and was dropped without a trace, the exact bug this
+// project's own exit-3 signal exists to prevent, just moved one language
+// further out. unsupportedLanguagePaths is a denylist of known non-source
+// extensions now (see NON_SOURCE_EXTENSIONS in src/mutate.ts), so a
+// language this tool has never heard of -- Elixir, here -- is reported by
+// name exactly like Ruby is, instead of disappearing next to it.
+
+test("two unknown-language files, in different languages, neither vanishes: both are named and both fold into exit 3", () => {
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "lib/discount.ex": "defmodule Discount do\n  def apply(total), do: total\nend\n",
+    "lib/main.rb": "def discount(total)\n  total\nend\n",
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "lib/discount.ex", "lib/main.rb", "--format", "json"]);
+    const report = JSON.parse(result.stdout) as { unsupportedFiles: string[]; planned: number; attempted: number };
+    assert.deepEqual(report.unsupportedFiles, ["lib/discount.ex", "lib/main.rb"]);
+    assert.equal(report.planned, 0);
+    assert.equal(report.attempted, 0);
+    assert.equal(result.status, 3, result.stdout);
+  });
+});
+
+test("the same two-file case, in text format: neither file vanishes from the printed report either", () => {
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "lib/discount.ex": "defmodule Discount do\n  def apply(total), do: total\nend\n",
+    "lib/main.rb": "def discount(total)\n  total\nend\n",
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "lib/discount.ex", "lib/main.rb"]);
+    assert.equal(result.status, 3, result.stdout);
+    assert.match(result.stdout, /No operator set for these \(2\):/);
+    assert.match(result.stdout, /lib\/discount\.ex/);
+    assert.match(result.stdout, /lib\/main\.rb/);
+  });
+});
+
+test("common data and config extensions still never fold into exit 3", () => {
+  // The denylist has to actually keep the noise out: an ordinary commit
+  // touching only these files must read as "nothing to mutate" (exit 2),
+  // the same as it always did, not as "unmeasured" (exit 3).
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "README.md": "# scratch\n",
+    "config.yml": "on: push\n",
+    "notes.txt": "nothing to see here\n",
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "README.md", "config.yml", "notes.txt"]);
+    assert.equal(result.status, 2, result.stdout);
+    assert.match(result.stderr, /none of the selected files held a mutation this tool knows how to make/);
+  });
+});
+
+// --- Finding 1: a grammar that failed to load must never be trusted -----
+//
+// tree-sitter-python and web-tree-sitter are devDependencies, so an
+// adopter's ordinary `npm install` never puts them in node_modules. This
+// renames them out of THIS repository's own node_modules -- the same
+// thing an adopter's install leaves -- runs the real CLI as a real
+// subprocess against it, and restores them in a finally block no matter
+// what the test does. A subprocess is required, not just an unwarmed
+// service: src/code-mask.ts caches a resolved service per process, so the
+// only way to see a fresh load attempt fail is a fresh process, which is
+// what runCli already spawns for every test in this file.
+
+function withGrammarPackagesRemoved(packageNames: readonly string[], fn: () => void): void {
+  const moves = packageNames.map((name) => ({
+    from: join(NODE_MODULES, name),
+    to: join(NODE_MODULES, `${name}.adg-test-disabled`),
+  }));
+  for (const { from, to } of moves) {
+    // A leftover from a previous run that was killed mid-test: clear it
+    // first so renameSync below does not fail on an existing target.
+    if (existsSync(to)) rmSync(to, { recursive: true, force: true });
+    renameSync(from, to);
+  }
+  try {
+    fn();
+  } finally {
+    for (const { from, to } of moves) renameSync(to, from);
+  }
+}
+
+const DOCSTRING_SOURCE = `def discount(total, is_member):
+    """
+    Compute the discount. True and False are the boolean literals,
+    and 'and'/'or' are the connectives, kept here on purpose.
+    """
+    if total >= 100 and is_member:
+        return total - 10
+`;
+
+test("CRITICAL repro: with tree-sitter-python and web-tree-sitter renamed out of node_modules, a Python docstring is never mutated and the file is reported unmeasured, not silently corrupted", () => {
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "lib/discount.py": DOCSTRING_SOURCE,
+  });
+  withRepo(dir, () => {
+    withGrammarPackagesRemoved(["tree-sitter-python", "web-tree-sitter"], () => {
+      const result = runCli(dir, ["--paths", "lib/discount.py", "--command", "node -e 1", "--format", "json"]);
+      const report = JSON.parse(result.stdout) as {
+        results: unknown[];
+        planned: number;
+        grammarUnavailableFiles: string[];
+      };
+      assert.deepEqual(report.results, [], "nothing was ever planned for this file, not even a survivor");
+      assert.equal(report.planned, 0);
+      assert.deepEqual(report.grammarUnavailableFiles, ["lib/discount.py"]);
+      assert.equal(result.status, 3, result.stdout);
+      assert.equal(
+        readFileSync(join(dir, "lib/discount.py"), "utf8"),
+        DOCSTRING_SOURCE,
+        "the docstring's True/False and and/or were never touched",
+      );
+    });
+  });
+});
+
+test("CRITICAL repro, text format: the printed report names the file and says why, exit 3", () => {
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "lib/discount.py": DOCSTRING_SOURCE,
+  });
+  withRepo(dir, () => {
+    withGrammarPackagesRemoved(["tree-sitter-python", "web-tree-sitter"], () => {
+      const result = runCli(dir, ["--paths", "lib/discount.py", "--command", "node -e 1"]);
+      assert.equal(result.status, 3, result.stdout);
+      assert.match(result.stdout, /Grammar failed to load for these \(1\):/);
+      assert.match(result.stdout, /lib\/discount\.py/);
+      assert.match(result.stdout, /could not be trusted because their grammar failed to load.*\(exit 3\)/);
+      assert.equal(readFileSync(join(dir, "lib/discount.py"), "utf8"), DOCSTRING_SOURCE);
+    });
+  });
+});
+
+test("once the grammar is back, the same file mutates only the real code, not the docstring", () => {
+  // The other half of the same proof: this is not a regression in the
+  // ordinary case, only a refusal in the broken one.
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "lib/discount.py": DOCSTRING_SOURCE,
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "lib/discount.py", "--command", "node -e 1", "--format", "json"]);
+    const report = JSON.parse(result.stdout) as { grammarUnavailableFiles: string[]; planned: number };
+    assert.deepEqual(report.grammarUnavailableFiles, []);
+    assert.equal(report.planned, 3, "only the comparison, connective, and arithmetic in real code, not the docstring");
+    assert.equal(readFileSync(join(dir, "lib/discount.py"), "utf8"), DOCSTRING_SOURCE);
   });
 });

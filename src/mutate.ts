@@ -15,9 +15,8 @@
 // src/code-mask.ts now, because src/test-diff-separator.ts needs it too and
 // this file already imports from that one.
 
-import { languageServiceFor, warmLanguageServices, IDENT_CHAR } from "./code-mask.ts";
+import { languageServiceFor, warmLanguageServices, hadLanguageLoadFailure, IDENT_CHAR } from "./code-mask.ts";
 import { classifyTestPath, isCommentLine, isImportLine, type RuleSet } from "./test-diff-separator.ts";
-import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
 /** The fixed operator set. One mutation per run, one operator per mutation. */
 export type MutationOperator =
@@ -134,47 +133,107 @@ export function selectMutablePaths(paths: string[], rules?: RuleSet): string[] {
 }
 
 /**
- * Extensions this project already knows how to read as a programming
- * language: Python's own tree-sitter-python-service.ts, plus every
- * language src/tree-sitter-grammars.ts lists a GrammarSpec for (Rust,
- * Ruby, PHP, Go, Java, C#). A working code mask exists for each of these,
- * whether or not MUTABLE_EXTENSIONS above has an operator table for it
- * yet: right now that is every one of them except Ruby, which this
- * project can already tell code from a comment or a string in, but has
- * not yet written mutation rules for. A config file, a markup file, or a
- * data format is deliberately not in this set: it was never going to grow
- * an operator table, so treating one as "unmeasured" on an ordinary run
- * would drown the signal unsupportedLanguagePaths exists to give in
- * noise (a commit that merely touches package.json would report exit 3
- * for no real reason). This set is specifically "a language this tool
- * could write mutation rules for tomorrow, the same way it just did for
- * Python."
+ * Extensions this project already knows are not a programming language:
+ * markup and documentation, serialized data, style sheets, lockfiles and
+ * other config, and common binary/media formats. Nothing here was ever
+ * going to grow an operator table, so flagging one as "unmeasured" would
+ * drown the signal `unsupportedLanguagePaths` below exists to give in
+ * noise -- a commit that merely touches package.json must not report exit
+ * 3 for no real reason. This is deliberately a denylist, not an allowlist
+ * of known languages: an earlier version of this file kept a
+ * KNOWN_LANGUAGE_EXTENSIONS allowlist (Python plus the six languages
+ * src/tree-sitter-grammars.ts has a GrammarSpec for), and a file in any
+ * other real language -- Elixir, Zig, a shell script, anything this tool
+ * has never heard of -- fell outside it and vanished from the report the
+ * same way it vanished before this project's exit-3 signal existed at
+ * all, just one language further out. An allowlist of languages has to
+ * grow forever and is wrong on every name it has not gotten to yet; a
+ * denylist of non-languages is a short, roughly fixed list, and being
+ * wrong on it in the noisy direction (flagging a real source file this
+ * tool has truly never seen) is the failure to have, not the quiet
+ * one.
  */
-const KNOWN_LANGUAGE_EXTENSIONS: ReadonlySet<string> = new Set([".py", ...Object.keys(GRAMMAR_SPECS)]);
+const NON_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
+  // markup and documentation
+  ".md",
+  ".mdx",
+  ".txt",
+  ".rst",
+  ".adoc",
+  ".html",
+  ".htm",
+  ".xml",
+  ".svg",
+  // serialized data
+  ".json",
+  ".json5",
+  ".jsonc",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".csv",
+  ".tsv",
+  ".ndjson",
+  // style sheets
+  ".css",
+  ".scss",
+  ".sass",
+  ".less",
+  // lockfiles and other config
+  ".lock",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".env",
+  ".editorconfig",
+  ".gitignore",
+  ".gitattributes",
+  // binary and media
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".ico",
+  ".webp",
+  ".pdf",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+  // build byproducts
+  ".map",
+  ".log",
+]);
 
 /**
- * The candidate paths `selectMutablePaths` above drops for want of an
- * operator set: a real, non-test source file in a language this project
- * already recognises (see KNOWN_LANGUAGE_EXTENSIONS) but MUTABLE_EXTENSIONS
- * has no rules for. A test file is not included here, because it was
- * never going to be mutated anyway, and neither is a config, markup, or
- * data file, for the reason KNOWN_LANGUAGE_EXTENSIONS' own comment gives.
+ * The candidate paths `selectMutablePaths` above drops that are not
+ * accounted for anywhere else: a real, non-test file whose extension is
+ * neither in MUTABLE_EXTENSIONS (an operator table exists) nor in
+ * NON_SOURCE_EXTENSIONS (known to never need one). A test file is not
+ * included here, because it was never going to be mutated anyway. A path
+ * with no extension at all (a Makefile, a Dockerfile, a bare "LICENSE")
+ * is also not included: extensionOf answers "" for one, and treating
+ * every extensionless file in a repository as an unmeasured language
+ * would be exactly the noise NON_SOURCE_EXTENSIONS exists to keep out,
+ * for files that are overwhelmingly build metadata or documentation, not
+ * program source, when they carry no extension to say otherwise.
  *
  * A caller that silently drops these reports a run over, say, an
- * all-Ruby diff exactly the way it reports a run that mutated everything
- * and found no survivors: nothing printed, exit 0. See ReportInput's
- * `unsupportedFiles` and exitCodeFor below for how this list turns that
- * silence into an unmeasured file, reported by name, with its own exit
- * code.
+ * all-Elixir diff exactly the way it reports a run that mutated
+ * everything and found no survivors: nothing printed, exit 0. See
+ * ReportInput's `unsupportedFiles` and exitCodeFor below for how this
+ * list turns that silence into an unmeasured file, reported by name, with
+ * its own exit code.
  */
 export function unsupportedLanguagePaths(paths: string[], rules?: RuleSet): string[] {
   return paths
-    .filter(
-      (path) =>
-        KNOWN_LANGUAGE_EXTENSIONS.has(extensionOf(path)) &&
-        !hasMutableExtension(path) &&
-        !classifyTestPath(path, rules).isTest,
-    )
+    .filter((path) => {
+      const ext = extensionOf(path);
+      if (ext === "") return false;
+      if (hasMutableExtension(path)) return false;
+      if (NON_SOURCE_EXTENSIONS.has(ext)) return false;
+      return !classifyTestPath(path, rules).isTest;
+    })
     .sort();
 }
 
@@ -381,10 +440,62 @@ export function planMutations(files: SourceFile[], options: PlanOptions = {}): M
  * synchronous and unwarmed on purpose, for callers (tests among them)
  * that already hold files in memory and have no `.py` file in the mix, or
  * warm some other way; this wrapper is for the ones that do not.
+ *
+ * `hooks/mutate.ts` no longer calls this directly: warming and planning
+ * together here cannot tell "grammar loaded" from "grammar failed to
+ * load, regex fallback in silent use" for any file in the batch, which is
+ * exactly the gap that let a Python docstring get mutated on a machine
+ * with no tree-sitter-python installed (see `warmAndSplitByGrammar`
+ * below, which the CLI uses instead). This export stays for a caller that
+ * only needs "warm, then plan" and does not write the result back to
+ * disk -- tests among them -- where a wrong mask costs nothing worse than
+ * a wrong assertion.
  */
 export async function planMutationsWarmed(files: SourceFile[], options: PlanOptions = {}): Promise<Mutation[]> {
   await warmLanguageServices(files.map((file) => file.path));
   return planMutations(files, options);
+}
+
+/**
+ * The paths, out of a list already known to be mutable (see
+ * `selectMutablePaths`), whose language service is a tree-sitter grammar
+ * that was attempted and failed to load -- `hadLanguageLoadFailure` in
+ * src/code-mask.ts says which. Must be called after warming, not before:
+ * an extension warming has not tried yet has not failed either, and
+ * calling this too early would wrongly call it safe.
+ *
+ * A path returned here has no trustworthy mask. `languageServiceFor`
+ * would answer it with the regex scanner -- the C-family scanner, applied
+ * to a language it was never written for -- and calling that mask correct
+ * is exactly the CRITICAL defect this function exists to close: four of
+ * seven mutations planned for a Python file landed inside its docstring
+ * once `tree-sitter-python`/`web-tree-sitter` were absent, and all four
+ * were reported "survived," corrupting the score along with the file on
+ * disk for the run's duration. See `warmAndSplitByGrammar` below for how
+ * the CLI keeps a path like this out of `planMutations` altogether.
+ */
+export function grammarUnavailablePaths(paths: readonly string[]): string[] {
+  return paths.filter((path) => hadLanguageLoadFailure(extensionOf(path))).sort();
+}
+
+/**
+ * Warms every mutable path's language service, then splits them into
+ * `trustworthy` (safe to hand to `planMutations`) and `grammarUnavailable`
+ * (must not be mutated at all: see `grammarUnavailablePaths` above). This
+ * is what `hooks/mutate.ts` calls instead of `planMutationsWarmed`,
+ * precisely so a file whose grammar failed to load is never read into
+ * `planMutations` in the first place -- there is no correct mutation to
+ * plan for it, only a wrong one using the wrong scanner, so the only safe
+ * answer is to never ask.
+ */
+export async function warmAndSplitByGrammar(
+  mutablePaths: readonly string[],
+): Promise<{ trustworthy: string[]; grammarUnavailable: string[] }> {
+  await warmLanguageServices(mutablePaths);
+  const grammarUnavailable = grammarUnavailablePaths(mutablePaths);
+  const failed = new Set(grammarUnavailable);
+  const trustworthy = mutablePaths.filter((path) => !failed.has(path));
+  return { trustworthy, grammarUnavailable };
 }
 
 /**
@@ -458,8 +569,9 @@ function isUnmeasured(result: MutationResult): boolean {
  * Exit code for a finished run:
  *   0  every attempted mutation got a verdict and none survived
  *   1  at least one mutation survived
- *   3  nothing survived, but at least one mutation never got a verdict, or
- *      at least one selected file's language had no operator set to try
+ *   3  nothing survived, but at least one mutation never got a verdict, at
+ *      least one selected file's language had no operator set to try, or
+ *      at least one selected file's grammar failed to load
  * A survivor wins over an unmeasured mutation or file, because a hole a
  * test left open is the more useful thing to report. Exit 3 exists so a
  * run that could not judge part of its work never reads the same as a run
@@ -469,12 +581,21 @@ function isUnmeasured(result: MutationResult): boolean {
  * level earlier: a file skipped before planning because this tool has no
  * operators for its language is exactly as unmeasured as a mutation that
  * timed out, and a run whose every candidate fell into that bucket must
- * not read as exit 0 either. The CLI owns exit 2, which means the run
- * could not happen at all.
+ * not read as exit 0 either. `grammarUnavailableFiles` (see
+ * grammarUnavailablePaths above) is the same principle again, one level
+ * earlier still: a file this tool does have an operator table for, but
+ * whose tree-sitter grammar failed to load, was never mutated at all --
+ * planning a mutation for it would have used the wrong scanner -- so it
+ * is exactly as unmeasured as the other two. The CLI owns exit 2, which
+ * means the run could not happen at all.
  */
-export function exitCodeFor(results: MutationResult[], unsupportedFiles: readonly string[] = []): 0 | 1 | 3 {
+export function exitCodeFor(
+  results: MutationResult[],
+  unsupportedFiles: readonly string[] = [],
+  grammarUnavailableFiles: readonly string[] = [],
+): 0 | 1 | 3 {
   if (results.some((result) => result.verdict === "survived")) return 1;
-  if (results.some(isUnmeasured) || unsupportedFiles.length > 0) return 3;
+  if (results.some(isUnmeasured) || unsupportedFiles.length > 0 || grammarUnavailableFiles.length > 0) return 3;
   return 0;
 }
 
@@ -494,15 +615,39 @@ export interface ReportInput {
    * and found no survivors. Absent or empty when every candidate had a
    * language this tool covers. */
   unsupportedFiles?: string[];
+  /** Candidate files skipped before planning because their tree-sitter
+   * grammar was attempted and failed to load: see grammarUnavailablePaths
+   * above. This tool does have an operator table for these -- unlike
+   * `unsupportedFiles` -- but no trustworthy mask to apply it through, so
+   * mutating one would use the regex scanner's C-family assumptions on a
+   * language it was never written for. Reported by name and folded into
+   * exit 3 for the same reason unsupportedFiles is: a run over files
+   * whose grammar this process could not load must not print the same
+   * report as a run that mutated everything and found no survivors.
+   * Absent or empty when every candidate's grammar loaded, or needed
+   * none. */
+  grammarUnavailableFiles?: string[];
 }
 
 function describeMutation(mutation: Mutation): string {
   return `${mutation.file}:${mutation.line}:${mutation.column}  ${mutation.operator}  ${mutation.original} to ${mutation.replacement}`;
 }
 
+/** Joins English clauses with a comma and a trailing "and", the way a
+ * person would say a list of two or more reasons out loud. Used only when
+ * a grammar-load failure joins the two existing unmeasured reasons below,
+ * so their two-reason phrasing (see formatReportText) never has to become
+ * a template that also has to cover three. */
+function joinClauses(parts: readonly string[]): string {
+  if (parts.length <= 1) return parts.join("");
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+}
+
 export function formatReportText(input: ReportInput): string {
   const summary = summarize(input.results);
   const unsupportedFiles = input.unsupportedFiles ?? [];
+  const grammarUnavailableFiles = input.grammarUnavailableFiles ?? [];
   const lines: string[] = [];
   lines.push(`Command: ${input.command}`);
   lines.push(`Baseline: passed in ${(input.baselineMs / 1000).toFixed(1)}s`);
@@ -552,9 +697,25 @@ export function formatReportText(input: ReportInput): string {
     for (const path of unsupportedFiles) lines.push(`  ${path}`);
   }
 
+  if (grammarUnavailableFiles.length > 0) {
+    lines.push("");
+    lines.push(`Grammar failed to load for these (${grammarUnavailableFiles.length}):`);
+    for (const path of grammarUnavailableFiles) lines.push(`  ${path}`);
+  }
+
   lines.push("");
   if (survivors.length > 0) {
     lines.push("A surviving mutation means no test noticed the code changed.");
+  } else if (grammarUnavailableFiles.length > 0) {
+    // Kept apart from the unmeasured/unsupported-only branches below so
+    // their exact wording, pinned by existing tests, never has to change
+    // just because a third reason joined the other two. This branch's own
+    // wording generalises across any mix of the three.
+    const clauses: string[] = [];
+    if (unmeasured.length > 0) clauses.push(`${unmeasured.length} never got a verdict`);
+    if (unsupportedFiles.length > 0) clauses.push(`${unsupportedFiles.length} file(s) had no operator set for their language`);
+    clauses.push(`${grammarUnavailableFiles.length} file(s) could not be trusted because their grammar failed to load`);
+    lines.push(`No mutation survived, but ${joinClauses(clauses)}: all of that is unmeasured (exit 3).`);
   } else if (unmeasured.length > 0 && unsupportedFiles.length > 0) {
     lines.push(
       `No mutation survived, but ${unmeasured.length} never got a verdict and ${unsupportedFiles.length} ` +
@@ -589,6 +750,7 @@ export function formatReportJson(input: ReportInput): string {
       summary: summarize(input.results),
       results: input.results,
       unsupportedFiles: input.unsupportedFiles ?? [],
+      grammarUnavailableFiles: input.grammarUnavailableFiles ?? [],
     },
     null,
     2,

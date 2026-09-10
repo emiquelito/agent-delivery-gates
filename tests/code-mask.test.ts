@@ -12,6 +12,8 @@ import {
   languageServiceFor,
   hadUnwarmedLanguageAccess,
   resetUnwarmedLanguageAccess,
+  hadLanguageLoadFailure,
+  warmLanguageServices,
 } from "../src/code-mask.ts";
 
 // --- codeMask, moved here with src/mutate.ts's scanner -----------------------
@@ -209,4 +211,46 @@ test("resetUnwarmedLanguageAccess works normally again once the previous batch's
   // A fresh, non-overlapping batch: no re-entrancy, so this must not throw.
   resetUnwarmedLanguageAccess();
   assert.deepEqual(hadUnwarmedLanguageAccess(), [], "a batch that touched nothing reports clean");
+});
+
+// --- hadLanguageLoadFailure: distinct from "never warmed" -------------------
+//
+// The CRITICAL defect a reviewer found in `adg mutate`: hadUnwarmedLanguageAccess
+// only ever answers "a caller asked for this extension's mask before
+// warming ran at all." Once `warmLanguageServices` has run for an
+// extension -- successfully or not -- resolvedServices holds an entry for
+// it, and languageServiceFor's cache hit returns straight through without
+// touching hadUnwarmedLanguageAccess's flag at all. That leaves "warmed,
+// and the grammar loaded" and "warmed, and the grammar failed to load, the
+// regex fallback is now permanent for this extension" looking identical to
+// any caller that only checks hadUnwarmedLanguageAccess -- which is
+// exactly how a Python file whose grammar could not load got the regex
+// scanner's docstring-blind mask with nothing to say a better one had ever
+// been attempted and failed. hadLanguageLoadFailure answers that second
+// question instead, and does not require calling it inside any
+// reset/read batch the way the unwarmed pair does, because it is not a
+// per-batch fact: once a load has failed for this process, it stays
+// failed.
+//
+// This process's real node_modules has every tree-sitter package
+// installed (this repository's own devDependencies), so nothing here can
+// make an actual load fail without the same node_modules surgery
+// tests/mutate-cli.test.ts does in a subprocess. What is pinned here is
+// the ordinary case this function must get right too: an extension whose
+// grammar loaded, or one nothing has ever asked about, reports false.
+
+test("hadLanguageLoadFailure is false for an extension nothing has asked about", () => {
+  assert.equal(hadLanguageLoadFailure(".this-extension-does-not-exist"), false);
+});
+
+test("hadLanguageLoadFailure is false for an extension whose grammar loaded successfully", async () => {
+  await warmLanguageServices(["src/thing.rs"]);
+  assert.equal(hadLanguageLoadFailure(".rs"), false, "the real tree-sitter-rust grammar loaded in this process");
+});
+
+test("hadLanguageLoadFailure is false for an extension with no tree-sitter service at all", () => {
+  // .js is never in TREE_SITTER_LOADERS: it was never attempted, so it
+  // never failed, the same distinction unwarmedExtensions draws for
+  // languageServiceFor itself.
+  assert.equal(hadLanguageLoadFailure(".js"), false);
 });

@@ -437,6 +437,33 @@ const TREE_SITTER_LOADERS: Readonly<Record<string, () => Promise<LanguageService
 // answer once and for all for this process, not retried on every call.
 const resolvedServices = new Map<string, LanguageService>();
 
+// Extensions whose tree-sitter grammar was actually attempted, through
+// `warmLanguageServices`, and failed to load: the devDependency that ships
+// its grammar (tree-sitter-python, web-tree-sitter, or one of the six
+// packages src/tree-sitter-grammars.ts names) is not installed -- an
+// ordinary adopter's `npm install`, since none of those packages are a
+// runtime dependency of this one -- or the wasm file itself did not load.
+//
+// This is a different fact from `resolvedServices` holding
+// `regexLanguageService` for that extension: that map also holds
+// `regexLanguageService` for an extension that loaded its grammar
+// perfectly and simply has no tree-sitter loader at all (every extension
+// outside TREE_SITTER_LOADERS). Reading resolvedServices alone cannot
+// tell "this language has no better scanner" apart from "this language
+// has a better scanner and it failed to load this time" -- and a caller
+// that cannot tell them apart cannot tell a Python file whose docstring
+// mask is trustworthy from one where it silently is not. That gap is what
+// let `adg mutate` rewrite a docstring's True/False and and/or on any
+// machine that never installed tree-sitter-python: the fallback looked
+// identical to "no tree-sitter service for this extension exists," which
+// mutate.ts already knew was safe.
+//
+// Permanent for the life of the process, exactly like resolvedServices
+// above and for the same reason: the load is tried once per extension, and
+// a devDependency that failed to import once is not going to start
+// importing successfully later in the same run.
+const grammarLoadFailures = new Set<string>();
+
 function extensionOf(path: string): string {
   const lower = path.toLowerCase();
   const dot = lower.lastIndexOf(".");
@@ -455,12 +482,34 @@ async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
       // No web-tree-sitter, no grammar package, or the wasm grammar
       // itself failed to load: on any of those, a file of this
       // extension gets exactly the scanner it always got, and nothing
-      // above this catch throws.
+      // above this catch throws. Recorded in grammarLoadFailures so a
+      // caller that cares -- src/mutate.ts, which writes to the file this
+      // mask decides where to cut -- can refuse to trust this extension's
+      // mask instead of silently mutating with the wrong scanner.
       service = regexLanguageService;
+      grammarLoadFailures.add(ext);
     }
   }
   resolvedServices.set(ext, service);
   return service;
+}
+
+/**
+ * True when `ext`'s tree-sitter grammar was attempted, through
+ * `warmLanguageServices`, and failed to load for this process: see
+ * `grammarLoadFailures` above. False both for an extension never attempted
+ * yet (including one with no tree-sitter service at all, which was never
+ * going to be attempted) and for one that loaded successfully -- so this
+ * answers a different question than `hadUnwarmedLanguageAccess` below.
+ * That one says a caller asked for a mask before warming ran at all, which
+ * a later warm call can still fix. This one says warming ran, was given
+ * the chance to succeed, and did not: no later call in this process is
+ * going to change the answer. A caller that writes to the files it masks
+ * needs to check this one, after warming, before trusting what it gets
+ * back for a registered extension.
+ */
+export function hadLanguageLoadFailure(ext: string): boolean {
+  return grammarLoadFailures.has(ext);
 }
 
 // Records a fact `languageServiceFor` cannot report through its own return
