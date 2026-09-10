@@ -72,6 +72,31 @@ function markNode(node: TSNode, kinds: Uint8Array): void {
     }
     return;
   }
+  if (node.type === "format_specifier") {
+    // An f-string replacement field's `:...` suffix, e.g. the `>` fill
+    // character and width digits in `f"{x:>10}"`, or `.2f` in `f"{x:.2f}"`.
+    // Most of that suffix is static text tree-sitter-python does not
+    // break out into its own child node at all -- it is just part of
+    // format_specifier's own span -- so leaving format_specifier
+    // unhandled here left it CODE by the same default this file's own
+    // generic recursion gives everything, and a fake format spec like
+    // `f"{x:DANGEROUS}"` read straight through the mask. The one part of
+    // a format specifier that is real code is a nested replacement field
+    // inside it, `{width}` in `f"{x:>{width}}"`, tree-sitter's own
+    // `format_expression`, which stays reopened the same way a string's
+    // own `interpolation` child does.
+    fill(kinds, node.startIndex, node.endIndex, LITERAL);
+    for (const child of node.children) {
+      if (!child) continue;
+      if (child.type === "format_expression") {
+        fill(kinds, child.startIndex, child.endIndex, CODE);
+        markNode(child, kinds);
+      }
+      // The `:` itself and any other child stay LITERAL from the
+      // whole-span fill above.
+    }
+    return;
+  }
   for (const child of node.children) {
     if (child) markNode(child, kinds);
   }

@@ -1,44 +1,95 @@
 // Closes the class, not just the instances.
 //
-// Two node-type omissions have been found in this project's config by two
-// separate rounds of review: Ruby's `bare_string` (a %W[] word's own
-// interpolation, masked away as if it were plain text -- see Finding 1 of
-// the round this test was added in) and, before that, Rust's doc-comment
-// marker nodes. Both were caught by a person reading a grammar's own
-// node-types.json by hand, once by an earlier builder finding it by
-// chance and once by a reviewer going looking on purpose. A hand-written
-// list checked by hand will keep drifting: nothing forced anyone to
-// notice a seventh, unlisted node type showing up the day a grammar
-// package is upgraded and adds one.
+// Three node-type omissions have now been found in this project's config,
+// across three separate rounds of review: Ruby's `bare_string` (a %W[]
+// word's own interpolation, masked away as if it were plain text), Rust's
+// doc-comment marker nodes, and Ruby's `delimited_symbol` (the interpolated
+// `:"..."` symbol form, entirely unmasked). The first version of this file
+// closed the first two by walking node-types.json's own children lists
+// outward from whatever was already in a grammar's literalTypes and
+// contentTypes, and asserting every named type it reached was accounted
+// for. That caught a type reachable *through* something already
+// configured. It could not catch a type that was never a child of
+// anything else at all.
 //
-// This file reads each grammar's own node-types.json -- the same file
-// src/tree-sitter-grammars.ts's own header says every node type name here
-// was read out of -- and asserts that src/tree-sitter-grammars.ts's
-// config for that grammar accounts for every named node type reachable,
-// by node-types.json's own children lists, from that grammar's
-// literalTypes or contentTypes. "Accounts for" means one of three things,
-// and the test cannot tell which one from the config alone, which is why
-// EXCLUSIONS below exists as its own explicit list: a type is in
-// literalTypes (a container blanked wholesale, and itself walked further),
-// in contentTypes (plain text, blanked and not walked further), or in this
-// file's own EXCLUSIONS for that language -- a type considered and left
-// out on purpose, because it is a real, code-bearing construct (most
-// commonly an interpolation) that the generic walk in
-// src/tree-sitter-language-service.ts is supposed to reopen as code by
-// leaving it unlisted. A type in none of the three fails the test, the
-// same way `bare_string`'s own interpolation child would have failed it
-// had this test existed before Finding 1.
+// `delimited_symbol` is exactly that: nothing in tree-sitter-ruby's own
+// node-types.json ever lists it as a named child of any other type. Nor
+// does anything list Ruby's own `comment`, or Rust's `line_comment`, or
+// any grammar's own root literal type. A quick, damning proof: removing
+// the top-level comment type from any of this project's six grammar
+// configs in turn, under the old version of this file, left every single
+// one of those six tests passing. The walk simply never visited the type
+// that was missing, because nothing seeded it into the search in the first
+// place. The one proof-of-failure test the old file shipped with only ever
+// removed `bare_string`, which happens to be reachable as a child of
+// `string_array` -- it did not generalise, and could not have caught the
+// bug that was hiding in the same file at the same time.
 //
-// What this deliberately does not check: anything about the *rest* of a
-// grammar, or about a node type's own grandchildren once that node type is
-// itself in EXCLUSIONS. A type in EXCLUSIONS is real code -- an
-// interpolation's expression -- and what that expression can contain is
-// the entire rest of the language's grammar, unbounded and beside the
-// point; the walk already reopens it and recurses through
-// src/tree-sitter-language-service.ts's own markNode, exercised by each
-// language's differential corpus instead. This test's job stops at naming
-// every type that sits *inside* a literal container and deciding what
-// becomes of it, not at re-verifying the whole grammar.
+// This version replaces that walk with a flat check: every named,
+// concrete type a grammar's own node-types.json says it can produce --
+// full stop, not "every type reachable from configuration" -- must be
+// classified into exactly one of:
+//
+//   - literalTypes or contentTypes (src/tree-sitter-grammars.ts's own
+//     config: a literal container, or plain text found inside one)
+//   - EXCLUSIONS (a real, code-bearing construct -- an interpolation, most
+//     commonly -- deliberately left out so the walk reopens it as code)
+//   - CODE_TYPES (ordinary code with nothing to do with a literal at all:
+//     a statement, an expression, a pattern, a declaration)
+//
+// A type in none of the four fails the test. Nothing is exempt by being
+// unreachable from what is already configured, because nothing here is
+// reached that way any more: this file no longer walks node-types.json's
+// children lists outward from a seed set. It reads every entry the file
+// has and requires all of them to be spoken for.
+//
+// Why not stop at "everything reachable from a literal container", fixed
+// to also seed from a grammar's own root type? Because reachability
+// through node-types.json's children lists cannot see `delimited_symbol`
+// or `comment` at all, seeded from anywhere. Both are top-level
+// alternatives inside a large "what can an expression be" or "what is an
+// extra" choice, not a fixed field of some other rule, and neither shows
+// up in any entry's own children.types anywhere in the file (checked
+// directly against tree-sitter-ruby's own node-types.json: zero entries
+// list `comment` as a child, zero list `delimited_symbol`). A grammar's
+// node-types.json simply does not encode "how would a real parse ever
+// produce this node" as a graph anyone can walk; it only encodes fixed
+// parent/child field structures. There is no narrower graph-based rule that
+// is still exhaustive for this. The only exhaustive option is the flat
+// one this file now uses: read the whole list, require every entry in it
+// to be spoken for.
+//
+// The trade-off that buys: CODE_TYPES is long -- most of a grammar is
+// ordinary statements, expressions, and patterns that have nothing to do
+// with a string or a comment, and ends up listed here anyway, once per
+// grammar, so that "every named type is accounted for" actually means
+// every one, not "every one this file's author found interesting". A
+// grammar upgrade that adds a node type shows up as newly unaccounted
+// here, forcing a deliberate decision -- literal, content, exclusion, or
+// ordinary code -- instead of silently taking the default. That is what
+// "drift-proof" costs.
+//
+// Every CODE_TYPES entry was reviewed before being added, not just copied
+// from a diff: each grammar's own missing list was scanned by name for
+// anything that could plausibly be text-bearing (string, char, comment,
+// symbol, text, doc, quote, escape, interpolation, literal, heredoc,
+// nowdoc, template, raw, region, pragma, label, tag, regex, pattern, and
+// more), and every hit was inspected against the grammar's own
+// node-types.json by hand, not dismissed by its name alone -- the reviewer
+// finding that started this round said as much: "Be careful with any
+// filter based on a type's NAME. `delimited_symbol` contains neither
+// 'string' nor 'comment', which is precisely how it was missed." That
+// review is what actually found this round's fixes, beyond delimited_symbol
+// itself: Ruby's `regex` and `chained_string` (same child structure as
+// `string`), Ruby's `uninterpreted` (`__END__` trailing data, entirely
+// unmasked), Ruby's `character` (`?a`), Rust's `char_literal`, both
+// grammars' `shebang`/`shebang_directive`, PHP's `text_interpolation`
+// (raw HTML outside `<?php ?>`, entirely unmasked) and its own
+// `shell_command_expression` (a backtick command, same structure as
+// encapsed_string), and C#'s `interpolation_format_clause` and
+// `preproc_arg` (a `#region` label's own free text, entirely unmasked).
+// Every one of those is a real fix in src/tree-sitter-grammars.ts, not
+// just a new line in this file's own accounting.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -49,16 +100,28 @@ import { GRAMMAR_SPECS, type GrammarSpec } from "../src/tree-sitter-grammars.ts"
 import type { GrammarConfig } from "../src/tree-sitter-language-service.ts";
 
 /** One named node type entry from a grammar's own node-types.json, pared
- * down to what this file reads: its own type name and the named types of
- * its own direct children, if any. node-types.json also carries anonymous
+ * down to what this file reads: its own type name, whether it is a real
+ * concrete node type or a supertype alias, and (unused now, kept only
+ * because loadNodeTypes's return type still describes the file's actual
+ * structure) its own named children. node-types.json also carries anonymous
  * (unnamed) type entries under the same "type" string for some grammars
  * (PHP's own `string` keyword token alongside its named `string` node,
- * for instance) -- those are filtered out when this file indexes the
- * file by type name, the same way markNode itself only ever looks at
- * `child.isNamed` children. */
+ * for instance) -- those are filtered out by `named`, the same way
+ * markNode itself only ever looks at `child.isNamed` children.
+ *
+ * `subtypes` marks a supertype alias -- tree-sitter's own grouping node
+ * for a choice rule, such as Rust's `_literal` (grouping boolean_literal,
+ * char_literal, string_literal, and so on) or C#'s `literal`. A supertype
+ * entry is never itself the `.type` of a real produced node; a real parse
+ * always shows the concrete alternative instead. Entries with `subtypes`
+ * are excluded from this file's own accounting for exactly that reason:
+ * asking whether `_literal` itself is "classified" is a category error,
+ * since no node ever has that type at runtime.
+ */
 interface NodeTypeEntry {
   readonly type: string;
   readonly named?: boolean;
+  readonly subtypes?: ReadonlyArray<{ readonly type: string }>;
   readonly children?: { readonly types?: ReadonlyArray<{ readonly type: string; readonly named?: boolean }> };
 }
 
@@ -76,40 +139,291 @@ const NODE_TYPES_SUBPATH: Readonly<Record<string, string>> = {
   ".go": "src/node-types.json",
   ".java": "src/node-types.json",
   ".cs": "src/node-types.json",
+  ".py": "src/node-types.json",
 };
 
 /**
- * Every named node type this file has confirmed is reachable, through
- * node-types.json's own children lists, from a literal container in that
- * language's config, and that is deliberately left out of both
- * literalTypes and contentTypes -- a real, code-bearing construct the
- * generic walk is supposed to reopen as code by leaving it unlisted, not
- * an oversight. Each entry names the actual finding that put it here, so
- * a future change to this list carries its own reasoning instead of a
- * bare type name:
+ * Every named node type deliberately left out of both literalTypes and
+ * contentTypes because it is a real, code-bearing construct -- most
+ * commonly an interpolation -- that the generic walk in
+ * src/tree-sitter-language-service.ts is supposed to reopen as code by
+ * leaving it unlisted, not an oversight. Each entry names the actual
+ * finding that put it here:
  *
- *   - ruby "interpolation": `#{...}` inside a string, a heredoc, or (since
- *     Finding 1 of this round) a %W[]/%I[] word/symbol array.
+ *   - ruby "interpolation": `#{...}` inside a string, a heredoc, a
+ *     %W[]/%I[] word or symbol array, `delimited_symbol`, or `regex`.
+ *   - ruby "hash_key_symbol" and "simple_symbol" (Finding 3c and its
+ *     generalisation): a hash key (`assert_this:`) or a plain symbol
+ *     (`:foo`) is a leaf, structurally an identifier, not text a diff
+ *     author could hide anything inside -- masking it would flag
+ *     ordinary Ruby syntax as though it were free text. Left unlisted on
+ *     purpose, the same as an interpolation, so it stays code.
+ *   - ruby "heredoc_beginning": a heredoc's own opening tag
+ *     (`<<~SQL`), a sibling of heredoc_body, not a child of it.
+ *     It is the tag's name, not content, and staying visible as code is
+ *     correct, the same reason PHP's heredoc_start/heredoc_end (nested
+ *     inside their own heredoc, unlike Ruby's) are content types instead:
+ *     different node structure, same non-content role.
  *   - java "string_interpolation": `\{...}` inside a `STR."..."` string
- *     template (see Finding 5 of this round, and src/tree-sitter-grammars.ts's
- *     corrected comment on the java entry -- this is not "Java has none").
+ *     template.
  *   - csharp "interpolation": `{...}` inside a `$"..."` interpolated
  *     string.
+ *   - csharp "interpolation_alignment_clause": the `,10` alignment clause
+ *     in `{x,10}` can itself hold an arbitrary expression, per the
+ *     grammar's own children list -- real code, not a format string.
+ *   - csharp "interpolation_brace": the interpolation's own `{`/`}`,
+ *     oddly given a real node type here instead of being anonymous
+ *     punctuation like every other brace in this file. A leaf with
+ *     nothing inside it; leaving it as code is harmless.
  *   - php's five: `$var`, `$obj->prop`, `$arr[key]`, and `${...}`/`{$...}`
  *     forms all parse to one of these five node types inside a
- *     string/encapsed_string/heredoc_body -- "expression" is PHP's own
- *     supertype name covering the general `{$expr}` form, and the other
- *     four are its more specific unwrapped forms ($var, ->member,
- *     [subscript], and a dynamic ($$) variable name).
+ *     string/encapsed_string/heredoc_body/shell_command_expression --
+ *     "expression" is PHP's own supertype name covering the general
+ *     `{$expr}` form, and the other four are its more specific unwrapped
+ *     forms ($var, ->member, [subscript], and a dynamic ($$) variable
+ *     name).
  */
 const EXCLUSIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   ".rs": new Set(),
-  ".rb": new Set(["interpolation"]),
+  ".rb": new Set(["interpolation", "hash_key_symbol", "simple_symbol", "heredoc_beginning"]),
   ".php": new Set(["expression", "variable_name", "member_access_expression", "subscript_expression", "dynamic_variable_name"]),
   ".go": new Set(),
   ".java": new Set(["string_interpolation"]),
-  ".cs": new Set(["interpolation"]),
+  ".cs": new Set(["interpolation", "interpolation_alignment_clause", "interpolation_brace"]),
 };
+
+/**
+ * Every other named, concrete type each grammar can produce: ordinary
+ * statements, expressions, declarations, and patterns that have nothing to
+ * do with a literal or a comment, generated once from that grammar's own
+ * node-types.json (see this file's header for the review process each
+ * list went through) and pinned here so a *new* type showing up in a
+ * grammar upgrade fails this file instead of silently landing in neither
+ * bucket. This is the "obvious, verbose" half of the exhaustive approach
+ * this file's header discusses: most of each list below is exactly as
+ * uninteresting as it looks, and that is the point -- nothing here was
+ * worth a per-type comment, but every one of them still had to be looked
+ * at once to end up here instead of in literalTypes, contentTypes, or
+ * EXCLUSIONS.
+ */
+const CODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
+  ".rs": new Set([
+    "abstract_type", "arguments", "array_expression", "array_type", "assignment_expression", "associated_type",
+    "async_block", "attribute", "attribute_item", "await_expression", "base_field_initializer", "binary_expression",
+    "block", "boolean_literal", "bounded_type", "bracketed_type", "break_expression", "call_expression",
+    "captured_pattern", "closure_expression", "closure_parameters", "compound_assignment_expr", "const_block",
+    "const_item", "const_parameter", "continue_expression", "crate", "declaration_list", "dynamic_type",
+    "else_clause", "empty_statement", "enum_item", "enum_variant", "enum_variant_list", "expression_statement",
+    "extern_crate_declaration", "extern_modifier", "field_declaration", "field_declaration_list", "field_expression",
+    "field_identifier", "field_initializer", "field_initializer_list", "field_pattern", "float_literal",
+    "for_expression", "for_lifetimes", "foreign_mod_item", "fragment_specifier", "function_item",
+    "function_modifiers", "function_signature_item", "function_type", "gen_block", "generic_function",
+    "generic_pattern", "generic_type", "generic_type_with_turbofish", "higher_ranked_trait_bound", "identifier",
+    "if_expression", "impl_item", "index_expression", "inner_attribute_item", "integer_literal", "label",
+    "let_chain", "let_condition", "let_declaration", "lifetime", "lifetime_parameter", "loop_expression",
+    "macro_definition", "macro_invocation", "macro_rule", "match_arm", "match_block", "match_expression",
+    "match_pattern", "metavariable", "mod_item", "mut_pattern", "mutable_specifier", "negative_literal",
+    "never_type", "or_pattern", "ordered_field_declaration_list", "parameter", "parameters",
+    "parenthesized_expression", "pointer_type", "primitive_type", "qualified_type", "range_expression",
+    "range_pattern", "ref_pattern", "reference_expression", "reference_pattern", "reference_type",
+    "remaining_field_pattern", "removed_trait_bound", "return_expression", "scoped_identifier",
+    "scoped_type_identifier", "scoped_use_list", "self", "self_parameter", "shorthand_field_identifier",
+    "shorthand_field_initializer", "slice_pattern", "source_file", "static_item", "struct_expression",
+    "struct_item", "struct_pattern", "super", "token_binding_pattern", "token_repetition",
+    "token_repetition_pattern", "token_tree", "token_tree_pattern", "trait_bounds", "trait_item", "try_block",
+    "try_expression", "tuple_expression", "tuple_pattern", "tuple_struct_pattern", "tuple_type", "type_arguments",
+    "type_binding", "type_cast_expression", "type_identifier", "type_item", "type_parameter", "type_parameters",
+    "unary_expression", "union_item", "unit_expression", "unit_type", "unsafe_block", "use_as_clause",
+    "use_bounds", "use_declaration", "use_list", "use_wildcard", "variadic_parameter", "visibility_modifier",
+    "where_clause", "where_predicate", "while_expression", "yield_expression",
+  ]),
+  ".rb": new Set([
+    "alias", "alternative_pattern", "argument_list", "array", "array_pattern", "as_pattern", "assignment",
+    "begin", "begin_block", "binary", "block", "block_argument", "block_body", "block_parameter",
+    "block_parameters", "body_statement", "break", "call", "case", "case_match", "class", "class_variable",
+    "complex", "conditional", "constant", "destructured_left_assignment", "destructured_parameter", "do",
+    "do_block", "element_reference", "else", "elsif", "empty_statement", "encoding", "end_block", "ensure",
+    "exception_variable", "exceptions", "expression_reference_pattern", "false", "file", "find_pattern",
+    "float", "for", "forward_argument", "forward_parameter", "global_variable", "hash", "hash_pattern",
+    "hash_splat_argument", "hash_splat_nil", "hash_splat_parameter", "identifier", "if", "if_guard",
+    "if_modifier", "in", "in_clause", "instance_variable", "integer", "keyword_parameter", "keyword_pattern",
+    "lambda", "lambda_parameters", "left_assignment_list", "line", "match_pattern", "method",
+    "method_parameters", "module", "next", "nil", "operator", "operator_assignment", "optional_parameter",
+    "pair", "parenthesized_pattern", "parenthesized_statements", "pattern", "program", "range", "rational",
+    "redo", "rescue", "rescue_modifier", "rest_assignment", "retry", "return", "right_assignment_list",
+    "scope_resolution", "self", "setter", "singleton_class", "singleton_method", "splat_argument",
+    "splat_parameter", "subshell", "super", "superclass", "test_pattern", "then", "true", "unary", "undef",
+    "unless", "unless_guard", "unless_modifier", "until", "until_modifier", "variable_reference_pattern",
+    "when", "while", "while_modifier", "yield",
+  ]),
+  ".php": new Set([
+    "abstract_modifier", "anonymous_class", "anonymous_function", "anonymous_function_use_clause", "argument",
+    "arguments", "array_creation_expression", "array_element_initializer", "arrow_function", "assignment_expression",
+    "attribute", "attribute_group", "attribute_list", "augmented_assignment_expression", "base_clause",
+    "binary_expression", "boolean", "bottom_type", "break_statement", "by_ref", "case_statement",
+    "cast_expression", "cast_type", "catch_clause", "class_constant_access_expression", "class_declaration",
+    "class_interface_clause", "clone_expression", "colon_block", "compound_statement", "conditional_expression",
+    "const_declaration", "const_element", "continue_statement", "declaration_list", "declare_directive",
+    "declare_statement", "default_statement", "disjunctive_normal_form_type", "do_statement", "echo_statement",
+    "else_clause", "else_if_clause", "empty_statement", "enum_case", "enum_declaration", "enum_declaration_list",
+    "error_suppression_expression", "exit_statement", "expression_statement", "final_modifier", "finally_clause",
+    "float", "for_statement", "foreach_statement", "formal_parameters", "function_call_expression",
+    "function_definition", "function_static_declaration", "global_declaration", "goto_statement", "if_statement",
+    "include_expression", "include_once_expression", "integer", "interface_declaration", "intersection_type",
+    "list_literal", "match_block", "match_condition_list", "match_conditional_expression", "match_default_expression",
+    "match_expression", "member_call_expression", "method_declaration", "name", "named_label_statement",
+    "named_type", "namespace_definition", "namespace_name", "namespace_use_clause", "namespace_use_declaration",
+    "namespace_use_group", "null", "nullsafe_member_access_expression", "nullsafe_member_call_expression",
+    "object_creation_expression", "operation", "optional_type", "pair", "parenthesized_expression",
+    "primitive_type", "print_intrinsic", "program", "property_declaration", "property_element", "property_hook",
+    "property_hook_list", "property_promotion_parameter", "qualified_name", "readonly_modifier",
+    "reference_assignment_expression", "reference_modifier", "relative_name", "relative_scope",
+    "require_expression", "require_once_expression", "return_statement", "scoped_call_expression",
+    "scoped_property_access_expression", "sequence_expression", "simple_parameter", "static_modifier",
+    "static_variable_declaration", "switch_block", "switch_statement", "throw_expression", "trait_declaration",
+    "try_statement", "type_list", "unary_op_expression", "union_type", "unset_statement", "update_expression",
+    "use_as_clause", "use_declaration", "use_instead_of_clause", "use_list", "var_modifier", "variadic_parameter",
+    "variadic_placeholder", "variadic_unpacking", "visibility_modifier", "while_statement", "yield_expression",
+  ]),
+  ".go": new Set([
+    "argument_list", "array_type", "assignment_statement", "binary_expression", "blank_identifier", "block",
+    "break_statement", "call_expression", "channel_type", "communication_case", "composite_literal",
+    "const_declaration", "const_spec", "continue_statement", "dec_statement", "default_case", "defer_statement",
+    "dot", "empty_statement", "expression_case", "expression_list", "expression_statement",
+    "expression_switch_statement", "fallthrough_statement", "false", "field_declaration", "field_declaration_list",
+    "field_identifier", "float_literal", "for_clause", "for_statement", "func_literal", "function_declaration",
+    "function_type", "generic_type", "go_statement", "goto_statement", "identifier", "if_statement",
+    "imaginary_literal", "implicit_length_array_type", "import_declaration", "import_spec", "import_spec_list",
+    "inc_statement", "index_expression", "int_literal", "interface_type", "iota", "keyed_element", "label_name",
+    "labeled_statement", "literal_element", "literal_value", "map_type", "method_declaration", "method_elem",
+    "negated_type", "nil", "package_clause", "package_identifier", "parameter_declaration", "parameter_list",
+    "parenthesized_expression", "parenthesized_type", "pointer_type", "qualified_type", "range_clause",
+    "receive_statement", "return_statement", "select_statement", "selector_expression", "send_statement",
+    "short_var_declaration", "slice_expression", "slice_type", "source_file", "statement_list", "struct_type",
+    "true", "type_alias", "type_arguments", "type_assertion_expression", "type_case", "type_constraint",
+    "type_conversion_expression", "type_declaration", "type_elem", "type_identifier", "type_instantiation_expression",
+    "type_parameter_declaration", "type_parameter_list", "type_spec", "type_switch_statement", "unary_expression",
+    "var_declaration", "var_spec", "var_spec_list", "variadic_argument", "variadic_parameter_declaration",
+  ]),
+  ".java": new Set([
+    "annotated_type", "annotation", "annotation_argument_list", "annotation_type_body", "annotation_type_declaration",
+    "annotation_type_element_declaration", "argument_list", "array_access", "array_creation_expression",
+    "array_initializer", "array_type", "assert_statement", "assignment_expression", "asterisk", "binary_expression",
+    "binary_integer_literal", "block", "boolean_type", "break_statement", "cast_expression", "catch_clause",
+    "catch_formal_parameter", "catch_type", "class_body", "class_declaration", "class_literal",
+    "compact_constructor_declaration", "constant_declaration", "constructor_body", "constructor_declaration",
+    "continue_statement", "decimal_floating_point_literal", "decimal_integer_literal", "dimensions",
+    "dimensions_expr", "do_statement", "element_value_array_initializer", "element_value_pair",
+    "enhanced_for_statement", "enum_body", "enum_body_declarations", "enum_constant", "enum_declaration",
+    "explicit_constructor_invocation", "exports_module_directive", "expression_statement", "extends_interfaces",
+    "false", "field_access", "field_declaration", "finally_clause", "floating_point_type", "for_statement",
+    "formal_parameter", "formal_parameters", "generic_type", "guard", "hex_floating_point_literal",
+    "hex_integer_literal", "identifier", "if_statement", "import_declaration", "inferred_parameters",
+    "instanceof_expression", "integral_type", "interface_body", "interface_declaration", "labeled_statement",
+    "lambda_expression", "local_variable_declaration", "marker_annotation", "method_declaration",
+    "method_invocation", "method_reference", "modifiers", "module_body", "module_declaration", "null_literal",
+    "object_creation_expression", "octal_integer_literal", "opens_module_directive", "package_declaration",
+    "parenthesized_expression", "pattern", "permits", "program", "provides_module_directive", "receiver_parameter",
+    "record_declaration", "record_pattern", "record_pattern_body", "record_pattern_component", "requires_modifier",
+    "requires_module_directive", "resource", "resource_specification", "return_statement", "scoped_identifier",
+    "scoped_type_identifier", "spread_parameter", "static_initializer", "super", "super_interfaces", "superclass",
+    "switch_block", "switch_block_statement_group", "switch_expression", "switch_label", "switch_rule",
+    "synchronized_statement", "template_expression", "ternary_expression", "this", "throw_statement", "throws",
+    "true", "try_statement", "try_with_resources_statement", "type_arguments", "type_bound", "type_identifier",
+    "type_list", "type_parameter", "type_parameters", "type_pattern", "unary_expression", "underscore_pattern",
+    "update_expression", "uses_module_directive", "variable_declarator", "void_type", "while_statement",
+    "wildcard", "yield_statement",
+  ]),
+  ".cs": new Set([
+    "accessor_declaration", "accessor_list", "alias_qualified_name", "and_pattern", "anonymous_method_expression",
+    "anonymous_object_creation_expression", "argument", "argument_list", "array_creation_expression",
+    "array_rank_specifier", "array_type", "arrow_expression_clause", "as_expression", "assignment_expression",
+    "attribute", "attribute_argument", "attribute_argument_list", "attribute_list", "attribute_target_specifier",
+    "await_expression", "base_list", "binary_expression", "block", "boolean_literal", "bracketed_argument_list",
+    "bracketed_parameter_list", "break_statement", "calling_convention", "cast_expression", "catch_clause",
+    "catch_declaration", "catch_filter_clause", "checked_expression", "checked_statement", "class_declaration",
+    "collection_element", "collection_expression", "compilation_unit", "conditional_access_expression",
+    "conditional_expression", "constant_pattern", "constructor_constraint", "constructor_declaration",
+    "constructor_initializer", "continue_statement", "conversion_operator_declaration", "declaration_expression",
+    "declaration_list", "declaration_pattern", "default_expression", "delegate_declaration",
+    "destructor_declaration", "discard", "do_statement", "element_access_expression", "element_binding_expression",
+    "empty_statement", "enum_declaration", "enum_member_declaration", "enum_member_declaration_list",
+    "event_declaration", "event_field_declaration", "explicit_interface_specifier", "expression_element",
+    "expression_statement", "extern_alias_directive", "field_declaration", "file_scoped_namespace_declaration",
+    "finally_clause", "fixed_statement", "for_statement", "foreach_statement", "from_clause",
+    "function_pointer_parameter", "function_pointer_type", "generic_name", "global_attribute", "global_statement",
+    "goto_statement", "group_clause", "identifier", "if_statement", "implicit_array_creation_expression",
+    "implicit_object_creation_expression", "implicit_parameter", "implicit_stackalloc_expression", "implicit_type",
+    "indexer_declaration", "initializer_expression", "integer_literal", "interface_declaration",
+    "invocation_expression", "is_expression", "is_pattern_expression", "join_clause", "join_into_clause",
+    "labeled_statement", "lambda_expression", "let_clause", "list_pattern", "local_declaration_statement",
+    "local_function_statement", "lock_statement", "makeref_expression", "member_access_expression",
+    "member_binding_expression", "method_declaration", "modifier", "namespace_declaration", "negated_pattern",
+    "null_literal", "nullable_type", "object_creation_expression", "operator_declaration", "or_pattern",
+    "order_by_clause", "parameter", "parameter_list", "parenthesized_expression", "parenthesized_pattern",
+    "parenthesized_variable_designation", "pointer_type", "positional_pattern_clause", "postfix_unary_expression",
+    "predefined_type", "prefix_unary_expression", "preproc_define", "preproc_elif", "preproc_else",
+    "preproc_endregion", "preproc_error", "preproc_if", "preproc_if_in_attribute_list", "preproc_line",
+    "preproc_nullable", "preproc_pragma", "preproc_region", "preproc_undef", "preproc_warning",
+    "primary_constructor_base_type", "property_declaration", "property_pattern_clause", "qualified_name",
+    "query_expression", "range_expression", "real_literal", "record_declaration", "recursive_pattern",
+    "ref_expression", "ref_type", "reftype_expression", "refvalue_expression", "relational_pattern",
+    "return_statement", "scoped_type", "select_clause", "sizeof_expression", "spread_element",
+    "stackalloc_expression", "struct_declaration", "subpattern", "switch_body", "switch_expression",
+    "switch_expression_arm", "switch_section", "switch_statement", "throw_expression", "throw_statement",
+    "try_statement", "tuple_element", "tuple_expression", "tuple_pattern", "tuple_type", "type_argument_list",
+    "type_parameter", "type_parameter_constraint", "type_parameter_constraints_clause", "type_parameter_list",
+    "type_pattern", "typeof_expression", "unary_expression", "unsafe_statement", "using_directive",
+    "using_statement", "var_pattern", "variable_declaration", "variable_declarator", "when_clause", "where_clause",
+    "while_statement", "with_expression", "with_initializer", "yield_statement",
+  ]),
+};
+
+/**
+ * Python's own tree-sitter service, src/tree-sitter-python-service.ts,
+ * predates GrammarConfig and is not driven by one: its markNode hardcodes
+ * "comment", "string", and (as of this round's fix for the same
+ * unmasked-format-specifier bug this file's own method found)
+ * "format_specifier" directly, instead of reading a literalTypes/
+ * contentTypes pair. This model mirrors that hardcoded behaviour just
+ * closely enough for this file's own accounting to run the same check
+ * against it: literalTypes/contentTypes/exclusions here describe what
+ * markNode actually does, not a real GrammarConfig object anywhere in
+ * src/. If tree-sitter-python-service.ts's markNode ever changes which
+ * node types it special-cases, this model has to change by hand to match
+ * -- there is no shared source of truth to import from, the same
+ * trade-off Python already made by predating this file. That drift risk
+ * is accepted for the same reason src/tree-sitter-language-service.ts's
+ * own header gives for leaving Python's service exactly as it is: it
+ * already works, and folding it into GrammarConfig is a separate change
+ * with no gain for this one.
+ */
+const PYTHON_MODEL: GrammarConfig = {
+  literalTypes: new Set(["comment", "string", "format_specifier"]),
+  contentTypes: new Set(["string_content", "escape_sequence", "string_start", "string_end"]),
+};
+const PYTHON_EXCLUSIONS = new Set(["interpolation", "format_expression"]);
+const PYTHON_CODE_TYPES = new Set([
+  "aliased_import", "argument_list", "as_pattern", "assert_statement", "assignment", "attribute",
+  "augmented_assignment", "await", "binary_operator", "block", "boolean_operator", "break_statement", "call",
+  "case_clause", "case_pattern", "chevron", "class_definition", "class_pattern", "comparison_operator",
+  "complex_pattern", "concatenated_string", "conditional_expression", "constrained_type", "continue_statement",
+  "decorated_definition", "decorator", "default_parameter", "delete_statement", "dict_pattern", "dictionary",
+  "dictionary_comprehension", "dictionary_splat", "dictionary_splat_pattern", "dotted_name", "elif_clause",
+  "ellipsis", "else_clause", "escape_interpolation", "except_clause", "exec_statement", "expression_list",
+  "expression_statement", "false", "finally_clause", "float", "for_in_clause", "for_statement",
+  "function_definition", "future_import_statement", "generator_expression", "generic_type", "global_statement",
+  "identifier", "if_clause", "if_statement", "import_from_statement", "import_prefix", "import_statement",
+  "integer", "keyword_argument", "keyword_pattern", "keyword_separator", "lambda", "lambda_parameters",
+  "line_continuation", "list", "list_comprehension", "list_pattern", "list_splat", "list_splat_pattern",
+  "match_statement", "member_type", "module", "named_expression", "none", "nonlocal_statement", "not_operator",
+  "pair", "parameters", "parenthesized_expression", "parenthesized_list_splat", "pass_statement", "pattern_list",
+  "positional_separator", "print_statement", "raise_statement", "relative_import", "return_statement", "set",
+  "set_comprehension", "slice", "splat_pattern", "splat_type", "subscript", "true", "try_statement", "tuple",
+  "tuple_pattern", "type", "type_alias_statement", "type_conversion", "type_parameter", "typed_default_parameter",
+  "typed_parameter", "unary_operator", "union_pattern", "union_type", "while_statement", "wildcard_import",
+  "with_clause", "with_item", "with_statement", "yield",
+]);
 
 function loadNodeTypes(packageName: string, subpath: string): readonly NodeTypeEntry[] {
   const require = createRequire(import.meta.url);
@@ -119,91 +433,138 @@ function loadNodeTypes(packageName: string, subpath: string): readonly NodeTypeE
 }
 
 /**
- * Every named type reachable, by node-types.json's own children lists,
- * starting from `config`'s literalTypes and contentTypes, that is not
- * itself in literalTypes, contentTypes, or `exclusions`. Empty means the
- * config, plus the exclusions list, accounts for everything this grammar
- * can actually produce inside a literal; a non-empty result names exactly
- * what to go add somewhere.
- *
- * Recursion rule: a type found in literalTypes or contentTypes is walked
- * further (its own children need the same accounting -- this is exactly
- * how Finding 1's bug would have shown up: bare_string was in
- * contentTypes, so its own child `interpolation` had to be accounted for
- * too, and wasn't). A type found in `exclusions` is not walked further:
- * once a node is a real code expression, what it can contain is the rest
- * of the grammar, unbounded, and is not this test's concern (see the file
- * header). A type found in neither is unaccounted, and recursion stops
- * there too -- there is nothing more useful to say about a node this test
- * has already flagged as missing.
+ * Every named, concrete type in `nodeTypes` -- excludes both anonymous
+ * entries (an unnamed token sharing a type string with a named node, see
+ * NodeTypeEntry's own doc) and supertype aliases (an entry with its own
+ * `subtypes` list, never itself a real node's `.type`).
  */
-function findUnaccountedTypes(
+function concreteNamedTypes(nodeTypes: readonly NodeTypeEntry[]): ReadonlySet<string> {
+  const types = new Set<string>();
+  for (const entry of nodeTypes) {
+    if (entry.named !== true) continue;
+    if (entry.subtypes !== undefined) continue;
+    types.add(entry.type);
+  }
+  return types;
+}
+
+/**
+ * Every concrete named type `nodeTypes` says this grammar can produce
+ * that is not accounted for by `config`'s literalTypes/contentTypes,
+ * `exclusions`, or `codeTypes`. Empty means all four together cover
+ * everything this grammar can actually produce; a non-empty result names
+ * exactly what to go add somewhere -- see this file's own header for what
+ * each of the four buckets means and why a flat check across all of them,
+ * not a reachability walk from any of them, is what actually closes this
+ * defect class.
+ */
+function findUnclassifiedTypes(
   nodeTypes: readonly NodeTypeEntry[],
   config: GrammarConfig,
   exclusions: ReadonlySet<string>,
+  codeTypes: ReadonlySet<string>,
 ): string[] {
-  const byType = new Map<string, NodeTypeEntry>();
-  for (const entry of nodeTypes) {
-    if (entry.named !== true) continue; // an anonymous token sharing a name with a named type, e.g. PHP's own "string" keyword
-    byType.set(entry.type, entry);
-  }
-
-  const known = new Set([...config.literalTypes, ...config.contentTypes]);
-  const queue: string[] = [...config.literalTypes, ...config.contentTypes];
-  const seen = new Set<string>();
-  const missing = new Set<string>();
-
-  while (queue.length > 0) {
-    const t = queue.pop() as string;
-    if (seen.has(t)) continue;
-    seen.add(t);
-    const entry = byType.get(t);
-    if (entry === undefined) continue; // named in the config but produces no node here (not this test's concern)
-    const children = entry.children?.types ?? [];
-    for (const child of children) {
-      if (child.named === false) continue;
-      if (exclusions.has(child.type)) continue; // real code: what it contains is out of scope, see file header
-      if (known.has(child.type)) {
-        if (!seen.has(child.type)) queue.push(child.type); // itself a literal container/content type: its own children need the same accounting
-        continue;
-      }
-      missing.add(child.type);
-    }
-  }
-
-  return [...missing].sort();
+  const known = new Set([...config.literalTypes, ...config.contentTypes, ...exclusions, ...codeTypes]);
+  const missing = [...concreteNamedTypes(nodeTypes)].filter((t) => !known.has(t));
+  return missing.sort();
 }
 
 for (const [ext, spec] of Object.entries(GRAMMAR_SPECS) as Array<[string, GrammarSpec]>) {
-  test(`${ext}: src/tree-sitter-grammars.ts's config accounts for every node type ${spec.packageName}'s own node-types.json says can sit inside a literal`, () => {
+  test(`${ext}: src/tree-sitter-grammars.ts's config accounts for every named type ${spec.packageName}'s own node-types.json says it can produce`, () => {
     const nodeTypes = loadNodeTypes(spec.packageName, NODE_TYPES_SUBPATH[ext]);
-    const exclusions = EXCLUSIONS[ext];
-    const missing = findUnaccountedTypes(nodeTypes, spec.config, exclusions);
+    const missing = findUnclassifiedTypes(nodeTypes, spec.config, EXCLUSIONS[ext], CODE_TYPES[ext]);
     assert.deepEqual(
       missing,
       [],
-      `${ext}: ${spec.packageName}'s node-types.json can produce ${JSON.stringify(missing)} inside a literal, ` +
-        "and none of them is in this grammar's literalTypes, contentTypes, or this file's own EXCLUSIONS list. " +
-        "Add each one to whichever set is actually correct for it, or to EXCLUSIONS with a comment saying why " +
-        "leaving it unlisted (reopened as code) is the right answer.",
+      `${ext}: ${spec.packageName}'s node-types.json can produce ${JSON.stringify(missing)}, and none of them is in ` +
+        "this grammar's literalTypes, contentTypes, or this file's own EXCLUSIONS or CODE_TYPES. Add each one to " +
+        "whichever bucket is actually correct for it: literalTypes/contentTypes if it can hold static text that " +
+        "must be masked, EXCLUSIONS if it is real code deliberately left for the walk to reopen, or CODE_TYPES if " +
+        "it is ordinary code with nothing to do with a literal at all.",
     );
   });
 }
 
-// Proof this test can fail, not just pass: the same check run against a
-// deliberately reintroduced version of Finding 1's bug, where bare_string
-// is dropped from ruby's config entirely -- neither literalTypes,
-// contentTypes, nor EXCLUSIONS names it. bare_string is itself reachable
-// (string_array's own child), so this must report it, and report its own
-// child `interpolation` as unaccounted too, since nothing here recurses
-// into a type this test has already flagged as missing.
-test("findUnaccountedTypes actually fails when a real node type is dropped from the config", () => {
+test(".py: tree-sitter-python-service.ts's hardcoded markNode accounts for every named type tree-sitter-python's own node-types.json says it can produce", () => {
+  const nodeTypes = loadNodeTypes("tree-sitter-python", NODE_TYPES_SUBPATH[".py"]);
+  const missing = findUnclassifiedTypes(nodeTypes, PYTHON_MODEL, PYTHON_EXCLUSIONS, PYTHON_CODE_TYPES);
+  assert.deepEqual(
+    missing,
+    [],
+    `.py: tree-sitter-python's node-types.json can produce ${JSON.stringify(missing)}, unaccounted for in PYTHON_MODEL, ` +
+      "PYTHON_EXCLUSIONS, or PYTHON_CODE_TYPES above. If markNode in src/tree-sitter-python-service.ts needs to " +
+      "change to handle it, update PYTHON_MODEL to match by hand -- there is no config object to read this from.",
+  );
+});
+
+// --- proof this file's own method can fail, not just pass ------------------
+
+// Finding 3b, reproduced directly: delimited_symbol (Ruby's interpolated
+// `:"..."` symbol form) dropped from ruby's config entirely -- neither
+// literalTypes, contentTypes, nor EXCLUSIONS names it, the exact state the
+// config was actually in before this round's fix. delimited_symbol is
+// itself a concrete named type tree-sitter-ruby's own node-types.json
+// produces, so the flat check above must report it, unprompted by any
+// reachability from something else. This is red-before-green for the fix
+// in src/tree-sitter-grammars.ts: this exact assertion, run against the
+// pre-fix config, is what proves the omission before it was corrected.
+test("findUnclassifiedTypes reports delimited_symbol when it is missing from ruby's config (Finding 3b, red before green)", () => {
   const rubySpec = GRAMMAR_SPECS[".rb"];
   const nodeTypes = loadNodeTypes(rubySpec.packageName, NODE_TYPES_SUBPATH[".rb"]);
   const brokenConfig: GrammarConfig = {
-    literalTypes: new Set([...rubySpec.config.literalTypes].filter((t) => t !== "bare_string")),
+    literalTypes: new Set([...rubySpec.config.literalTypes].filter((t) => t !== "delimited_symbol")),
     contentTypes: rubySpec.config.contentTypes,
   };
-  const missing = findUnaccountedTypes(nodeTypes, brokenConfig, EXCLUSIONS[".rb"]);
-  assert.deepEqual(missing, ["bare_string"], "a dropped literal-container type is reported, not silently accepted");
+  const missing = findUnclassifiedTypes(nodeTypes, brokenConfig, EXCLUSIONS[".rb"], CODE_TYPES[".rb"]);
+  assert.ok(missing.includes("delimited_symbol"), "a dropped literal-container type is reported, not silently accepted");
 });
+
+// The regression the old, reachability-based version of this file could
+// never catch: a root type, never a listed child of anything else in its
+// own grammar, dropped from literalTypes. The reviewer proved this failed
+// silently for all six of this project's GRAMMAR_SPECS languages, using
+// each one's own top-level comment type -- and the same blind spot applies
+// to Python's bespoke model, which is why it is proven here too, for all
+// seven. Removing any of these seven types must make the check above
+// report it; if it doesn't, this file has regressed back to reachability.
+const ROOT_LITERAL_TYPE: Readonly<Record<string, string>> = {
+  ".rs": "line_comment",
+  ".rb": "comment",
+  ".php": "comment",
+  ".go": "comment",
+  ".java": "line_comment",
+  ".cs": "comment",
+  ".py": "comment",
+};
+
+for (const [ext, rootType] of Object.entries(ROOT_LITERAL_TYPE)) {
+  test(`removing the root literal type ${JSON.stringify(rootType)} from ${ext}'s config is caught (proof for all seven languages, including the case that passed silently before)`, () => {
+    const isPython = ext === ".py";
+    const spec = isPython ? undefined : GRAMMAR_SPECS[ext];
+    const packageName = isPython ? "tree-sitter-python" : (spec as GrammarSpec).packageName;
+    const baseConfig = isPython ? PYTHON_MODEL : (spec as GrammarSpec).config;
+    const exclusions = isPython ? PYTHON_EXCLUSIONS : EXCLUSIONS[ext];
+    const codeTypes = isPython ? PYTHON_CODE_TYPES : CODE_TYPES[ext];
+
+    assert.ok(baseConfig.literalTypes.has(rootType), `sanity check: ${ext}'s config must actually list ${rootType}`);
+
+    const nodeTypes = loadNodeTypes(packageName, NODE_TYPES_SUBPATH[ext]);
+    // Sanity check on the property under test, before removing anything:
+    // node-types.json never actually lists this type as a named child of
+    // any other entry, which is exactly why the old reachability-based
+    // walk could never have found it no matter what it was seeded with.
+    const listedAsAChildAnywhere = nodeTypes.some((entry) => (entry.children?.types ?? []).some((c) => c.type === rootType));
+    assert.equal(listedAsAChildAnywhere, false, `${ext}: ${rootType} is expected to be unreachable as a child in node-types.json`);
+
+    const brokenConfig: GrammarConfig = {
+      literalTypes: new Set([...baseConfig.literalTypes].filter((t) => t !== rootType)),
+      contentTypes: baseConfig.contentTypes,
+    };
+    const missing = findUnclassifiedTypes(nodeTypes, brokenConfig, exclusions, codeTypes);
+    assert.ok(
+      missing.includes(rootType),
+      `${ext}: removing ${rootType} from literalTypes must be caught, the same as any other dropped type -- ` +
+        "this is exactly the check that silently passed before this round's fix",
+    );
+  });
+}

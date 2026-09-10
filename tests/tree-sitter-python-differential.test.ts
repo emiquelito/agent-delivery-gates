@@ -110,7 +110,7 @@ test("f-string interpolation: regex blanks the live identifier, tree-sitter keep
   assert.notEqual(regexMaskNonCode(text), python.maskNonCode(text));
 });
 
-test("f-string with a nested format expression: regex blanks the whole literal, tree-sitter keeps every nested expression", () => {
+test("f-string with a nested format expression: regex blanks the whole literal, tree-sitter keeps every nested expression and masks the format specifier's own static text", () => {
   const text = 'summary = f"{score!r:>{width}}"\n';
 
   const regexExpected = blank(text, "{score!r:>{width}}");
@@ -119,9 +119,13 @@ test("f-string with a nested format expression: regex blanks the whole literal, 
   // `{score!r:>{width}}` is one interpolation whose format specifier
   // itself nests another expression, `{width}`. Recursing into the
   // interpolation walks its whole subtree, so both `score` and the nested
-  // `width` stay code; only the quotes are delimiter punctuation, so
-  // nothing at all gets blanked here.
-  const treeExpected = text;
+  // `width` stay code. The format specifier's own text, `:>` -- the `:`
+  // that opens it and the `>` fill-and-align character, neither one its
+  // own child node in tree-sitter-python's grammar -- is static, not
+  // code, and gets masked the same as any other literal text; only the
+  // nested `{width}` expression inside it, and the quotes (delimiter
+  // punctuation), stay visible.
+  const treeExpected = blank(text, ":>");
   assert.equal(python.maskNonCode(text), treeExpected);
 
   assert.notEqual(regexMaskNonCode(text), python.maskNonCode(text));

@@ -27,6 +27,12 @@ const percentBigW = "x = %W[a#{DANGEROUS}b c]\n";
 const percentBigI = "x = %I[a#{DANGEROUS}b c]\n";
 const interpolated = 'greeting = "hi #{name}!"\n';
 const interpolatedWithComment = 'greeting = "hi #{name}!"  # trailing\n';
+const delimitedSymbol = 'x = :"foo#{DANGEROUS}bar"\n';
+const plainDelimitedSymbol = 'x = :"plain symbol"\n';
+const chainedString = 'x = "a" "b#{DANGEROUS}c"\n';
+const hashKeySymbol = "h = {assert_this: 1}\n";
+const regexLiteral = "x = /foo#{DANGEROUS}bar/\n";
+const endData = "puts 1\n__END__\nDANGEROUS raw text here\n";
 
 const cases: DifferentialCase[] = [
   disagree(
@@ -145,6 +151,118 @@ const cases: DifferentialCase[] = [
   agree(
     "nested escaped quotes inside an ordinary string: both scanners agree",
     'greeting = "she said \\"hi\\" to me"\n',
+  ),
+  disagree(
+    "an interpolated symbol, `:\"...\"`: regex reads it as an ordinary quoted string, tree-sitter keeps the interpolation",
+    // Finding 3b: delimited_symbol, the `:"..."` interpolated symbol form,
+    // was in none of literalTypes, contentTypes, or the node-types
+    // conformance test's EXCLUSIONS -- structurally invisible to the old
+    // version of that test the same way a root type like Ruby's own
+    // `comment` was, since neither was ever a listed child of anything
+    // already configured. Its child structure is identical to a plain
+    // `string` (escape_sequence, interpolation, string_content), so
+    // `:"foo#{DANGEROUS}bar"` masked to nothing at all: the interpolation
+    // read straight through as though it were static text.
+    // Regex reasoning: the leading `:` is just another code character to
+    // classify; the `"` after it opens an ordinary quoted string, closed
+    // at the matching `"`, with everything between blanked, DANGEROUS
+    // included.
+    // tree-sitter reasoning, after the fix: delimited_symbol is now in
+    // literalTypes, so the walk blanks its own span (the `:` and both
+    // quotes are anonymous, part of the wholesale fill) and then recurses
+    // into its named children the same way it does for `string`: "foo"
+    // and "bar" (string_content) stay blanked, and `#{DANGEROUS}` (an
+    // interpolation child, not in contentTypes) is reopened as code.
+    delimitedSymbol,
+    blank(delimitedSymbol, "foo#{DANGEROUS}bar"),
+    blank(blank(delimitedSymbol, ':"foo'), 'bar"'),
+  ),
+  disagree(
+    "a plain interpolated-symbol literal with no interpolation: regex blanks only the quoted interior, tree-sitter blanks the symbol's own punctuation too",
+    // Same delimited_symbol fix as above, without an interpolation to
+    // exercise the recursion: this case instead shows the difference in
+    // how much of the literal each scanner treats as not-code.
+    // Regex reasoning: as above, the `:` stays code and only the
+    // quoted interior is blanked.
+    // tree-sitter reasoning: delimited_symbol's whole span -- the `:`,
+    // both quotes, and the text between -- is blanked wholesale, the
+    // same as a plain `string` literal's own quotes are.
+    plainDelimitedSymbol,
+    blank(plainDelimitedSymbol, "plain symbol"),
+    blank(plainDelimitedSymbol, ':"plain symbol"'),
+  ),
+  disagree(
+    "an implicit string concatenation, `\"a\" \"b#{x}c\"`: regex blanks each quoted piece separately, tree-sitter recurses through the wrapper into the second string's own interpolation",
+    // chained_string (Finding 3c) is a passthrough container whose only
+    // child is a `string`; it was unreachable the same way delimited_symbol
+    // was, and adding it to literalTypes lets the walk recurse into its
+    // `string` child exactly as it already does for any other nested
+    // literal (an interpolation's own nested string, for instance).
+    // Regex reasoning: `"a"` and `"b#{DANGEROUS}c"` are each read as an
+    // independent quoted string; both are blanked in full, DANGEROUS
+    // included.
+    // tree-sitter reasoning: chained_string's span is blanked wholesale,
+    // then its `string` child is reopened and walked again, which blanks
+    // "b" and "c" (string_content) but keeps #{DANGEROUS} (interpolation)
+    // as code -- the same outcome a bare `"b#{DANGEROUS}c"` string gets on
+    // its own.
+    chainedString,
+    blank(blank(chainedString, "a"), "b#{DANGEROUS}c"),
+    blank(blank(chainedString, '"a" "b'), 'c"'),
+  ),
+  agree(
+    "a hash key written as a symbol, `assert_this:`: both scanners leave it as code",
+    // Finding 3c, the other half: hash_key_symbol is a leaf node with no
+    // named children, structurally the same structure as an ordinary
+    // identifier. Its span is deliberately left out of literalTypes --
+    // masking a hash key would blank ordinary Ruby syntax as though it
+    // were free text, and would make a key like `assert_this:` sitting in
+    // a diff look like something worth flagging when it is just a key
+    // name. Both scanners agree by leaving it untouched: the regex
+    // scanner because nothing about `assert_this:` looks like a string or
+    // comment to it, and tree-sitter because hash_key_symbol is not in
+    // literalTypes and produces no named children to recurse into either.
+    hashKeySymbol,
+  ),
+  disagree(
+    "a regex literal, `/foo#{x}bar/`: regex reads it as ordinary code hidden between slashes, tree-sitter blanks it and keeps the interpolation",
+    // regex (the node type, not this project's own regex scanner) has the
+    // identical child structure to `string` and `delimited_symbol`:
+    // escape_sequence, interpolation, string_content. It was unlisted
+    // anywhere in the config before this fix, for the same reason
+    // delimited_symbol was: nothing already configured ever has it as a
+    // child.
+    // Regex reasoning (this project's own scanner, not the Ruby node
+    // type it is masking): classify does recognise `/.../ ` as a literal
+    // and blanks its interior, DANGEROUS included, the same as it would
+    // for a quoted string; it just has no notion of an interpolation
+    // inside one, so #{DANGEROUS} is blanked along with everything else.
+    // tree-sitter reasoning, after the fix: regex is now in literalTypes,
+    // so its span is blanked wholesale (both `/`s are anonymous) and its
+    // string_content children ("foo", "bar") stay blanked while its
+    // interpolation child is reopened as code.
+    regexLiteral,
+    blank(regexLiteral, "foo#{DANGEROUS}bar"),
+    blank(blank(regexLiteral, "/foo"), "bar/"),
+  ),
+  disagree(
+    "a `__END__` data section: regex reads the trailing data as ordinary code, tree-sitter masks it as not-code",
+    // Finding 3, generalised: uninterpreted is Ruby's own name for
+    // whatever text follows a `__END__` line -- never parsed as Ruby at
+    // all, and as unreachable in the config as a root type like `comment`
+    // is, since nothing else in the grammar ever has it as a child. It
+    // was entirely unmasked before this fix: static trailing data in a
+    // file, able to hide anything its author put there, read straight
+    // through as live code.
+    // Regex reasoning: `__END__` is just another identifier-like token
+    // to classify, and everything after it is ordinary code, unchanged.
+    // tree-sitter reasoning, after the fix: `__END__` itself stays code
+    // (it is not part of the uninterpreted node), but everything from the
+    // newline right after it through the end of the file is now
+    // uninterpreted, in literalTypes, and gets blanked wholesale.
+    endData,
+    endData,
+    blank(endData, "\nDANGEROUS raw text here\n"),
   ),
 ];
 

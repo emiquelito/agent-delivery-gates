@@ -41,7 +41,22 @@ const rust: GrammarSpec = {
   packageName: "tree-sitter-rust",
   wasmFileName: "tree-sitter-rust.wasm",
   config: {
-    literalTypes: new Set(["line_comment", "block_comment", "string_literal", "raw_string_literal"]),
+    // char_literal (`'a'`, `'\n'`) joins the string types for the same
+    // reason Ruby's `character` does: it is a quoted literal like any
+    // other, just one scalar wide, and is masked for consistency rather
+    // than because a single character is a realistic hiding place.
+    //
+    // shebang is a script's own `#!/usr/bin/env ...` first line -- a
+    // directive rustc itself ignores, the same kind of "not code, just
+    // static text next to the code" as a comment.
+    literalTypes: new Set([
+      "line_comment",
+      "block_comment",
+      "string_literal",
+      "raw_string_literal",
+      "char_literal",
+      "shebang",
+    ]),
     // No interpolation type: `format!("{x}")`'s braces are ordinary string
     // text to this grammar, not a parsed expression, so nothing here is
     // ever reopened as code inside a Rust string.
@@ -78,7 +93,48 @@ const ruby: GrammarSpec = {
     // into each word exactly as it already does for `string`: the word's
     // own plain-text children (string_content/escape_sequence) stay
     // blanked, and an interpolation child, unlisted anywhere, is reopened.
-    literalTypes: new Set(["comment", "string", "string_array", "symbol_array", "bare_string", "bare_symbol", "heredoc_body"]),
+    //
+    // delimited_symbol (`:"foo#{x}bar"`, the interpolated symbol form) and
+    // chained_string (an implicit-concatenation `"a" "b"`, whose only child
+    // is another `string`) join literalTypes for the same reason
+    // bare_string/bare_symbol do: each is a container a plain `string`
+    // shares its child structure with (escape_sequence/interpolation/
+    // string_content, or in chained_string's case just a nested `string`
+    // to recurse into), and each was reachable in a real parse without
+    // being reachable through anything already in this config -- the
+    // defect this file's own conformance test, tests/tree-sitter-node-types
+    // -conformance.test.ts, now checks for directly instead of relying on
+    // a hand walk of node-types.json to notice.
+    //
+    // regex (`/foo#{x}bar/`) has the identical child structure again --
+    // escape_sequence/interpolation/string_content -- and the same
+    // interpolation risk a plain string has.
+    //
+    // uninterpreted is Ruby's own name for whatever text follows a
+    // `__END__` line: a script's own trailing data section, never parsed
+    // as Ruby at all. It is exactly as much "not code" as a comment, and
+    // was entirely unmasked before this entry -- a `__END__` block hiding
+    // instructions read straight through the mask.
+    //
+    // character is Ruby's `?a`/`?\n` single-character-literal form, a
+    // leaf with no named children. Masked here for the same reason a
+    // one-character string still counts as a literal: consistency with
+    // how every other quoted literal in this file is treated, not because
+    // one character is a realistic place to hide much text.
+    literalTypes: new Set([
+      "comment",
+      "string",
+      "string_array",
+      "symbol_array",
+      "bare_string",
+      "bare_symbol",
+      "heredoc_body",
+      "delimited_symbol",
+      "chained_string",
+      "regex",
+      "uninterpreted",
+      "character",
+    ]),
     contentTypes: new Set(["string_content", "escape_sequence", "heredoc_content", "heredoc_end"]),
   },
 };
@@ -87,13 +143,48 @@ const php: GrammarSpec = {
   packageName: "tree-sitter-php",
   wasmFileName: "tree-sitter-php.wasm",
   config: {
-    literalTypes: new Set(["comment", "string", "encapsed_string", "heredoc", "heredoc_body", "nowdoc", "nowdoc_body"]),
+    // text_interpolation is this grammar's own name for the raw, non-PHP
+    // text a `.php` file can hold outside any `<?php ... ?>` span --
+    // ordinary surrounding HTML, most commonly. It is not Ruby-style
+    // "extra" metadata about the file; it is a real named node the parser
+    // produces, and before this entry it was entirely unmasked: static
+    // text sitting right next to PHP code, invisible to this file's own
+    // "not code" accounting.
+    literalTypes: new Set([
+      "comment",
+      "string",
+      "encapsed_string",
+      "heredoc",
+      "heredoc_body",
+      "nowdoc",
+      "nowdoc_body",
+      "text_interpolation",
+      // shell_command_expression is a backtick `` `echo $x` `` command
+      // string: the grammar gives it the exact same child structure as
+      // encapsed_string (string_content, escape_sequence, and PHP's five
+      // interpolation forms), so it needs the same treatment.
+      "shell_command_expression",
+    ]),
     // heredoc_start/heredoc_end are the `<<<EOT` tag's own name, repeated
     // at open and close; not code, and not blanked by accident either
     // way since nothing there could satisfy a detector, but listed for
     // the same reason as everything else here: an unlisted named child
     // gets reopened as code, and a heredoc's tag name is not that.
-    contentTypes: new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end"]),
+    //
+    // text, php_tag, and php_end_tag are text_interpolation's own three
+    // possible children: the actual raw text, and the literal `<?php`/
+    // `?>` tags bracketing it. None of the three is code, so all three
+    // stay blanked instead of being reopened.
+    contentTypes: new Set([
+      "string_content",
+      "escape_sequence",
+      "nowdoc_string",
+      "heredoc_start",
+      "heredoc_end",
+      "text",
+      "php_tag",
+      "php_end_tag",
+    ]),
   },
 };
 
@@ -144,6 +235,25 @@ const csharp: GrammarSpec = {
       "raw_string_literal",
       "interpolated_string_expression",
       "character_literal",
+      // interpolation_format_clause is the `:...` suffix of an
+      // interpolation, e.g. the `yyyy-MM-dd` in `$"{d:yyyy-MM-dd}"`. It is
+      // a leaf with no named children of its own, and reads as free-form
+      // static text -- a custom .NET format string can hold arbitrary
+      // literal characters -- so it is masked here the same as any other
+      // literal, not left to fall through as ordinary code the way its
+      // sibling interpolation_alignment_clause (a real expression) does.
+      "interpolation_format_clause",
+      // preproc_arg is the free-text argument of a preprocessor directive
+      // this grammar treats as an "extra" -- most visibly, the label after
+      // `#region`/`#endregion`. Unmasked, a `#region` label is exactly the
+      // same kind of static text as everything else in this file: visible
+      // in a diff, not code, and able to hide anything its author writes
+      // there.
+      "preproc_arg",
+      // shebang_directive is a script's own `#!/usr/bin/env ...` first
+      // line, the same kind of ignored, static directive text as Rust's
+      // `shebang` and this same list's own comment above it.
+      "shebang_directive",
     ]),
     // interpolation_start ("$" or "$@") and interpolation_quote (the
     // opening/closing quote of an interpolated string, `"`/`"""`) are
