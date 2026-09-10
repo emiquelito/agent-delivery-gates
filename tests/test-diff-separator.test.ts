@@ -310,6 +310,103 @@ test("test.describe.skip (Playwright's nested form) still fires skip-added", () 
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
+// A reviewer running the real gate, not the regex alone, reproduced three
+// ordinary xUnit forms that the value-anchored "Skip = " fragment above (at
+// the time, "Skip\s*=\s*[\"']", requiring a bare quote right after "=")
+// let through: an interpolated string, a verbatim string, and a reference
+// to a named constant. All three were caught by the version before that.
+// The fragment now accepts every one of those value forms; see its own
+// comment in src/test-diff-separator.ts for how it still keeps out "const
+// skip = new Set(...)".
+
+test("[Fact(Skip = $\"...\")] with an interpolated reason still fires skip-added", () => {
+  const diff = oneFileDiff(
+    "tests/WidgetTests.cs",
+    [],
+    ['[Fact(Skip = $"flaky on {Environment.MachineName}")]'],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("[Fact(Skip = @\"...\")] with a verbatim reason still fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Fact(Skip = @"flaky, see JIRA-123")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("[Fact(Skip = SkipReasons.Flaky)] with a named-constant reason still fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Fact(Skip = SkipReasons.Flaky)]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("[Fact(Skip = $@\"...\")] and [Fact(Skip = @$\"...\")], the combined interpolated-verbatim forms, still fire skip-added", () => {
+  for (const line of ['[Fact(Skip = $@"flaky {Env.Name}")]', '[Fact(Skip = @$"flaky {Env.Name}")]']) {
+    const diff = oneFileDiff("tests/WidgetTests.cs", [], [line]);
+    const result = separateTestDiff(diff);
+    assert.deepEqual(signalIds(result.signals), ["skip-added"], `expected skip-added for: ${line}`);
+  }
+});
+
+test("a variable named skip still does not fire skip-added, even with the widened value forms", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ['const skip = new Set(["a.ts", "b.ts"]);']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// Finding 2 adjudication: keep the six-name allowlist as the confident
+// case, but also fire on any identifier chained with ".skip(" whose first
+// argument is a string -- a disabling call names the test or gives a
+// reason, so it takes a string, where ".Skip(20)"/".skip(5)" pagination
+// always takes a number. This closes the gap a reviewer reproduced: a
+// project's own runner wrapper, never one of the six allowlisted names,
+// escaped entirely before.
+
+test("a custom runner's own .skip(reason) call fires skip-added", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["myCustomRunner.skip('flaky', () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("a test function imported under an alias, calling .skip(reason), fires skip-added", () => {
+  // A miss this project's own comments used to name as unclosed: "import {
+  // test as t } ... t.skip(...)" chains off "t", not one of the six
+  // allowlisted names, but the argument-anchored fragment does not care what
+  // the identifier is named.
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["t.skip('adds numbers', () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("C# LINQ's .Skip(20) pagination still does not fire skip-added under the widened rule", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ["var page = items.Skip(20).Take(10).ToList();"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("the JS Iterator Helpers .skip(5) method still does not fire skip-added under the widened rule", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["const rest = iter.skip(5);"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("a custom runner's .skip(reason) still fires when the reason is a template literal", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["myCustomRunner.skip(`flaky`, () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Still escapes, named plainly instead of left to be rediscovered: a
+// receiver reached through bracket/computed access has no identifier
+// immediately before the ".", so neither the allowlist nor the
+// argument-anchored fragment sees it.
+test("a bracket-accessed runner's .skip(reason) still escapes skip-added (known gap)", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["runners['custom'].skip('flaky', () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
 // --- tolerance-widened ---------------------------------------------------------
 
 test("a changed tolerance line, one removed and one added, fires tolerance-widened", () => {

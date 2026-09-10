@@ -175,18 +175,40 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // "Skip = " attribute argument covered further down), and in every
     // JavaScript/TypeScript framework this project has runner support for
     // (Mocha, Jest, Vitest, Jasmine's spec runner, Cypress, Playwright,
-    // Ava), a disabling ".skip" is always chained off one of these six
+    // Ava), a disabling ".skip" is always chained off one of these five
     // names, never off an arbitrary data object. Anchoring here is what
     // drops the false positives an earlier, unanchored "\.skip\b" caught:
     // C# LINQ's ".Skip(20)" pagination call and the JS Iterator Helpers
     // ".skip(5)" method, both ordinary data slicing with no test-runner
     // identifier in front of the dot. "test.describe.skip(...)"
     // (Playwright's nested form) still matches: "describe.skip" is itself
-    // a substring of it. Known miss, not attempted here: a test function
-    // imported under an alias ("import { test as t } ... t.skip(...)") or
-    // Mocha's dynamic "this.skip()" inside a test body -- neither chains
-    // off one of the six names below, so both slip through unanchored.
+    // a substring of it.
+    //
+    // This allowlist is confident but incomplete on its own -- a project's
+    // own runner wrapper, a helper, or a differently-aliased import never
+    // appears here, and never could: there is no way to enumerate every
+    // name a team might use. The fragment right after this one covers that
+    // gap by anchoring on the ARGUMENT instead of the receiver: any
+    // identifier at all, followed by ".skip(", whose first argument is a
+    // string. A disabling call names the test or gives a reason, so it
+    // takes a string; ".Skip(20)" and ".skip(5)" both take a plain number
+    // and so never match it. That also means this second fragment now
+    // catches a test function imported under an alias
+    // ("import { test as t } ... t.skip('reason', ...)"), a miss this
+    // allowlist fragment alone could never close. What still escapes both
+    // fragments: a receiver reached through bracket/computed access
+    // ("runners['custom'].skip('flaky', ...)"), since there is no
+    // identifier immediately before the "." there, and Mocha's dynamic
+    // "this.skip()" inside a test body, which takes no argument at all.
     "\\b(?:it|describe|test|context|suite)\\.skip\\b",
+    // Any identifier at all, chained with ".skip(" into a string-literal
+    // first argument. See the comment on the fragment above for why the
+    // argument, not the receiver, is what tells a real disabling call
+    // apart from ordinary pagination/slicing: ".Skip(20)" and ".skip(5)"
+    // both take a number, never a string. Backtick included alongside the
+    // two quote characters since JS/TS code as often writes a skip reason
+    // as a template literal as a plain string.
+    "\\b\\w+\\.skip\\(\\s*[\"'`]",
     "\\.only\\b",
     "\\bxit\\(",
     "\\bxdescribe\\(",
@@ -217,13 +239,22 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\bpending\\s+[\"']",
     "\\bxcontext\\b",
     // xUnit's [Fact(Skip = "reason")] / [Theory(Skip = "reason")]. The
-    // real argument's value is always a string literal (the skip reason),
-    // so anchoring to "Skip" followed by "=" followed directly by a quote
-    // -- never a bare "skip =" assigned to something else -- keeps every
-    // spacing variant of the real attribute (Skip=, Skip =, Skip  =) while
-    // "const skip = new Set(...)" (this bucket compiles case-insensitively;
-    // see compileFragments below) still does not match, since its value is
-    // not a string literal.
+    // real argument's value is always one of a small set of forms: a
+    // plain string ("reason"), an interpolated or verbatim string ($"...",
+    // @"...", or the combined $@".../@$"... forms), or a bare identifier
+    // or member-access reference to a constant holding the reason
+    // (SkipReasons.Flaky). Anchoring to "Skip" followed by "=" followed by
+    // one of exactly those forms -- never a bare "skip =" assigned to
+    // something else -- keeps every spacing variant of the real attribute
+    // (Skip=, Skip =, Skip  =) while "const skip = new Set(...)" (this
+    // bucket compiles case-insensitively; see compileFragments below)
+    // still does not match: "new Set(...)" is neither a string nor a bare
+    // identifier/member-access value on its own, since the identifier
+    // alternative below is anchored at its OWN end too -- it only matches
+    // when the identifier chain is the entire value (followed by nothing
+    // but a comma, a closing paren/bracket, a semicolon, or the end of the
+    // line), so "new" alone can start the match but never finish it: what
+    // follows "new" is " Set(...)", not one of those terminators.
     //
     // A prior version of this fragment anchored to an unclosed "[" earlier
     // on the same line instead. That version was checked against this same
@@ -235,12 +266,24 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // limit named on maskDiffLine below); and any other unrelated "]"
     // earlier on the same line, from an array-typed argument in the same
     // attribute list ("Data = new[] {1,2}, Skip = ..."), which closed the
-    // bracket class early and hid the real "Skip =" that followed it. This
-    // string-literal anchor needs no bracket at all, so both gaps close
-    // without reopening the false positive: it is checked line by line,
-    // like every fragment in this bucket, and does not depend on seeing
-    // more than the one line an attribute's "Skip =" argument sits on.
-    "\\bSkip\\s*=\\s*[\"']",
+    // bracket class early and hid the real "Skip =" that followed it. A
+    // second version, anchored to a bare quote right after "=", closed
+    // those two gaps but reopened a narrower one of its own: an
+    // interpolated string, a verbatim string, or a reference to a named
+    // constant never starts with a quote at all, so all three ordinary
+    // C# forms slipped past it (a reviewer reproduced all three through
+    // the real gate). This value-form anchor closes that gap in turn,
+    // still needs no bracket, and is still checked line by line like every
+    // fragment in this bucket -- it does not depend on seeing more than
+    // the one line an attribute's "Skip =" argument sits on.
+    //
+    // Known gap, not attempted here: when "Skip =" and its value land on
+    // different diff lines -- an attribute wrapped so the "=" ends one line
+    // and the value opens the next -- nothing on either line alone carries
+    // both halves, so this fragment (like every fragment in this bucket)
+    // has nothing to match. This is the same per-line limit named above,
+    // not a defect specific to this fragment.
+    "\\bSkip\\s*=\\s*(?:[\"']|\\$@?\"|@\\$?\"|[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*(?=\\s*(?:,|\\)|\\]|;)|\\s*$))",
   ],
   tolerance: [
     "\\btolerance\\b",
