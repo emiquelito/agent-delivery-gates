@@ -830,8 +830,23 @@ test("a timed-out step leaves no descendant running", () => {
 // received it either. This proves the fix directly: a step whose command
 // spawns a worker sharing its own process group, and a real SIGINT sent to
 // the induce process itself, exactly what a terminal's Ctrl-C sends.
+//
+// This does not run on Windows. child.kill("SIGINT") here is Node asking
+// the OS to deliver an interrupt to another process, and Windows has no
+// such delivery: a real Windows run proved that Node's own kill with an
+// interrupt signal terminates the target outright instead of signalling
+// it, so induce's own SIGINT handler -- the thing this test exists to
+// exercise -- never runs at all. Every assertion below depends on that
+// handler having run (the tree kill, the re-raised signal, the exit
+// code), so there is no partial form of this test that Windows can still
+// prove. A real console Ctrl-C reaches a process through a different
+// mechanism (a console control event) and is not what child.kill sends;
+// that path is not covered here.
 
-test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running", async () => {
+test(
+  "a real Ctrl-C (SIGINT) to the induce process leaves no descendant running",
+  { skip: process.platform === "win32" ? "Node's kill can't deliver SIGINT on Windows; see the comment above" : false },
+  async () => {
   const pidDir = mkdtempSync(join(tmpdir(), "adg-induce-sigint-pids-"));
   const dir = makeProject(
     {
@@ -908,4 +923,5 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     cleanupTempDir(pidDir);
     cleanupTempDir(dir);
   }
-});
+  },
+);

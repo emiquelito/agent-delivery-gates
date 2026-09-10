@@ -219,7 +219,21 @@ test("every file is byte-identical after a run where the command always fails", 
   });
 });
 
-test("a run interrupted partway restores every file it wrote to", async () => {
+// This does not run on Windows. child.kill("SIGINT") below is Node asking
+// the OS to deliver an interrupt to another process, and Windows has no
+// such delivery: a real Windows run proved that Node's own kill with an
+// interrupt signal terminates the target outright instead of signalling
+// it, so mutate's own SIGINT handler -- the thing that restores the file
+// and prints the interrupted message -- never runs at all. Every
+// assertion below (the restore, the stderr message, the exit code) depends
+// on that handler having run, so there is no partial form of this test
+// that Windows can still prove. A real console Ctrl-C reaches a process
+// through a different mechanism (a console control event) and is not what
+// child.kill sends; that path is not covered here.
+test(
+  "a run interrupted partway restores every file it wrote to",
+  { skip: process.platform === "win32" ? "Node's kill can't deliver SIGINT on Windows; see the comment above" : false },
+  async () => {
   const dir = orderRepo(STRONG_SUITE);
   try {
     const before = readFileSync(join(dir, "src/order.mjs"));
@@ -269,7 +283,8 @@ test("a run interrupted partway restores every file it wrote to", async () => {
   } finally {
     cleanupTempDir(dir);
   }
-});
+  },
+);
 
 // --- selection ---------------------------------------------------------------
 
@@ -716,7 +731,21 @@ setInterval(() => {}, 1000);
 
 // recordedPids, isAlive, and waitForNoneAlive live in tests/lib/process-tree.ts.
 
-test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, and says it was interrupted, not that the baseline failed", async () => {
+// This does not run on Windows. child.kill("SIGINT") below is Node asking
+// the OS to deliver an interrupt to another process, and Windows has no
+// such delivery: a real Windows run proved that Node's own kill with an
+// interrupt signal terminates the target outright instead of signalling
+// it, so mutate's own SIGINT handler -- the thing this test exists to
+// exercise -- never runs at all. Every assertion below depends on that
+// handler having run (the tree kill, the interrupted message, the exit
+// code), so there is no partial form of this test that Windows can still
+// prove. A real console Ctrl-C reaches a process through a different
+// mechanism (a console control event) and is not what child.kill sends;
+// that path is not covered here.
+test(
+  "a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, and says it was interrupted, not that the baseline failed",
+  { skip: process.platform === "win32" ? "Node's kill can't deliver SIGINT on Windows; see the comment above" : false },
+  async () => {
   const dir = makeRepo({
     "src/loop.mjs": "export function shouldContinue(seen) {\n  return seen < 1;\n}\n",
     "sigint-run.mjs": SIGINT_LEAK_RUN_MJS,
@@ -803,7 +832,8 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
     cleanupTempDir(pidDir);
     cleanupTempDir(dir);
   }
-});
+  },
+);
 
 // A gate function whose truth mutate's one mutation flips: false at the
 // baseline (0 < 0), true once `<` becomes `<=` (0 <= 0). The command below
@@ -836,7 +866,16 @@ writeFileSync(join(pidDir, "worker-" + worker.pid + ".pid"), String(worker.pid))
 // as the worker it spawned.
 `;
 
-test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already returned, leaves no descendant running (reviewer finding 1)", async () => {
+// This does not run on Windows, for the same reason as the SIGINT test
+// above: child.kill("SIGINT") cannot deliver an interrupt to another
+// process on Windows, Node terminates the target outright instead, and
+// mutate's own SIGINT handler -- the thing every assertion below depends
+// on -- never runs. See the longer comment on the baseline SIGINT test
+// above for the proof and for what a real console Ctrl-C does instead.
+test(
+  "a real Ctrl-C (SIGINT) during a mutation, after the baseline has already returned, leaves no descendant running (reviewer finding 1)",
+  { skip: process.platform === "win32" ? "Node's kill can't deliver SIGINT on Windows; see the comment above" : false },
+  async () => {
   const dir = makeRepo({
     "src/loop.mjs": "export function shouldHang(n) {\n  return n < 0;\n}\n",
     "gated-sigint-run.mjs": GATED_SIGINT_RUN_MJS,
@@ -896,7 +935,8 @@ test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already r
     cleanupTempDir(pidDir);
     cleanupTempDir(dir);
   }
-});
+  },
+);
 
 // --- the baseline run has its own timeout (reviewer finding 3) --------------
 

@@ -995,8 +995,23 @@ test("a timed-out run leaves no descendant running", () => {
 // real SIGINT sent to the census process itself, exactly what a
 // terminal's Ctrl-C sends. No --timeout is given, so nothing but a real
 // SIGINT (and this fix) ever stops the hung run.
+//
+// This does not run on Windows. child.kill("SIGINT") here is Node asking
+// the OS to deliver an interrupt to another process, and Windows has no
+// such delivery: a real Windows run proved that Node's own kill with an
+// interrupt signal terminates the target outright instead of signalling
+// it, so census's own SIGINT handler -- the thing this test exists to
+// exercise -- never runs at all. Every assertion below depends on that
+// handler having run (the worktree cleanup, the re-raised signal, the
+// exit code), so there is no partial form of this test that Windows can
+// still prove. A real console Ctrl-C reaches a process through a
+// different mechanism (a console control event) and is not what
+// child.kill sends; that path is not covered here.
 
-test("a real Ctrl-C (SIGINT) to the census process leaves no descendant running", async () => {
+test(
+  "a real Ctrl-C (SIGINT) to the census process leaves no descendant running",
+  { skip: process.platform === "win32" ? "Node's kill can't deliver SIGINT on Windows; see the comment above" : false },
+  async () => {
   await withPrivateTmpRoot(async (root, tmpEnv) => {
     const dir = makeRepo({
       "leak-run.mjs": LEAK_RUN_MJS,
@@ -1077,4 +1092,5 @@ test("a real Ctrl-C (SIGINT) to the census process leaves no descendant running"
       cleanupTempDir(dir);
     }
   });
-});
+  },
+);
