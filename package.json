@@ -1,14 +1,14 @@
 {
   "name": "agent-delivery-gates",
   "version": "0.2.1",
-  "description": "Delivery gates for AI coding agents, because green tests are not proof. Breaks your code on purpose and reports the breaks no test noticed. Runs a change's new tests against the code from before it. Induces the failure your report says is handled. Git hook, CI step or MCP server. No API key, one sandboxed dependency that cannot open a socket.",
+  "description": "Delivery gates for AI coding agents: breaks your code on purpose and reports the breaks no test noticed. Seven languages via tree-sitter, on Windows, macOS and Linux. Git hook, CI step or MCP server.",
   "license": "Apache-2.0",
   "author": "emiquelito <contact@agentgates.dev>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/emiquelito/agent-delivery-gates.git"
   },
-  "homepage": "https://github.com/emiquelito/agent-delivery-gates#readme",
+  "homepage": "https://agentgates.dev/",
   "bugs": {
     "url": "https://github.com/emiquelito/agent-delivery-gates/issues"
   },
@@ -19,7 +19,17 @@
     "git-hooks",
     "cli",
     "prose-lint",
-    "test-diff"
+    "test-diff",
+    "mutation-testing",
+    "tree-sitter",
+    "mcp-server",
+    "python",
+    "rust",
+    "go",
+    "java",
+    "php",
+    "csharp",
+    "ruby"
   ],
   "type": "module",
   "engines": {
