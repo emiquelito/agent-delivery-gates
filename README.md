@@ -304,8 +304,12 @@ catch.
 **What if my project is not JavaScript?**
 The test-half checks cover ten ecosystems and the rules are configurable.
 `census` reads TAP and JUnit XML, which most runners emit. `mutate` covers the
-C and JavaScript families and leaves Python alone on purpose. `induce` and
-`validate-report` care about neither language nor runner.
+C and JavaScript families, Rust, Ruby, PHP, Go, Java, C#, and now Python too:
+its comparison and arithmetic operators are the same characters as the C
+family, and its boolean literals and connectives (`True`, `False`, `and`,
+`or`) get their own rule, checked against the same tree-sitter mask that
+already keeps a docstring, an f-string, and a `#` comment out of reach.
+`induce` and `validate-report` care about neither language nor runner.
 
 **What does it cost to run?**
 Nothing, and no account. The cost is time: `mutate` and `census` run your

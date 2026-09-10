@@ -17,6 +17,7 @@ import {
   planMutationsWarmed,
   selectMutablePaths,
   summarize,
+  unsupportedLanguagePaths,
   type Mutation,
   type MutationResult,
 } from "../src/mutate.ts";
@@ -151,6 +152,60 @@ test("a word containing true or false is not a boolean literal", () => {
   assert.deepEqual(mutationsFor("const falsey = value;"), []);
 });
 
+// --- Python: boolean literal and connective, per-language operator selection
+
+test("Python comparison and arithmetic operators already work through the shared table", () => {
+  // These are the same characters in Python as in the C family; nothing
+  // Python-specific needed to be added for them.
+  const mutations = planFileMutations("order.py", "if total >= 100:\n    return total - 10\n");
+  assert.deepEqual(
+    mutations.map((m) => m.after),
+    ["if total > 100:", "    return total + 10"],
+  );
+});
+
+test("Python boolean literal: True becomes False and False becomes True", () => {
+  const text = "ok = True\nother = False\n";
+  const mutations = planFileMutations("flags.py", text);
+  assert.deepEqual(
+    mutations.map((m) => [m.operator, m.original, m.after]),
+    [
+      ["boolean-literal", "True", "ok = False"],
+      ["boolean-literal", "False", "other = True"],
+    ],
+  );
+});
+
+test("Python boolean connective: and becomes or and or becomes and", () => {
+  const text = "flag = a and b\nboth = a or b\n";
+  const mutations = planFileMutations("flags.py", text);
+  assert.deepEqual(
+    mutations.map((m) => [m.operator, m.original, m.after]),
+    [
+      ["boolean-connective", "and", "flag = a or b"],
+      ["boolean-connective", "or", "both = a and b"],
+    ],
+  );
+});
+
+test("a Python identifier containing True, False, and, or or is not itself mutated", () => {
+  const text = "Truelove = 1\nFalsehood = 2\nandromeda = 3\nordinary = 4\nband = 5\n";
+  assert.deepEqual(planFileMutations("x.py", text), []);
+});
+
+test("per-language operator selection: True, False, and, or are never offered in a Rust file", () => {
+  // Same four words, same surrounding whitespace, but in a language where
+  // they read as ordinary identifiers, not Python's keywords.
+  const text = "let ok = True;\nlet other = False;\nlet flag = a and b;\nlet both = a or b;\n";
+  assert.deepEqual(planFileMutations("main.rs", text), []);
+});
+
+test("per-language operator selection: lowercase true/false still work in a Rust file", () => {
+  // The C-family table is untouched by adding Python: true/false stay
+  // reachable everywhere they always were.
+  assert.deepEqual(planFileMutations("main.rs", "let ok = true;\n").map((m) => m.after), ["let ok = false;"]);
+});
+
 // --- which files -------------------------------------------------------------
 
 test("a test file is never a mutation candidate", () => {
@@ -164,14 +219,35 @@ test("a test file is never a mutation candidate", () => {
 test("a file with an unsupported extension is never a candidate", () => {
   assert.equal(hasMutableExtension("README.md"), false);
   assert.equal(hasMutableExtension("data.json"), false);
-  assert.equal(hasMutableExtension("run.py"), false);
+  // .rb has no operator table of its own (see PYTHON_OPERATOR_RULES's
+  // comment in src/mutate.ts for why Python earned one and other
+  // languages have not yet), so it stays outside MUTABLE_EXTENSIONS the
+  // way every extension without a table does.
+  assert.equal(hasMutableExtension("script.rb"), false);
   assert.equal(hasMutableExtension("src/order.ts"), true);
   assert.equal(hasMutableExtension("src/order.go"), true);
+  assert.equal(hasMutableExtension("run.py"), true);
 });
 
 test("selectMutablePaths drops test files and sorts what is left", () => {
   const selected = selectMutablePaths(["src/b.ts", "tests/a.test.ts", "src/a.ts", "docs/x.md"]);
   assert.deepEqual(selected, ["src/a.ts", "src/b.ts"]);
+});
+
+test("unsupportedLanguagePaths reports a non-test file in a known language with no operator table, and only that", () => {
+  const paths = ["app/main.rb", "spec/main_spec.rb", "src/a.ts", "README.md", "package.json", "run.py"];
+  // main.rb: a real candidate in a language this tool already masks
+  // (see src/tree-sitter-grammars.ts) but has no operator table for ->
+  // reported.
+  // main_spec.rb: a test file, dropped for being a test, not for its
+  // language -> not reported, same as selectMutablePaths would drop it.
+  // a.ts: mutable -> not reported.
+  // README.md, package.json: not a language this tool models at all, the
+  // same as any other markup, config, or data format -> not reported,
+  // exactly as before this change, so an ordinary run that merely touches
+  // a config file never reports "unmeasured" for it.
+  // run.py: now mutable -> not reported.
+  assert.deepEqual(unsupportedLanguagePaths(paths), ["app/main.rb"]);
 });
 
 test("planMutations never plans a mutation in a test file", () => {
@@ -284,6 +360,47 @@ test("a survivor wins over a mutation that never got a verdict", () => {
   assert.equal(exitCodeFor([resultWith("survived"), resultWith("skipped"), resultWith("killed")]), 1);
   assert.equal(exitCodeFor([resultWith("survived"), resultWith("output-overflow")]), 1);
   assert.equal(exitCodeFor([resultWith("survived"), resultWith("killed-by-signal")]), 1);
+});
+
+test("exit code is 3 when nothing survived but a candidate's language had no operator set", () => {
+  // No mutable file at all is not the same outcome as every mutation
+  // being killed: both are unmeasured, but for different reasons, and
+  // both have to keep this run out of exit 0.
+  assert.equal(exitCodeFor([], ["app/main.rb"]), 3);
+  assert.equal(exitCodeFor([resultWith("killed")], ["app/main.rb"]), 3);
+});
+
+test("a survivor still wins over an unsupported-language file", () => {
+  assert.equal(exitCodeFor([resultWith("survived")], ["app/main.rb"]), 1);
+});
+
+test("no mutable file found and every mutation killed both read differently in the report", () => {
+  const noneFound = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: [],
+    planned: 0,
+    attempted: 0,
+    results: [],
+    unsupportedFiles: ["app/main.rb", "lib/other.rb"],
+  });
+  assert.match(noneFound, /No operator set for these \(2\):/);
+  assert.match(noneFound, /app\/main\.rb/);
+  assert.match(noneFound, /lib\/other\.rb/);
+  assert.match(noneFound, /2 selected file\(s\) had no operator set for their language.*unmeasured, not passed over \(exit 3\)/);
+
+  const allKilled = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts"],
+    planned: 1,
+    attempted: 1,
+    results: [resultWith("killed")],
+  });
+  assert.doesNotMatch(allKilled, /No operator set for these/);
+  assert.match(allKilled, /No mutation survived: every break this tool made was caught\./);
 });
 
 test("a timeout is its own verdict, not a kill and not a survivor", () => {
@@ -408,11 +525,12 @@ test("the text report says plainly when nothing survived", () => {
 // planFileMutations is the exact function hooks/mutate.ts reaches through
 // planMutations: `languageServiceFor(path).codeMask(text)` directly, with
 // no way of its own to know whether warmLanguageServices ran first. .py is
-// not in MUTABLE_EXTENSIONS (its operators are True/False and "and"/"or",
-// not this tool's C-family set), so an ordinary `adg mutate` run never
-// selects a .py file; this test drives planFileMutations directly, the
-// same way the reviewer's own reproduction did, to prove what mask a .py
-// file gets when the batch that reaches it was, and was not, warmed.
+// in MUTABLE_EXTENSIONS now, so an ordinary `adg mutate` run does select a
+// .py file, through hooks/mutate.ts's own planMutationsWarmed call; this
+// test drives planFileMutations directly instead, unwarmed, the same way
+// the reviewer's own reproduction of the original bug did, to prove what
+// mask a .py file gets when the batch that reaches it was, and was not,
+// warmed first.
 //
 // The docstring's interior falls out of the regex scanner's own
 // documented per-line limit: a plain quote unclosed on the line it opened
@@ -448,4 +566,38 @@ test("planMutationsWarmed plans the same mutations planMutations does for files 
   const sync = planMutations(files);
   const warmed = await planMutationsWarmed(files);
   assert.deepEqual(warmed, sync);
+});
+
+// --- Python: proof the mask is consulted, not just the operator table ------
+//
+// Placed after the warmed-vs-unwarmed tests above, and not earlier: the
+// Python tree-sitter service is resolved once per process and cached (see
+// resolvedServices in src/code-mask.ts), so a test here that warms it
+// would otherwise leak into the two "unwarmed" tests above and silently
+// change what they are proving.
+
+test("planMutationsWarmed never mutates inside a Python docstring, an f-string literal, or after a # comment", async () => {
+  const text = [
+    "def f(x, y):",
+    '    """',
+    "    x == y and x != y",
+    '    """',
+    '    name = f"{x} and {y}"',
+    "    ok = x == y  # x and y, True or False",
+    "    return x == y",
+    "",
+  ].join("\n");
+  const mutations = await planMutationsWarmed([{ path: "foo.py", text }]);
+  // Line 3 sits inside the docstring, line 5's "and" sits inside the
+  // f-string's own literal text (its {x}/{y} interpolations hold no
+  // operator), and line 6's trailing comment holds "and"/"or"/"True"/
+  // "False" that must stay untouched. Only line 6's real "==" and line 7's
+  // real "==" are candidates.
+  assert.deepEqual(
+    mutations.map((m) => [m.line, m.original]),
+    [
+      [6, "=="],
+      [7, "=="],
+    ],
+  );
 });

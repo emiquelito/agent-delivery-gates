@@ -12,9 +12,11 @@
 // at least one mutation survived. Exit 2: could not run as asked, which
 // includes a dirty working tree, a baseline run that was already failing,
 // no command to run, and a tree left dirty afterwards. Exit 3: nothing
-// survived, but at least one mutation never got a verdict. A run that could
-// not happen, and a run that could not judge part of its own work, must
-// never read the same as a run that judged all of it and found nothing.
+// survived, but at least one mutation never got a verdict, or at least one
+// selected file's language had no operator set to try it with. A run that
+// could not happen, and a run that could not judge part of its own work,
+// must never read the same as a run that judged all of it and found
+// nothing.
 //
 // This tool writes to the caller's own source files, so the safety rules
 // come first and are not optional:
@@ -43,6 +45,7 @@ import {
   formatReportText,
   planMutationsWarmed,
   selectMutablePaths,
+  unsupportedLanguagePaths,
   type MutationResult,
   type SourceFile,
 } from "../src/mutate.ts";
@@ -121,6 +124,13 @@ Operators, applied one at a time:
   boolean literal      true to false, false to true
   arithmetic           + to -, - to +
 
+Python files (.py) also get, and only get, these, since True/False/and/or
+are words in Python where every other supported language uses punctuation:
+  boolean connective   and to or, or to and
+  boolean literal      True to False, False to True
+Python's comparison and arithmetic operators are the same characters as the
+rest of the table above and are already covered by it.
+
 Test files are never mutated, and neither is a comment line, an import
 line, or text inside a string literal.
 
@@ -142,7 +152,9 @@ Exit codes:
   3  nothing survived, but at least one mutation never got a verdict: it
      timed out, printed more than this tool will hold, was killed by a
      signal that had nothing to do with the suite, or was skipped, so that
-     part of the run is unmeasured
+     part of the run is unmeasured. Also used when a selected file's
+     extension has no operator set this tool speaks yet: that file is
+     reported by name and counted as unmeasured, not passed over in silence
 
 A run stopped by SIGINT or SIGTERM does not use any of the codes above. On
 POSIX it exits with that signal's own convention instead (130 for SIGINT,
@@ -485,6 +497,12 @@ async function main(): Promise<void> {
   const command = resolveCommand(args, repoRoot);
   const candidates = resolveCandidatePaths(args, repoRoot);
   const mutablePaths = selectMutablePaths(candidates);
+  // Candidates this tool has no operator set for: not a test file, just a
+  // language nothing above knows how to mutate. Reported below, not
+  // dropped, so a selector that names only such files never reads as "ran
+  // clean and found nothing" (see unsupportedLanguagePaths in
+  // src/mutate.ts).
+  const unsupportedPaths = unsupportedLanguagePaths(candidates);
   const files = readSourceFiles(mutablePaths, repoRoot);
   // Warms the language services this batch of files needs (Python's
   // tree-sitter grammar, when a .py file is in it) before planning a
@@ -496,8 +514,12 @@ async function main(): Promise<void> {
   // Nothing to mutate is not a pass. A run that measured nothing has to
   // read as a run that could not happen, or an empty selector (--staged on
   // a clean tree names no file at all) would report the same exit code as a
-  // suite that caught every break.
-  if (attempted.length === 0) {
+  // suite that caught every break. The one exception is a selection that
+  // held nothing to mutate only because every candidate's language has no
+  // operator set: that is not "could not run", it is a run that did happen
+  // and measured nothing, so it falls through to the ordinary report below
+  // and comes out exit 3, with those files named, instead of exit 2.
+  if (attempted.length === 0 && unsupportedPaths.length === 0) {
     fail(
       candidates.length === 0
         ? "the selector named no files, so there was nothing to mutate"
@@ -625,6 +647,7 @@ async function main(): Promise<void> {
     planned: planned.length,
     attempted: attempted.length,
     results,
+    unsupportedFiles: unsupportedPaths,
   };
   process.stdout.write(args.format === "json" ? formatReportJson(report) : `${formatReportText(report)}\n`);
 
@@ -643,7 +666,7 @@ async function main(): Promise<void> {
     fail("the working tree is dirty after the run; check these paths before trusting anything above");
   }
 
-  process.exit(exitCodeFor(results));
+  process.exit(exitCodeFor(results, unsupportedPaths));
 }
 
 main().catch((err: unknown) => {

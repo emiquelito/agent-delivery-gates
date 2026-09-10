@@ -17,6 +17,7 @@
 
 import { languageServiceFor, warmLanguageServices, IDENT_CHAR } from "./code-mask.ts";
 import { classifyTestPath, isCommentLine, isImportLine, type RuleSet } from "./test-diff-separator.ts";
+import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
 /** The fixed operator set. One mutation per run, one operator per mutation. */
 export type MutationOperator =
@@ -57,13 +58,21 @@ export interface MutationResult {
 
 // --- which files can be mutated ----------------------------------------------
 
-// The extensions this tool will touch. Every operator below is written for
-// C-family and JavaScript-family syntax, and so is the string and comment
-// scanner: a file outside this list is left alone instead of being mutated
-// by rules that were never written for it. Python is out on purpose (its
-// boolean literals are True and False, its connectives are words, and its
-// triple-quoted strings need their own scanner), and so is every markup,
-// config, and data format.
+// The extensions this tool will touch. Every operator except the four
+// Python-only ones below (see PYTHON_OPERATOR_RULES) is written for
+// C-family and JavaScript-family syntax, and so is the whitespace-bounded
+// matching rule in matchRuleAt: a file outside this list is left alone
+// instead of being mutated by rules that were never written for it.
+//
+// Python earns its own entry now that its triple-quoted strings,
+// f-strings, and comments have a correct scanner of their own
+// (src/tree-sitter-python-service.ts, reached through
+// languageServiceFor in src/code-mask.ts, proven behaviour-identical
+// across 141,245 real files): its comparison and arithmetic operators are
+// the same characters as the C family and already matched by
+// OPERATOR_RULES below, so the only new work was its own boolean literals
+// and connectives, written as words: True/False/and/or. Every other
+// markup, config, and data format stays excluded.
 export const MUTABLE_EXTENSIONS: readonly string[] = [
   ".c",
   ".cc",
@@ -82,6 +91,7 @@ export const MUTABLE_EXTENSIONS: readonly string[] = [
   ".mjs",
   ".mts",
   ".php",
+  ".py",
   ".rs",
   ".scala",
   ".swift",
@@ -123,6 +133,51 @@ export function selectMutablePaths(paths: string[], rules?: RuleSet): string[] {
   return paths.filter((path) => isMutablePath(path, rules)).sort();
 }
 
+/**
+ * Extensions this project already knows how to read as a programming
+ * language: Python's own tree-sitter-python-service.ts, plus every
+ * language src/tree-sitter-grammars.ts lists a GrammarSpec for (Rust,
+ * Ruby, PHP, Go, Java, C#). A working code mask exists for each of these,
+ * whether or not MUTABLE_EXTENSIONS above has an operator table for it
+ * yet: right now that is every one of them except Ruby, which this
+ * project can already tell code from a comment or a string in, but has
+ * not yet written mutation rules for. A config file, a markup file, or a
+ * data format is deliberately not in this set: it was never going to grow
+ * an operator table, so treating one as "unmeasured" on an ordinary run
+ * would drown the signal unsupportedLanguagePaths exists to give in
+ * noise (a commit that merely touches package.json would report exit 3
+ * for no real reason). This set is specifically "a language this tool
+ * could write mutation rules for tomorrow, the same way it just did for
+ * Python."
+ */
+const KNOWN_LANGUAGE_EXTENSIONS: ReadonlySet<string> = new Set([".py", ...Object.keys(GRAMMAR_SPECS)]);
+
+/**
+ * The candidate paths `selectMutablePaths` above drops for want of an
+ * operator set: a real, non-test source file in a language this project
+ * already recognises (see KNOWN_LANGUAGE_EXTENSIONS) but MUTABLE_EXTENSIONS
+ * has no rules for. A test file is not included here, because it was
+ * never going to be mutated anyway, and neither is a config, markup, or
+ * data file, for the reason KNOWN_LANGUAGE_EXTENSIONS' own comment gives.
+ *
+ * A caller that silently drops these reports a run over, say, an
+ * all-Ruby diff exactly the way it reports a run that mutated everything
+ * and found no survivors: nothing printed, exit 0. See ReportInput's
+ * `unsupportedFiles` and exitCodeFor below for how this list turns that
+ * silence into an unmeasured file, reported by name, with its own exit
+ * code.
+ */
+export function unsupportedLanguagePaths(paths: string[], rules?: RuleSet): string[] {
+  return paths
+    .filter(
+      (path) =>
+        KNOWN_LANGUAGE_EXTENSIONS.has(extensionOf(path)) &&
+        !hasMutableExtension(path) &&
+        !classifyTestPath(path, rules).isTest,
+    )
+    .sort();
+}
+
 // --- the operator table -------------------------------------------------------
 
 interface OperatorRule {
@@ -152,6 +207,48 @@ const OPERATOR_RULES: readonly OperatorRule[] = [
   { token: "true", replacement: "false", operator: "boolean-literal", kind: "word" },
   { token: "false", replacement: "true", operator: "boolean-literal", kind: "word" },
 ];
+
+// This table stays exactly as it was for the six languages it already
+// covered: rewriting it to a node-type-driven table, the way the six
+// tree-sitter grammars in src/tree-sitter-grammars.ts decide what is a
+// comment or a string, would be a large behaviour change on every
+// existing user's mutation runs, on every language at once, and it
+// deserves its own phase with its own evidence, not a side effect of
+// adding Python. Python turned out not to need it: see
+// PYTHON_OPERATOR_RULES and operatorRulesFor below.
+
+/**
+ * Python's boolean literals and connectives are words, not punctuation:
+ * `True`, `False`, `and`, `or`. Its comparison and arithmetic operators
+ * (==, !=, <, >, <=, >=, +, -) are the same characters as the C family and
+ * need no rule of their own; OPERATOR_RULES above already matches them
+ * through the same whitespace-bounded scan every other language uses.
+ *
+ * Kept apart from OPERATOR_RULES, and applied only to a `.py` path (see
+ * operatorRulesFor), so `True` is never offered as a mutation candidate in,
+ * say, a Rust file, where it reads as an ordinary identifier and not a
+ * keyword. Lowercase `true`/`false` already in OPERATOR_RULES above are
+ * left reachable on a `.py` path too: they are not Python syntax, so they
+ * can only ever match a Python identifier that happens to be spelled that
+ * way, the same low-probability case every other language already accepts.
+ */
+const PYTHON_OPERATOR_RULES: readonly OperatorRule[] = [
+  { token: "True", replacement: "False", operator: "boolean-literal", kind: "word" },
+  { token: "False", replacement: "True", operator: "boolean-literal", kind: "word" },
+  { token: "and", replacement: "or", operator: "boolean-connective", kind: "word" },
+  { token: "or", replacement: "and", operator: "boolean-connective", kind: "word" },
+];
+
+/**
+ * The operator rules that apply to one file, chosen from its path. Every
+ * mutable extension gets OPERATOR_RULES; a `.py` path also gets
+ * PYTHON_OPERATOR_RULES. This is the per-language selection point: adding
+ * an eighth language's own word operators means adding a table here and
+ * one more branch, not touching what any other language matches.
+ */
+function operatorRulesFor(path: string): readonly OperatorRule[] {
+  return extensionOf(path) === ".py" ? [...OPERATOR_RULES, ...PYTHON_OPERATOR_RULES] : OPERATOR_RULES;
+}
 
 /**
  * A punctuation operator counts only with whitespace on both sides. That
@@ -198,6 +295,7 @@ export interface SourceFile {
  */
 export function planFileMutations(path: string, text: string): Mutation[] {
   const mask = languageServiceFor(path).codeMask(text);
+  const rules = operatorRulesFor(path);
   const mutations: Mutation[] = [];
   const lines = text.split("\n");
   let offset = 0;
@@ -210,7 +308,7 @@ export function planFileMutations(path: string, text: string): Mutation[] {
 
     for (let col = 0; col < line.length; col++) {
       if (!mask[lineStart + col]) continue;
-      const rule = matchRuleAt(line, col);
+      const rule = matchRuleAt(line, col, rules);
       if (rule === undefined) continue;
       const end = col + rule.token.length;
       const after = `${line.slice(0, col)}${rule.replacement}${line.slice(end)}`;
@@ -230,8 +328,8 @@ export function planFileMutations(path: string, text: string): Mutation[] {
   return mutations;
 }
 
-function matchRuleAt(line: string, col: number): OperatorRule | undefined {
-  for (const rule of OPERATOR_RULES) {
+function matchRuleAt(line: string, col: number, rules: readonly OperatorRule[]): OperatorRule | undefined {
+  for (const rule of rules) {
     if (!line.startsWith(rule.token, col)) continue;
     const end = col + rule.token.length;
     if (rule.kind === "punctuation") {
@@ -360,17 +458,23 @@ function isUnmeasured(result: MutationResult): boolean {
  * Exit code for a finished run:
  *   0  every attempted mutation got a verdict and none survived
  *   1  at least one mutation survived
- *   3  nothing survived, but at least one mutation never got a verdict
- * A survivor wins over an unmeasured mutation, because a hole a test left
- * open is the more useful thing to report. Exit 3 exists so a run that
- * could not judge part of its work never reads the same as a run that
- * judged all of it and found nothing: that is the whole point of this
- * project, and folding a timeout into 0 broke it here. The CLI owns exit
- * 2, which means the run could not happen at all.
+ *   3  nothing survived, but at least one mutation never got a verdict, or
+ *      at least one selected file's language had no operator set to try
+ * A survivor wins over an unmeasured mutation or file, because a hole a
+ * test left open is the more useful thing to report. Exit 3 exists so a
+ * run that could not judge part of its work never reads the same as a run
+ * that judged all of it and found nothing: that is the whole point of this
+ * project, and folding a timeout into 0 broke it here. `unsupportedFiles`
+ * (see unsupportedLanguagePaths above) is the same principle applied one
+ * level earlier: a file skipped before planning because this tool has no
+ * operators for its language is exactly as unmeasured as a mutation that
+ * timed out, and a run whose every candidate fell into that bucket must
+ * not read as exit 0 either. The CLI owns exit 2, which means the run
+ * could not happen at all.
  */
-export function exitCodeFor(results: MutationResult[]): 0 | 1 | 3 {
+export function exitCodeFor(results: MutationResult[], unsupportedFiles: readonly string[] = []): 0 | 1 | 3 {
   if (results.some((result) => result.verdict === "survived")) return 1;
-  if (results.some(isUnmeasured)) return 3;
+  if (results.some(isUnmeasured) || unsupportedFiles.length > 0) return 3;
   return 0;
 }
 
@@ -382,6 +486,14 @@ export interface ReportInput {
   planned: number;
   attempted: number;
   results: MutationResult[];
+  /** Candidate files skipped before planning because this tool has no
+   * operator set for their language: see unsupportedLanguagePaths above.
+   * Reported by name and folded into exit 3 the same way an unjudged
+   * mutation is, so a run over files in a language this tool cannot yet
+   * speak never prints the same report as a run that mutated everything
+   * and found no survivors. Absent or empty when every candidate had a
+   * language this tool covers. */
+  unsupportedFiles?: string[];
 }
 
 function describeMutation(mutation: Mutation): string {
@@ -390,6 +502,7 @@ function describeMutation(mutation: Mutation): string {
 
 export function formatReportText(input: ReportInput): string {
   const summary = summarize(input.results);
+  const unsupportedFiles = input.unsupportedFiles ?? [];
   const lines: string[] = [];
   lines.push(`Command: ${input.command}`);
   lines.push(`Baseline: passed in ${(input.baselineMs / 1000).toFixed(1)}s`);
@@ -433,9 +546,25 @@ export function formatReportText(input: ReportInput): string {
     for (const result of unmeasured) lines.push(`  ${result.verdict}  ${describeMutation(result.mutation)}`);
   }
 
+  if (unsupportedFiles.length > 0) {
+    lines.push("");
+    lines.push(`No operator set for these (${unsupportedFiles.length}):`);
+    for (const path of unsupportedFiles) lines.push(`  ${path}`);
+  }
+
   lines.push("");
   if (survivors.length > 0) {
     lines.push("A surviving mutation means no test noticed the code changed.");
+  } else if (unmeasured.length > 0 && unsupportedFiles.length > 0) {
+    lines.push(
+      `No mutation survived, but ${unmeasured.length} never got a verdict and ${unsupportedFiles.length} ` +
+        `file(s) had no operator set for their language: both are unmeasured (exit 3).`,
+    );
+  } else if (unsupportedFiles.length > 0) {
+    lines.push(
+      `No mutation survived, but ${unsupportedFiles.length} selected file(s) had no operator set for their ` +
+        `language: those files are unmeasured, not passed over (exit 3).`,
+    );
   } else if (unmeasured.length > 0) {
     lines.push(
       `No mutation survived, but ${unmeasured.length} never got a verdict: those lines are still unmeasured (exit 3).`,
@@ -459,6 +588,7 @@ export function formatReportJson(input: ReportInput): string {
       attempted: input.attempted,
       summary: summarize(input.results),
       results: input.results,
+      unsupportedFiles: input.unsupportedFiles ?? [],
     },
     null,
     2,

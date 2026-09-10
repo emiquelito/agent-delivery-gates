@@ -1036,3 +1036,128 @@ if (shouldDie(0)) {
     });
   });
 });
+
+// --- Python end to end --------------------------------------------------
+
+// The module every Python repository below is built around. Three
+// mutations exist in it: >= becomes >, and becomes or, - becomes +.
+const PY_ORDER_SOURCE = `def discount(total, is_member):
+    """Ten percent off for a member spending at least 100."""
+    if total >= 100 and is_member:
+        return total - 10
+    return total
+`;
+
+// The "suite" is a Node script, not a real Python interpreter: this test
+// environment is not guaranteed to have one, and the CLI only cares that
+// its command exits 0 on a pass and non-zero on a failure. Checking the
+// mutated source's own text for the operators this test cares about is
+// enough to prove the CLI actually wrote the mutation, ran a command
+// against it, and restored the original afterwards; it does not need to
+// execute the Python to do that. assert.match on the read text is the
+// same technique tests/mutate.test.ts uses to check a `before`/`after`
+// line, one level up at the whole-file level.
+function pyVerifierScript(...substrings: string[]): string {
+  const checks = substrings
+    .map((s) => `assert.ok(text.includes(${JSON.stringify(s)}), ${JSON.stringify(`missing: ${s}`)});`)
+    .join("\n");
+  return `import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const text = readFileSync(new URL("../src/order.py", import.meta.url), "utf8");
+${checks}
+`;
+}
+
+function pyOrderRepo(verifier: string, extra: Record<string, string> = {}): string {
+  return makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node tests/order.test.mjs" } }, null, 2)}\n`,
+    "src/order.py": PY_ORDER_SOURCE,
+    "tests/order.test.mjs": verifier,
+    ...extra,
+  });
+}
+
+const PY_SUITE_COMMAND = "node tests/order.test.mjs";
+
+test("a Python file is now mutated: comparison, connective, and arithmetic operators all become candidates", () => {
+  const dir = pyOrderRepo(pyVerifierScript("total >= 100", " and is_member", "total - 10"));
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "src/order.py", "--command", PY_SUITE_COMMAND, "--format", "json"]);
+    const report = JSON.parse(result.stdout) as {
+      results: Array<{ mutation: { operator: string; original: string; replacement: string }; verdict: string }>;
+    };
+    const operators = report.results.map((r) => `${r.mutation.operator}:${r.mutation.original}->${r.mutation.replacement}`).sort();
+    assert.deepEqual(operators, [
+      "arithmetic:-->+",
+      "boolean-connective:and->or",
+      "comparison-boundary:>=->>",
+    ]);
+    assert.ok(
+      report.results.every((r) => r.verdict === "killed"),
+      result.stdout,
+    );
+    assert.equal(result.status, 0, result.stdout);
+    assert.equal(readFileSync(join(dir, "src/order.py"), "utf8"), PY_ORDER_SOURCE, "the file is restored byte for byte");
+  });
+});
+
+test("a Python suite with a hole in it: the and/or connective survives, the rest are killed", () => {
+  // Checks the boundary and the arithmetic, never the connective: the same
+  // structure as HOLED_SUITE for the C-family repo above.
+  const dir = pyOrderRepo(pyVerifierScript("total >= 100", "total - 10"));
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "src/order.py", "--command", PY_SUITE_COMMAND]);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /killed 2, survived 1/);
+    assert.match(result.stdout, /src\/order\.py:3:21\s+boolean-connective\s+and to or/);
+  });
+});
+
+// --- the silence problem: a language with no operator set --------------
+
+test("a repository with only an unsupported-language file: exit 3, named and unmeasured, not silence", () => {
+  const dir = makeRepo({
+    "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
+    "app/main.rb": "def discount(total)\n  total\nend\n",
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "app/main.rb"]);
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stdout, /No operator set for these \(1\):/);
+    assert.match(result.stdout, /app\/main\.rb/);
+    assert.match(result.stdout, /file\(s\) had no operator set for their language.*unmeasured, not passed over \(exit 3\)/);
+    assert.equal(readFileSync(join(dir, "app/main.rb"), "utf8"), "def discount(total)\n  total\nend\n");
+  });
+});
+
+test("a mix of a mutable file and an unsupported-language file: both show up, survivor still wins", () => {
+  const dir = orderRepo(HOLED_SUITE, { "app/main.rb": "def discount(total)\n  total\nend\n" });
+  withRepo(dir, () => {
+    const result = runCli(dir, [
+      "--paths",
+      "src/order.mjs",
+      "app/main.rb",
+      "--command",
+      SUITE_COMMAND,
+      "--format",
+      "json",
+    ]);
+    const report = JSON.parse(result.stdout) as { unsupportedFiles: string[] };
+    assert.deepEqual(report.unsupportedFiles, ["app/main.rb"]);
+    assert.equal(result.status, 1, result.stdout);
+  });
+});
+
+test("a test file with an unsupported extension is dropped silently, same as any other test file", () => {
+  // Only a real candidate the tool could in principle mutate is reported;
+  // a file excluded for being a test file was never going to be mutated
+  // anyway, and reporting it would blur "no operator set" with "correctly
+  // excluded".
+  const dir = orderRepo(STRONG_SUITE, { "spec/main_spec.rb": "describe('x') {}\n" });
+  withRepo(dir, () => {
+    const result = runCli(dir, ["--paths", "src/order.mjs", "spec/main_spec.rb", "--command", SUITE_COMMAND, "--format", "json"]);
+    const report = JSON.parse(result.stdout) as { unsupportedFiles: string[] };
+    assert.deepEqual(report.unsupportedFiles, []);
+    assert.equal(result.status, 0, result.stdout);
+  });
+});
