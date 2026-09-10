@@ -712,6 +712,101 @@ test("Deno's Deno.test({ ignore: true, ... }) fires skip-added", () => {
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
+// --- Reviewer findings against the six-gap fix above ------------------------
+//
+// An independent reviewer found three more problems in the commit above,
+// two of them misses in exact forms that commit claimed to have closed.
+// Each "before" behaviour named below was confirmed by running the prior
+// commit's separateTestDiff against the same fixture.
+
+// Finding 1: Deno's own documentation shows "ignore" set conditionally, not
+// just as a literal "true" -- confirmed producing no signal at all before
+// this fix, since the old fragment required the literal word.
+
+test("Deno's Deno.test({ ignore: <conditional expression>, ... }) fires skip-added", () => {
+  const diff = oneFileDiff(
+    "widget_test.ts",
+    [],
+    [
+      "Deno.test({",
+      '  name: "example",',
+      '  ignore: Deno.build.os === "windows",',
+      "  fn() { doAdd(); },",
+      "});",
+    ],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Deno's Deno.test({ ignore: <plain variable>, ... }) fires skip-added", () => {
+  const diff = oneFileDiff(
+    "widget_test.ts",
+    [],
+    ["Deno.test({", '  name: "example",', "  ignore: isCI,", "  fn() { doAdd(); },", "});"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Finding 2: Jest and Vitest also support a tagged-template form of the
+// chained table opener, in place of the array form the fragment already
+// covered. Confirmed missing for both the "test" and "describe" spellings,
+// and not disclosed by the builder's tests, which only covered the array
+// form.
+
+test("Jest's/Vitest's test.skip.each`...` (tagged-template form) fires skip-added", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    [],
+    ["test.skip.each`a | b", '${1} | ${2}`("adds %i and %i", (a, b) => { doAdd(a, b); });'],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("describe.skip.each`...` (tagged-template form) fires skip-added too", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    [],
+    ["describe.skip.each`a | b", '${1} | ${2}`("adds", () => {});'],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Finding 3, a confirmed regression, NOT fixed here -- the reviewer found
+// no local fix exists without per-test pairing, which this file's
+// one-line-at-a-time model cannot do, and recommended naming the trade
+// instead of redesigning the counting. See the comments on the testCases
+// bucket's "\\b(?:test|it|describe)\\.skipIf\\(" fragment and on
+// netRemovalSignal in src/test-diff-separator.ts for the mechanism.
+//
+// This test pins the CURRENT (undesirable) behaviour on purpose: a real
+// test is deleted, and in the same file, in the same diff, an unrelated
+// test gains a conditional skip. The added skipIf line's own testCases
+// match balances the file's removed-vs-added totals, so the real
+// deletion goes unreported. This is a known gap, not a bug -- if this
+// assertion ever starts failing because someone "fixed" the counting to
+// be per-line, this test's expectation should change to reflect the fix
+// its own comments say was intentionally deferred; it should not be
+// treated as proof the fix broke something.
+
+test("known gap: an added conditional skip can silently cancel an unrelated real test-case-removed", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    ["test('subtracts', () => { doSubtract(); });"],
+    ["test.skipIf(isCI)('adds', () => { doAdd(); });"],
+  );
+  const result = separateTestDiff(diff);
+  // The deleted "subtracts" test case is real and unrelated to the skip
+  // added for "adds", yet no test-case-removed signal fires for it: the
+  // testCases bucket's file-wide net count sees one match removed
+  // ("test('subtracts', ...)") and one added ("test.skipIf(isCI)('adds',
+  // ...)"), and treats them as balanced.
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
 // --- tolerance-widened ---------------------------------------------------------
 
 test("a changed tolerance line, one removed and one added, fires tolerance-widened", () => {
@@ -2127,6 +2222,22 @@ test("the assignment form 'skip = ...' in Rust source no longer fires skip-added
     "+    let skip = offset + 1;",
     "+    skip",
     "+}",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a struct-literal 'ignore:' field in Rust source no longer fires skip-added under the same whole-file scan", () => {
+  // Widening the Deno "ignore:" fragment past the literal word "true"
+  // (Finding 1) reopened the exact same struct-literal false positive
+  // "skip:" and "pending:" were already excluded for, so "ignore:" was
+  // added to RUST_EXCLUDED_SKIP_FRAGMENTS at the same time, not left for a
+  // reviewer to reproduce separately.
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod other_tests {}",
+    " ",
+    "+struct Filter { ignore: bool, threshold: i64 }",
   ]);
   const result = separateTestDiff(diff);
   assert.deepEqual(result.signals, []);

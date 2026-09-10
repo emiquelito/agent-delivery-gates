@@ -249,6 +249,30 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // it names the wrong kind of change. This fragment gives the new line
     // its own testCases match, so the counts balance and the (correct)
     // skip-added signal from the skips bucket below is what fires instead.
+    //
+    // Finding 3, a confirmed regression this fix reopened and does not
+    // attempt to close: netRemovalSignal (see below) does not pair a
+    // removed testCases line with the added one that "replaced" it -- it
+    // only compares the FILE'S TOTAL removed-match count against its
+    // total added-match count, because a one-line-at-a-time gate has no
+    // way to know that a specific added line is the specific removed
+    // line's intended replacement instead of an unrelated change somewhere
+    // else in the same file. That is exactly what lets this fragment do
+    // its job: the removed unconditional opener and the added
+    // "test.skipIf(cond)(" line balance out FILE-WIDE, not line-for-line.
+    // The same file-wide balancing also fires when the two lines are
+    // UNRELATED: delete a real test elsewhere in this file (one matching
+    // testCases, nothing added to replace it) in the same diff that adds
+    // an unrelated conditional skip, and the added skipIf line's
+    // testCases match cancels out the deletion's removed match, so
+    // test-case-removed never fires for it -- a real test disappears from
+    // the suite and this gate reports nothing. Reproduced directly: a
+    // deleted test plus an unrelated added skipIf in one file, confirmed
+    // silent. A reviewer judged there is no local fix without per-test
+    // pairing, which this file's one-line-at-a-time model cannot do
+    // without a much larger redesign, and recommended naming the trade
+    // instead of attempting one here. Left open on purpose; see the test
+    // pinning this exact form in tests/test-diff-separator.test.ts.
     "\\b(?:test|it|describe)\\.skipIf\\(",
   ],
   skips: [
@@ -415,7 +439,21 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // and "it.skip.each([...])(...)" disable every row of a parameterized
     // test. ".skip(" above needs "skip" directly followed by "(" and misses
     // this, since "skip" is followed by ".each(" instead.
-    "\\.skip\\.each\\s*\\(",
+    // Finding 2: both frameworks also accept a tagged-template form in
+    // place of the array --
+    //   test.skip.each`a | b
+    //   ${1} | ${2}`("adds", ...)
+    // -- where ".each" is followed by a backtick, not "(", opening the
+    // table on the SAME line as ".skip.each" with no parenthesis anywhere
+    // near it (the call parenthesis only appears after the closing
+    // backtick, often several lines later). The paren-only fragment above
+    // missed this for both the "test" and "describe" spellings; confirmed
+    // producing no signal at all. A backtick is accepted alongside the
+    // parenthesis for that reason -- masking keeps a template literal's
+    // opening backtick even though it blanks its contents (see the
+    // "test(" fragment's comment above), so the anchor is visible on the
+    // masked line the same way the array form's "(" is.
+    "\\.skip\\.each\\s*[(`]",
     // TestNG's declarative disable: "@Test(enabled = false)", the only
     // form TestNG uses -- there is no separate skip attribute the way
     // JUnit/NUnit have one. Anchored to "@Test(" so it never collides with
@@ -442,12 +480,29 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\bAssert\\.Ignore\\s*\\(",
     // Deno's object-form test opener carries its disable as an option, not
     // a separate call: "Deno.test({ name: \"x\", ignore: true, fn() {} })".
-    // Matched as a bare "ignore: true" key/value, the same no-receiver-
-    // anchor reasoning as "\\bskip:\\s*\\S" and "\\bpending:\\s*\\S" above:
-    // the option can land on its own diff line, away from "Deno.test(",
-    // when the call is wrapped across lines, which real Deno code usually
-    // is once "name" and "fn" are both present.
-    "\\bignore:\\s*true\\b",
+    // Finding 1: this used to require the literal word "true", but Deno's
+    // own documentation shows the option set conditionally --
+    // "ignore: Deno.build.os === \"windows\"" -- and a plain variable
+    // ("ignore: isCI") is at least as common; neither produced any signal
+    // at all, confirmed by a reviewer against Deno's documented form. Any
+    // value after the colon now counts, the same no-value-narrowing,
+    // no-receiver-anchor reasoning as "\\bskip:\\s*\\S" and
+    // "\\bpending:\\s*\\S" above: the option can also land on its own diff
+    // line, away from "Deno.test(", when the call is wrapped across lines,
+    // which real Deno code usually is once "name" and "fn" are both
+    // present. This makes "ignore:" the third fragment in this bucket
+    // that is a bare word, a colon, and any value, with no call-site
+    // anchor -- accepted for the same reason the other two were, but each
+    // one added narrows how much a reader can trust the anchor alone to
+    // mean "this is a real disable", not just "the word appeared".
+    //
+    // This is also now excluded from the `.rs` skips check below (see
+    // RUST_EXCLUDED_SKIP_FRAGMENTS), for the same reason "skip:" and
+    // "pending:" already are: Rust struct-literal field init
+    // ("Config { ignore: true, ..Default::default() }") is exactly as
+    // ordinary as those two, and a boolean field named `ignore` is not
+    // Rust's way to disable a test.
+    "\\bignore:\\s*\\S",
   ],
   tolerance: [
     "\\btolerance\\b",
@@ -1514,6 +1569,24 @@ function declassifiedTestSignals(file: RawFileDiff, testPathsRe: RegExp): Signal
  * only when the file's matching removed-line count exceeds its matching
  * added-line count, so a rewritten line (one removed, one added) does not
  * fire while a deleted one does. Reports every matching removed line.
+ *
+ * Finding 3, a known gap left open on purpose: the comparison is a FILE-WIDE
+ * total, with no pairing between which removed line a given added line
+ * "answers". That is what makes a rewritten line read as unchanged instead
+ * of as a removal plus an unrelated addition, which is the whole point of
+ * this function -- but it also means any added line elsewhere in the same
+ * file that happens to match `re` can absorb an unrelated, real removal.
+ * The testCases bucket's own "\\b(?:test|it|describe)\\.skipIf\\(" fragment
+ * (see its comment above) exists so a conditional skip's new opener is not
+ * misreported as a deletion, and that fragment does its job by adding to
+ * this same file-wide total -- which means it can also cancel out a real,
+ * unrelated test-case-removed elsewhere in the file: delete one test and
+ * add a conditional skip on a different one in the same diff, and the
+ * deletion goes unreported. Reproduced directly. A per-test pairing would
+ * close this, but this function only ever sees lines, not which test each
+ * one belongs to, and giving it that would be a different, larger design
+ * than a one-line-at-a-time gate. Not attempted here; see the test pinning
+ * this exact form in tests/test-diff-separator.test.ts.
  */
 function netRemovalSignal(
   file: RawFileDiff,
@@ -1746,6 +1819,15 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMa
 //     Excluded on the same reasoning as "skip:", found by auditing this
 //     whole bucket for the same struct-literal-field pattern instead of
 //     trusting the fragments already listed here.
+//   - "\\bignore:\\s*\\S": the same struct-literal field-init form again,
+//     added when this fragment was widened past the literal word "true"
+//     (Finding 1) -- "Config { ignore: true, ..Default::default() }" is
+//     exactly as ordinary Rust as "skip: true" and "pending: true", and a
+//     boolean field named `ignore` (silencing a lint, excluding a path) is
+//     not Rust's way to disable a test either. Excluded up front, at the
+//     same time the fragment was widened, instead of waiting for a
+//     reviewer to reproduce it separately the way "skip =" was missed the
+//     first time.
 // Every other skips-bucket fragment was checked against the same question
 // (does its literal form appear in ordinary Rust source?) and found not
 // to: "#[ignore]" and the `#[...]::test` family are Rust attribute syntax
@@ -1766,6 +1848,7 @@ const RUST_EXCLUDED_SKIP_FRAGMENTS: ReadonlySet<string> = new Set([
   "\\bskip:\\s*\\S",
   "\\bskip\\s*=\\s*\\S",
   "\\bpending:\\s*\\S",
+  "\\bignore:\\s*\\S",
 ]);
 
 /** The skips bucket, compiled with every fragment in
