@@ -182,25 +182,44 @@ const php: GrammarSpec = {
     ]),
     // PHP's `text` (raw HTML outside a `<?php ... ?>` span) is deliberately
     // NOT listed here, in contentTypes below, or anywhere else in this
-    // config, after three rounds tried three different answers for it and
-    // each made things worse in a different direction. Full account in
-    // src/tree-sitter-language-service.ts's own file header; short version:
-    // masking `text` risks hiding an assertion inside an ordinary
-    // multi-line <script>/<style> block, because the gate calls maskNonCode
-    // one diff line at a time and the line carrying the assertion has no
-    // tag of its own to say the element is still open (CRITICAL); leaving
-    // it unmasked risks an ordinary documentation line, quoting an
-    // assertion's call form as prose, tripping the gate on an unrelated
-    // literal edit (HIGH). Neither is a scanner defect a cleverer scan can
-    // fix, because the scanner is never handed enough text to tell the two
-    // cases apart -- that is blocked on the gate reading whole files
-    // instead of diff lines, a separate and larger change. Between the two
-    // unsafe options, this project keeps the one whose failure is visible:
-    // a false "still code" signal shows up in a diff for a person to see
-    // and dismiss, where a hidden assertion does not. `text` reopens as
-    // ordinary code under this walk's default, the same as any other
-    // unlisted named child, exactly as it did for years before any of this
-    // started.
+    // config. That removes TWO independent masking effects, not one, and
+    // they have different histories -- a prior version of this comment
+    // conflated them and claimed the state was unchanged from before this
+    // episode, which is false for one of the two:
+    //
+    //   - `text` as a bare child of `program` masks leading HTML, trailing
+    //     HTML, and a template-only file with no `<?php` tag at all. This
+    //     effect did not exist before this episode: `text` was not a
+    //     literalType and had no way to be masked in that position. It was
+    //     added by this episode's own first round and is removed here for
+    //     the reasons below.
+    //   - `text` as text_interpolation's own child masks HTML sitting
+    //     BETWEEN two `<?php ... ?>` spans, PHP's most common templating
+    //     form. This effect predates this episode by years: `text` sat in
+    //     contentTypes for exactly this reason before any of the five
+    //     rounds below started. Removing it here is a deliberate change
+    //     from that years-old behaviour, not a restoration of it. It goes
+    //     because a `<script>`/`<style>` element sitting between two php
+    //     spans has its content inside a `text` node with no child
+    //     structure of its own to reopen the way a real interpolation
+    //     does, so masking that `text` node hid a real assertion inside
+    //     it -- a hidden assertion, the one failure mode this project
+    //     exists to prevent.
+    //
+    // Stated plainly because every earlier note here understated it: ALL
+    // HTML in a `.php` file -- leading, trailing, template-only, AND
+    // between two php spans -- now scans as live code. That is a real
+    // regression from the years-old, pre-episode behaviour for the
+    // between-tags case specifically, accepted on purpose because the
+    // alternative is a hidden assertion inside an inline script/style
+    // block. Full account of the three rounds that tried other answers in
+    // src/tree-sitter-language-service.ts's own file header; the pinned
+    // reproduction of the between-tags case is
+    // tests/test-diff-separator.test.ts's own known-limitation test.
+    // Between the two ways a false signal can go, this project keeps the
+    // one whose failure is visible: a false "still code" signal shows up
+    // in a diff for a person to see and dismiss, where a hidden assertion
+    // does not.
     //
     // heredoc_start/heredoc_end are the `<<<EOT` tag's own name, repeated
     // at open and close; not code, and not blanked by accident either
@@ -211,11 +230,17 @@ const php: GrammarSpec = {
     // php_tag and php_end_tag are text_interpolation's own literal `<?php`/
     // `?>` tags bracketing its actual content; neither is code, so both
     // stay blanked instead of being reopened. `text`, text_interpolation's
-    // third possible child and the actual raw HTML itself, stays out of
-    // this set for the same reason it is out of literalTypes above: an
-    // unlisted named child reopens as ordinary code, which is what keeps an
-    // inline <script>/<style> block sitting inside it, between two PHP
-    // spans, visible.
+    // third possible child and the actual raw HTML itself, was listed here
+    // for years before this episode -- it is what kept HTML between two
+    // PHP spans masked -- and is now deliberately absent, for the same
+    // reason it is out of literalTypes above: masking it hid a real
+    // assertion inside an inline <script>/<style> block sitting between
+    // two PHP spans, since tree-sitter-php gives that `text` node no child
+    // structure for such a block to be reopened through. It now reopens as
+    // ordinary code under this walk's default, the same as any other
+    // unlisted named child -- which means an inline script/style block
+    // stays visible, but so does every other piece of HTML sitting between
+    // two PHP spans, not only script/style content.
     contentTypes: new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end", "php_tag", "php_end_tag"]),
   },
 };

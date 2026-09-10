@@ -28,7 +28,32 @@
 // this treatment, on purpose, after three rounds tried to give it some
 // version of one and each round made things worse in a different
 // direction. That history, and why it stops here, is worth recording in
-// full so a fourth round does not have to rediscover it the hard way:
+// full so a fourth round does not have to rediscover it the hard way --
+// and worth being exact about what "does NOT get this treatment" actually
+// costs, which an earlier version of this account got wrong.
+//
+// `text` masking is really two independent effects sharing one node-type
+// name: `text` as a bare child of `program` (leading HTML, trailing HTML,
+// a template-only file with no `<?php` tag at all), and `text` as
+// text_interpolation's own child (HTML sitting BETWEEN two `<?php ... ?>`
+// spans -- PHP's most common templating form). Only the first of those
+// is something this episode's rounds invented and then walked back. The
+// second predates this episode by years: PHP's grammar config already
+// listed `text` in contentTypes, alongside php_tag/php_end_tag, before
+// Round 1 below ever ran, specifically so text_interpolation's own `text`
+// child stayed masked. Round 1 folded both effects into one config change
+// (moving `text` into literalTypes, so the bare-under-`program` form got
+// covered too) without separating them, and every round since has treated
+// `text` as one on/off switch instead of two. The practical upshot,
+// understated by every prior version of this history: the current state
+// does not merely leave leading/trailing/template-only HTML unmasked, as
+// most of the account below focuses on -- it also stops masking HTML
+// between two PHP spans, a years-old behaviour this episode did not set
+// out to touch and ends up removing anyway, because both effects are
+// controlled by the same `text` entry. That removal is deliberate, not
+// collateral: see the second bullet below for why, and
+// src/tree-sitter-grammars.ts's php entry for where this is recorded next
+// to the actual config.
 //
 //   - Round 1 masked `text` wholesale, plus a per-node scan
 //     (fillHtmlAwareLiteral, long since removed) that pattern-matched
@@ -94,7 +119,12 @@
 // Given that, `text` is deliberately left out of both literalTypes and
 // contentTypes below (Route B, same as Round 2): a false "still code"
 // signal is visible in a diff and a person can dismiss it; a hidden
-// assertion is neither visible nor dismissible. See
+// assertion is neither visible nor dismissible. This is a wider change
+// than Round 2 alone made, for the reason given further up: it also
+// stops masking HTML between two PHP spans, the years-old, pre-episode
+// behaviour that lived in contentTypes before Round 1 ever touched this
+// file, because that effect shares the same `text` node-type name with
+// the bare-under-`program` effect these rounds were actually chasing. See
 // src/tree-sitter-grammars.ts's php entry for where `text` is (and is
 // not) listed, and tests/tree-sitter-php-script-style.test.ts and
 // tests/test-diff-separator.test.ts for the known-limitation tests that

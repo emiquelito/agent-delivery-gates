@@ -149,11 +149,18 @@
 // contentTypes at all, in either src/tree-sitter-grammars.ts's php entry or
 // this file's own CONTENT_SHAPED_MARKERS below, and instead joins
 // CODE_TYPES.php -- ordinary code by this walk's default, the same as any
-// other unlisted named child. Leading HTML, trailing HTML, and a
-// template-only `.php` file all read as visible code now, not masked; see
+// other unlisted named child. That covers more than leading HTML, trailing
+// HTML, and a template-only `.php` file: `text` is also text_interpolation's
+// own child, the years-old, pre-episode mechanism that kept HTML BETWEEN
+// two `<?php ... ?>` spans masked, and removing `text` from every bucket
+// here removes that too. All of it -- leading, trailing, template-only,
+// and between two php spans -- reads as visible code now, not masked; see
 // src/tree-sitter-language-service.ts's own file header for the fuller
-// account of why, and why this is not attempted a fourth time without the
-// gate first reading whole files instead of diff lines.
+// account of why, including why the between-tags case is a deliberate
+// departure from years of prior behaviour and not merely an extension of
+// this episode's own leading/trailing fix, and why this is not attempted a
+// fourth time without the gate first reading whole files instead of diff
+// lines.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

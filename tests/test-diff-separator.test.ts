@@ -1735,7 +1735,7 @@ test("a throw between reset and read closes the batch instead of poisoning every
 // opened up above" -- cannot work here even if it works against a
 // whole-file corpus. Both directions were tried and both are unsafe per
 // line; this project keeps the one whose failure is visible in a diff
-// instead of invisible. The two tests below pin that choice, not endorse
+// instead of invisible. The three tests below pin that choice, not endorse
 // it -- see each one's own name and comment.
 
 // KNOWN LIMITATION (HIGH false positive), pinned, not desired: PHP's `text`
@@ -1784,5 +1784,36 @@ test("a real assertion weakened inside an ordinary multi-line <script> block sti
     signalIds(result.signals),
     ["assertion-weakened"],
     "an assertion swapped for a weaker check must never go unreported, script tag on an earlier line or not",
+  );
+});
+
+// KNOWN LIMITATION (HIGH false positive), pinned, not desired: the SAME
+// documentation-line false positive as the test above, but reached through
+// a different, older mechanism worth pinning in its own right. `text` is
+// also text_interpolation's own child -- the node that wraps HTML sitting
+// BETWEEN two `<?php ... ?>` spans, PHP's most common templating form --
+// and that masking predates this episode by years; it was never touched by
+// the first three rounds src/tree-sitter-language-service.ts's own header
+// describes, and this project's own reviewer had to reproduce it directly
+// against maskNonCode to confirm it changed at all. It changed here for the
+// same CRITICAL reason the bare-under-`program` form did: an inline
+// <script>/<style> block sitting between two php spans has no child
+// structure of its own to reopen a real assertion through, so masking this
+// `text` node hid one. If this test ever starts asserting an empty signal
+// list, the between-tags mechanism is masking `text` again and this
+// comment is stale -- confirm against a real <script> block sitting
+// between two php spans (not just a documentation line) before believing
+// the hidden-assertion risk is actually gone.
+test("known limitation: a documentation line sitting BETWEEN two php tags, not just before or after them, can also trip the gate on an unrelated literal edit", async () => {
+  const diff = oneFileDiff(
+    "tests/LoginTest.php",
+    ["        <?php $a = 1; ?>Usage: assert.strictEqual(response.code, 200); matches the API docs.<?php $b = 2; ?>"],
+    ["        <?php $a = 1; ?>Usage: assert.strictEqual(response.code, 404); matches the API docs.<?php $b = 2; ?>"],
+  );
+  const result = await separateTestDiffWarmed(diff);
+  assert.deepEqual(
+    signalIds(result.signals),
+    ["assertion-weakened"],
+    "HTML between two php tags is exactly as unmasked as leading/trailing HTML now, including inside this project's own gate; this is the accepted cost, not a bug to silence here",
   );
 });
