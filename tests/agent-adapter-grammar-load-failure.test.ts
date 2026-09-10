@@ -18,7 +18,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -135,3 +135,55 @@ test("Finding 2: the same commit with no forced failure is scanned normally (con
     assert.notEqual(result.status, 2, `expected no gate error without the forced failure: ${result.stderr}`);
   });
 });
+
+// --- Finding 3: wholeFileMaskFallbackCount blocks src/agent-adapter.ts's
+// runTestDiffGate too, driven here through hooks/cursor-hook.ts as a real
+// subprocess. A fake `git` that answers every `git show <rev>:<path>` call
+// (the exact call src/git-blob-reader.ts's makeGitWholeFileReader makes)
+// with content the diff never carries reproduces the misconfigured git
+// plumbing Finding 3 names. The whole-file reader itself is safe (see
+// maskDiffLine's own raw-text check in src/test-diff-separator.ts); this is
+// treated the same as unwarmedExtensions in runTestDiffGate: a bug in the
+// gate's own environment, not in the commit, so it blocks.
+
+test(
+  "Finding 3: a stale whole-file reader is refused here too, the same way a grammar load failure is",
+  {
+    skip:
+      process.platform === "win32"
+        ? "a same-named extension-less script cannot shadow git.exe in PATH resolution on Windows"
+        : false,
+  },
+  () => {
+    const realGit = spawnSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
+      .stdout.trim()
+      .split("\n")[0];
+    const binDir = mkdtempSync(join(tmpdir(), "adg-agent-adapter-stale-show-"));
+    const fakeGitPath = join(binDir, "git");
+    writeFileSync(
+      fakeGitPath,
+      `#!/bin/sh\nif [ "$1" = "show" ]; then\n  echo "stale content the diff never carries"\n  exit 0\nfi\nexec "${realGit}" "$@"\n`,
+    );
+    chmodSync(fakeGitPath, 0o755);
+    try {
+      withTempRepo((dir) => {
+        commitFile(dir, "tests/widget.test.ts", "const label = 'a';\n");
+        writeFileSync(join(dir, "tests/widget.test.ts"), "const label = 'b';\n");
+        runGit(dir, ["add", "tests/widget.test.ts"]);
+        runGit(dir, ["commit", "-q", "-m", "change the label"]);
+
+        const result = runHook(
+          "test-diff",
+          { command: "git commit -m 'x'", cwd: dir, hook_event_name: "afterShellExecution" },
+          dir,
+          { PATH: `${binDir}:${process.env.PATH ?? ""}` },
+        );
+        assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.match(result.stderr, /masked one at a time/);
+        assert.match(result.stderr, /unmeasured, not as clean/);
+      });
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  },
+);

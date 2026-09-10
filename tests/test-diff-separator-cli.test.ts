@@ -861,3 +861,108 @@ test("--staged masks a removed assertion against the committed (old) side of the
     );
   });
 });
+
+// --- Finding 3: wholeFileMaskFallbackCount, end to end through --rev ---------
+//
+// A fake `git` (same technique as the -U30 fake-git tests above) that
+// answers every `git show <rev>:<path>` call -- exactly the call
+// src/git-blob-reader.ts's makeGitWholeFileReader makes -- with content the
+// diff itself never carries, reproducing the misconfigured-git-plumbing
+// case Finding 3 names: a caller that DID supply a reader, but whose
+// answers cannot be trusted. Every other git subcommand (diff-tree,
+// rev-parse) passes through to the real binary unchanged.
+
+function withStaleShowShim(fn: (binDir: string) => void): void {
+  const realGit = spawnSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
+    .stdout.trim()
+    .split("\n")[0];
+  const binDir = mkdtempSync(join(tmpdir(), "adg-test-diff-stale-show-"));
+  const fakeGitPath = join(binDir, "git");
+  writeFileSync(
+    fakeGitPath,
+    `#!/bin/sh\nif [ "$1" = "show" ]; then\n  echo "stale content the diff never carries"\n  exit 0\nfi\nexec "${realGit}" "$@"\n`,
+  );
+  chmodSync(fakeGitPath, 0o755);
+  try {
+    fn(binDir);
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test(
+  "wholeFileMaskFallbackCount is non-zero when the whole-file reader's own answers cannot be trusted, and the real signal is still caught through the per-line fallback",
+  {
+    // Same reason the -U30 fake-git tests above are skipped on Windows: an
+    // extension-less POSIX shell script named exactly "git" never matches
+    // a bare "git" lookup there.
+    skip:
+      process.platform === "win32"
+        ? "a same-named extension-less script cannot shadow git.exe in PATH resolution on Windows"
+        : false,
+  },
+  () => {
+    withStaleShowShim((binDir) => {
+      withTempRepo((dir) => {
+        commitFile(dir, "tests/widget.test.ts", "expect(sum(1, 2)).toBe(3);\n");
+        writeFileSync(join(dir, "tests/widget.test.ts"), "\n");
+        runGit(dir, ["add", "tests/widget.test.ts"]);
+        runGit(dir, ["commit", "-q", "-m", "remove the assertion"]);
+
+        const result = runCli({
+          args: ["--rev", "HEAD", "--format", "json"],
+          cwd: dir,
+          env: { PATH: `${binDir}:${process.env.PATH ?? ""}` },
+        });
+        // The signal is still found: the safety net this field counts the
+        // use of never hides a real removal, it only says the whole-file
+        // benefit was lost for it.
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        const parsed = JSON.parse(result.stdout);
+        assert.ok(
+          parsed.wholeFileMaskFallbackCount > 0,
+          `expected a non-zero wholeFileMaskFallbackCount, got: ${result.stdout}`,
+        );
+        assert.match(result.stdout, /"assertion-removed"/);
+      });
+    });
+  },
+);
+
+test(
+  "wholeFileMaskFallbackCount prints a warning in text format but does not change the exit code on an otherwise clean run",
+  {
+    skip:
+      process.platform === "win32"
+        ? "a same-named extension-less script cannot shadow git.exe in PATH resolution on Windows"
+        : false,
+  },
+  () => {
+    withStaleShowShim((binDir) => {
+      withTempRepo((dir) => {
+        // A test file edited in a way that trips no signal of its own (no
+        // assertion, skip, or test case touched), so the whole-file reader
+        // is still asked for this file (it is a test file, so
+        // signalsForTestFile always builds a mask context for it) while
+        // nothing else about the run would ever exit non-zero. Any exit
+        // code other than 0 would mean this field started blocking the
+        // run -- the standalone CLI's own policy (see warningBlock's doc
+        // in hooks/test-diff-separator.ts) is to warn, matching
+        // unwarmedExtensions, not to fail the way
+        // grammarLoadFailedExtensions does.
+        commitFile(dir, "tests/widget.test.ts", "const label = 'a';\n");
+        writeFileSync(join(dir, "tests/widget.test.ts"), "const label = 'b';\n");
+        runGit(dir, ["add", "tests/widget.test.ts"]);
+        runGit(dir, ["commit", "-q", "-m", "change the label"]);
+
+        const result = runCli({
+          args: ["--rev", "HEAD"],
+          cwd: dir,
+          env: { PATH: `${binDir}:${process.env.PATH ?? ""}` },
+        });
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        assert.match(result.stdout, /Warning: \d+ line\(s\) were masked one at a time/);
+      });
+    });
+  },
+);

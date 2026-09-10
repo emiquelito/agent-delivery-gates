@@ -1678,6 +1678,68 @@ test("no readWholeFile option at all behaves exactly as before this phase: per-l
   assert.deepEqual(signalIds(signals), ["skip-added"], "omitting the option is the same as never having it");
 });
 
+// --- Finding 3: wholeFileMaskFallbackCount -----------------------------------
+//
+// The whole-file mask is safe (see the stale-reader test above: it never
+// misapplies another line's mask), but until this field existed, nothing
+// said when that safety net actually fired. It must be non-zero whenever a
+// caller supplied a reader and this run still fell back to per-line masking
+// for some line -- a stale read, or a missing answer for a side the reader
+// was supposed to cover -- and exactly zero on a clean run, whether or not
+// a reader was supplied at all.
+
+test("wholeFileMaskFallbackCount is zero with no readWholeFile option at all: that is the documented behaviour, not a degradation", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  const result = separateTestDiff(diff);
+  assert.equal(result.wholeFileMaskFallbackCount, 0);
+});
+
+test("wholeFileMaskFallbackCount is zero on a clean run: a reader supplied and every line's whole-file answer matches", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  const result = separateTestDiff(diff, { readWholeFile: wholeFileReaderFor({ new: lines.join("\n") }) });
+  assert.equal(result.wholeFileMaskFallbackCount, 0);
+});
+
+test("wholeFileMaskFallbackCount counts a stale reader's line falling back to per-line masking", () => {
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  // Same stale reader as the test above this section: the reader hands
+  // back content that does not match the diff's own lines, as if the
+  // working tree (or the revision resolved) moved on since the diff was
+  // captured -- the exact git-plumbing misconfiguration Finding 3 named.
+  const staleText = ["  const other = 1;", "  const another = 2;", "  const third = 3;"].join("\n");
+  const result = separateTestDiff(diff, { readWholeFile: wholeFileReaderFor({ new: staleText }) });
+  assert.equal(result.wholeFileMaskFallbackCount, lines.length, "every added line's whole-file answer was stale");
+});
+
+test("wholeFileMaskFallbackCount counts a line whose side the reader was supposed to cover but answered nothing for", () => {
+  // Unlike the brand-new-file case (where the old side is never even
+  // asked for), this file HAS removed lines, so the old side is wanted --
+  // but the reader still answers undefined for it, as a misconfigured git
+  // call (the wrong revision, a repository the process cannot reach) would.
+  const diff = oneFileDiff("tests/holder.test.ts", ["  assert.ok(x);"], []);
+  const reader = (_path: string, side: "old" | "new"): string | undefined => (side === "old" ? undefined : undefined);
+  const result = separateTestDiff(diff, { readWholeFile: reader });
+  assert.equal(result.wholeFileMaskFallbackCount, 1);
+  // The real removal is still found through the per-line fallback: the
+  // safety net this field counts the use of never hides a real signal.
+  assert.deepEqual(signalIds(result.signals), ["assertion-removed"]);
+});
+
+test("wholeFileMaskFallbackCount does not count a side that was never requested in the first place", () => {
+  // A brand new file's old side is never asked for at all (see the test
+  // above this section), so there is nothing here for the fallback to
+  // count: this is not a reader failing to answer, it is a side that was
+  // never wanted.
+  const lines = ["  const src = `", '    it.skip("x");', "  `;"];
+  const diff = oneFileDiff("tests/holder.test.ts", [], lines);
+  const reader = (_path: string, side: "old" | "new"): string | undefined => (side === "old" ? undefined : lines.join("\n"));
+  const result = separateTestDiff(diff, { readWholeFile: reader });
+  assert.equal(result.wholeFileMaskFallbackCount, 0);
+});
+
 test("a Rust attribute is code, so the mask leaves the Rust marker paths alone", () => {
   const diff = oneFileDiff("src/order.rs", [], [
     "#[cfg(test)]",

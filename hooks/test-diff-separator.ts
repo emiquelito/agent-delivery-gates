@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readFileSync, readSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
-import { makeGitWholeFileReader, splitRange } from "../src/git-blob-reader.ts";
+import { makeGitWholeFileReader, resolveRangeRevisions } from "../src/git-blob-reader.ts";
 import {
   classifyTestPath,
   FIXTURE_MARKER,
@@ -268,18 +268,23 @@ function gitInvocationArgs(args: ParsedArgs): string[] | undefined {
  *
  * --staged's new side is the index, not a commit: "" is git's own way of
  * naming it in `git show :path`. --range's two ends come from the range
- * string itself; splitRange gives up on a string with no ".." in it, which
- * degrades to the same no-reader case, never a hard failure. --rev and the
- * default both read one commit's own diff, so the old side is that
- * commit's first parent -- absent for a root commit, which is fine: a root
- * commit's diff (--root, diffed against the empty tree) never carries a
- * removed line for that missing side to matter to.
+ * string itself, through resolveRangeRevisions: a plain "A..B" range's old
+ * side is A directly, a "A...B" range's old side is the merge base of A
+ * and B (git's own three-dot meaning; see src/git-blob-reader.ts), and a
+ * range with no ".." in it at all degrades to the same no-reader case,
+ * never a hard failure. --rev and the default both read one commit's own
+ * diff, so the old side is that commit's first parent -- absent for a root
+ * commit, which is fine: a root commit's diff (--root, diffed against the
+ * empty tree) never carries a removed line for that missing side to matter
+ * to.
  */
-function revisionsFor(args: ParsedArgs): { oldRev: string | null; newRev: string | null } | undefined {
+function revisionsFor(
+  args: ParsedArgs,
+  repoRoot: string,
+): { oldRev: string | null; newRev: string | null } | undefined {
   if (args.diffPath !== undefined) return undefined;
   if (args.range !== undefined) {
-    const split = splitRange(args.range);
-    return split === null ? undefined : { oldRev: split.oldRev, newRev: split.newRev };
+    return resolveRangeRevisions(args.range, { cwd: repoRoot, env: gitEnv() }) ?? undefined;
   }
   if (args.staged) {
     return { oldRev: "HEAD", newRev: "" };
@@ -299,7 +304,7 @@ function buildWholeFileReader(
   repoRoot: string | undefined,
 ): ((path: string, side: "old" | "new") => string | undefined) | undefined {
   if (repoRoot === undefined) return undefined;
-  const revisions = revisionsFor(args);
+  const revisions = revisionsFor(args, repoRoot);
   if (revisions === undefined) return undefined;
   return makeGitWholeFileReader({ cwd: repoRoot, env: gitEnv(), ...revisions });
 }
@@ -418,21 +423,26 @@ function signalBlock(result: SeparateResult): string[] {
   return lines;
 }
 
-/** Same reasoning as exemptBlock above, for the three ways a mask can be
+/** Same reasoning as exemptBlock above, for the four ways a mask can be
  * less than fully trustworthy: see grammarLoadFailedExtensions,
- * grammarAbsentExtensions, and unwarmedExtensions on SeparateResult. A
- * clean-looking run whose mask was not trustworthy for some of what it
- * scanned must still say so, not read the same as a run that scanned
- * everything cleanly.
+ * grammarAbsentExtensions, unwarmedExtensions, and
+ * wholeFileMaskFallbackCount on SeparateResult. A clean-looking run whose
+ * mask was not trustworthy for some of what it scanned must still say so,
+ * not read the same as a run that scanned everything cleanly.
  *
  * grammarLoadFailedExtensions (a real failure: the package is present
- * and something about the load still broke) is the one of the three this
+ * and something about the load still broke) is the one of the four this
  * CLI does not leave as a plain warning: see the exit-code decision in
  * main() below, where it now turns exit 2, the same way a git failure
  * already does. grammarAbsentExtensions (the package was never installed
  * -- the ordinary state for an adopter who installed this tool the way
- * its own README says to) and unwarmedExtensions both stay warnings only,
- * with the run's exit code left to the signals actually found. */
+ * its own README says to), unwarmedExtensions, and
+ * wholeFileMaskFallbackCount all stay warnings only, with the run's exit
+ * code left to the signals actually found -- wholeFileMaskFallbackCount
+ * follows unwarmedExtensions's own precedent here (a bug in the gate or
+ * its environment, not in the commit), not grammarLoadFailedExtensions's:
+ * the whole-file fallback this counts is itself SAFE (see Finding 3), it
+ * only ever loses accuracy, never correctness. */
 function warningBlock(result: SeparateResult): string[] {
   const lines: string[] = [];
   if (result.grammarLoadFailedExtensions.length > 0) {
@@ -454,6 +464,14 @@ function warningBlock(result: SeparateResult): string[] {
     lines.push(
       `Warning: ${result.unwarmedExtensions.join(", ")} file(s) were masked before their language service ` +
         "warmed; this result may be less accurate than usual for those files.",
+    );
+  }
+  if (result.wholeFileMaskFallbackCount > 0) {
+    lines.push(
+      `Warning: ${result.wholeFileMaskFallbackCount} line(s) were masked one at a time instead of through their ` +
+        "whole file, because the whole file's own answer for that line could not be trusted (a stale read, or the " +
+        "line was missing from it). This is a bug in the gate's own git plumbing, not in the commit; this result " +
+        "may be less accurate than usual for those lines.",
     );
   }
   if (lines.length > 0) lines.push("");

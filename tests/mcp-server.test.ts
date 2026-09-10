@@ -6,8 +6,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -351,6 +351,88 @@ test("a request needing the Python grammar still gets a reply when the client cl
     );
   });
 });
+
+// --- Finding 3: wholeFileMaskFallbackCount --------------------------------------
+//
+// This server is advisory: it never blocks, so the treatment here is a
+// free-text warning plus a structuredContent entry, the same as
+// grammarAbsentExtensions, grammarLoadFailedExtensions, and
+// unwarmedExtensions above (see runSeparateTestDiff's own comment in
+// src/mcp-server.ts). A fake `git` that answers every `git show
+// <rev>:<path>` call (the exact call src/git-blob-reader.ts's
+// makeGitWholeFileReader makes) with content the diff never carries
+// reproduces the misconfigured-git-plumbing case Finding 3 names -- only
+// reachable here through `revision` or `range`, since `diff_text` supplies
+// no repository to build a reader from at all.
+
+function runGit(cwd: string, args: string[]): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+}
+
+function makeTempRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "adg-mcp-stale-show-repo-"));
+  runGit(dir, ["init", "-q"]);
+  runGit(dir, ["config", "user.email", "test@example.invalid"]);
+  runGit(dir, ["config", "user.name", "Test"]);
+  return dir;
+}
+
+function commitFile(dir: string, name: string, content: string): void {
+  mkdirSync(dirname(join(dir, name)), { recursive: true });
+  writeFileSync(join(dir, name), content);
+  runGit(dir, ["add", name]);
+  runGit(dir, ["commit", "-q", "-m", `write ${name}`]);
+}
+
+test(
+  "tools/call separate_test_diff: a stale whole-file reader is reported as a warning and in structuredContent, never as an error",
+  {
+    skip:
+      process.platform === "win32"
+        ? "a same-named extension-less script cannot shadow git.exe in PATH resolution on Windows"
+        : false,
+  },
+  async () => {
+    const realGit = spawnSync(process.platform === "win32" ? "where" : "which", ["git"], { encoding: "utf8" })
+      .stdout.trim()
+      .split("\n")[0];
+    const binDir = mkdtempSync(join(tmpdir(), "adg-mcp-stale-show-bin-"));
+    const fakeGitPath = join(binDir, "git");
+    writeFileSync(
+      fakeGitPath,
+      `#!/bin/sh\nif [ "$1" = "show" ]; then\n  echo "stale content the diff never carries"\n  exit 0\nfi\nexec "${realGit}" "$@"\n`,
+    );
+    chmodSync(fakeGitPath, 0o755);
+    const dir = makeTempRepo();
+    try {
+      // A test file edited with no signal of its own, so a non-clean
+      // report here can only come from the stale reader itself.
+      commitFile(dir, "tests/widget.test.ts", "const label = 'a';\n");
+      writeFileSync(join(dir, "tests/widget.test.ts"), "const label = 'b';\n");
+      runGit(dir, ["add", "tests/widget.test.ts"]);
+      runGit(dir, ["commit", "-q", "-m", "change the label"]);
+
+      const s = new Session(dir, { PATH: `${binDir}:${process.env.PATH ?? ""}` });
+      try {
+        await initialize(s);
+        s.sendRequest("tools/call", { name: "separate_test_diff", arguments: { revision: "HEAD" } }, 8);
+        const msg = await s.nextMessage();
+        assert.equal(msg.result.isError, false, JSON.stringify(msg.result));
+        assert.match(msg.result.content[0].text, /masked one at a time/);
+        assert.ok(
+          msg.result.structuredContent?.wholeFileMaskFallbackCount > 0,
+          `expected a non-zero wholeFileMaskFallbackCount in structuredContent, got: ${JSON.stringify(msg.result.structuredContent)}`,
+        );
+      } finally {
+        await s.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  },
+);
 
 // --- The drain bound: Findings 1 and 2 ------------------------------------------
 //

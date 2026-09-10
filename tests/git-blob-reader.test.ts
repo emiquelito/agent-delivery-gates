@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import process from "node:process";
-import { makeGitWholeFileReader, splitRange } from "../src/git-blob-reader.ts";
+import { makeGitWholeFileReader, splitRange, resolveMergeBase, resolveRangeRevisions } from "../src/git-blob-reader.ts";
 
 function runGit(cwd: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -49,12 +49,21 @@ function commitFile(dir: string, name: string, content: string): void {
 
 // --- splitRange --------------------------------------------------------------
 
-test("splitRange splits a two-dot range into its two endpoints", () => {
-  assert.deepEqual(splitRange("main..feature"), { oldRev: "main", newRev: "feature" });
+// Renamed from "splits a two-dot range into its two endpoints": splitRange
+// now also reports which form was given (see the three-dot test below), so
+// this asserts the full result, threeDot included, not just the endpoints.
+test("splitRange splits a two-dot range into its two endpoints and reports it is not three-dot", () => {
+  assert.deepEqual(splitRange("main..feature"), { oldRev: "main", newRev: "feature", threeDot: false });
 });
 
-test("splitRange splits a three-dot range, dropping the extra dot", () => {
-  assert.deepEqual(splitRange("main...feature"), { oldRev: "main", newRev: "feature" });
+// Renamed from "splits a three-dot range, dropping the extra dot": that
+// name described the old behaviour, which silently read a three-dot range
+// as if it were a two-dot one. splitRange now still separates the two
+// endpoints the same way, but also says threeDot: true, so a caller can
+// resolve the merge base instead of reading oldRev directly (see
+// resolveMergeBase and resolveRangeRevisions below).
+test("splitRange splits a three-dot range into its two endpoints and reports it is three-dot", () => {
+  assert.deepEqual(splitRange("main...feature"), { oldRev: "main", newRev: "feature", threeDot: true });
 });
 
 test("splitRange returns null for a string with no '..' in it", () => {
@@ -134,5 +143,92 @@ test("each path and side is read from git at most once: a second call is answere
     const second = reader("src/a.ts", "old");
     assert.equal(first, "content\n");
     assert.equal(second, "content\n");
+  });
+});
+
+// --- resolveMergeBase / resolveRangeRevisions (Finding 3b) --------------------
+//
+// A three-dot range's old side is git's own merge base of the two ends, not
+// the left end directly. A file that diverged before the merge base has
+// different content at the left end than it has at the merge base, so
+// reading the left end directly (what this file used to do; see splitRange's
+// old comment) answers the wrong pre-image for that file. This is
+// reproduced here with a real branching repository: a shared file is
+// changed on `main` after `feature` branches off, so `main`'s own content
+// disagrees with the merge base's.
+
+function makeBranchingRepo(): string {
+  const dir = makeTempRepo();
+  // Named explicitly instead of relying on whatever init.defaultBranch is
+  // configured on this machine ("main" on some, "master" on others), so
+  // the later `git checkout -q main` below is never a guess.
+  runGit(dir, ["checkout", "-qb", "main"]);
+  commitFile(dir, "shared.ts", "base\n");
+  runGit(dir, ["checkout", "-qb", "feature"]);
+  commitFile(dir, "shared.ts", "base\nfeature change\n");
+  runGit(dir, ["checkout", "-q", "main"]);
+  // main moves on after feature branched off, so main's own content is not
+  // the merge base's content -- the exact divergence a three-dot range's
+  // old side must not read past.
+  commitFile(dir, "shared.ts", "base\nmain change\n");
+  return dir;
+}
+
+test("resolveMergeBase finds the shared ancestor of two diverged branches", () => {
+  const dir = makeBranchingRepo();
+  try {
+    const mergeBase = resolveMergeBase("main", "feature", { cwd: dir, env: process.env });
+    assert.notEqual(mergeBase, undefined);
+    const atBase = runGit(dir, ["show", `${mergeBase}:shared.ts`]);
+    assert.equal(atBase, "base\n", "the merge base predates both branches' own changes");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveMergeBase returns undefined when the two revisions share no history", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.ts", "a\n");
+    const result = resolveMergeBase("HEAD", "0000000000000000000000000000000000000000", { cwd: dir, env: process.env });
+    assert.equal(result, undefined);
+  });
+});
+
+test("resolveRangeRevisions on a three-dot range reads the old side from the merge base, not the left end -- BEFORE this fix that was main's own (wrong) content", () => {
+  const dir = makeBranchingRepo();
+  try {
+    const revisions = resolveRangeRevisions("main...feature", { cwd: dir, env: process.env });
+    assert.notEqual(revisions, null);
+    assert.notEqual(revisions!.oldRev, null);
+    assert.notEqual(revisions!.oldRev, "main", "the old side must not be the left endpoint itself");
+    const reader = makeGitWholeFileReader({ cwd: dir, env: process.env, oldRev: revisions!.oldRev, newRev: revisions!.newRev });
+    // The true pre-image at the merge base, not main's own diverged content
+    // ("base\nmain change\n") and not feature's own new content either.
+    assert.equal(reader("shared.ts", "old"), "base\n");
+    assert.equal(reader("shared.ts", "new"), "base\nfeature change\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveRangeRevisions on a two-dot range still reads the old side directly, unaffected by the three-dot fix", () => {
+  const dir = makeBranchingRepo();
+  try {
+    const revisions = resolveRangeRevisions("main..feature", { cwd: dir, env: process.env });
+    assert.deepEqual(revisions, { oldRev: "main", newRev: "feature" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveRangeRevisions returns null for a string with no '..' in it", () => {
+  assert.equal(resolveRangeRevisions("HEAD", { cwd: process.cwd(), env: process.env }), null);
+});
+
+test("resolveRangeRevisions on a three-dot range whose merge base cannot be resolved answers oldRev: null, not the wrong revision", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "a.ts", "a\n");
+    const revisions = resolveRangeRevisions("HEAD...0000000000000000000000000000000000000000", { cwd: dir, env: process.env });
+    assert.deepEqual(revisions, { oldRev: null, newRev: "0000000000000000000000000000000000000000" });
   });
 });

@@ -174,6 +174,23 @@ async function main(): Promise<void> {
         "unmeasured, not as clean.",
     );
   }
+  // Finding 3: the whole-file reader above is safe on its own (it never
+  // misapplies one line's mask to another; see maskDiffLine's own raw-text
+  // check in src/test-diff-separator.ts), but a caller whose git plumbing
+  // is misconfigured -- a stale checkout, GIT_DIR pointing somewhere
+  // unexpected -- used to get the old, weaker per-line detection back with
+  // nothing to say the new benefit was lost. Treated the same as
+  // unwarmedExtensions just above: a bug in this gate's own environment,
+  // not in the commit, so it blocks here too, instead of passing quietly
+  // as a warning the way grammarAbsentExtensions does.
+  if (result.wholeFileMaskFallbackCount > 0) {
+    block(
+      `test-diff-post-tool-hook: ${result.wholeFileMaskFallbackCount} line(s) in this diff were masked one at a ` +
+        "time instead of through their whole file, because the whole file's own answer for that line could not " +
+        "be trusted (a stale read, or the line was missing from it); this is a bug in the gate's own git " +
+        "plumbing, not in the commit; treat this run as unmeasured, not as clean.",
+    );
+  }
   if (result.signals.length === 0) {
     process.exit(0);
   }

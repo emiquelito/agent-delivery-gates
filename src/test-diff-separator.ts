@@ -397,6 +397,33 @@ export interface SeparateResult {
    * two extension lists on this type are.
    */
   grammarAbsentExtensions: readonly string[];
+  /**
+   * The number of diff lines this run masked one at a time instead of
+   * through the whole-file reader a caller supplied, because
+   * `maskDiffLine`'s own raw-text check (see the comment banner above
+   * `FileMaskContext`) found the whole file's answer for that line
+   * untrustworthy: no text for that side, this line's number out of
+   * range, or the whole file's own line at that position no longer
+   * reading back the same text the diff itself carries. Zero whenever no
+   * `readWholeFile` was supplied at all -- that is the documented,
+   * expected behaviour for a caller with no commit to read from (raw diff
+   * text, no known revision), not a degradation, so it is never counted
+   * here.
+   *
+   * Finding 3: the whole-file reader this field is named for is SAFE --
+   * it never misapplies one line's mask to another, because of the very
+   * check this field counts the failures of -- but until this field
+   * existed, a caller whose git plumbing was misconfigured (a stale
+   * checkout, a revision that resolves to the wrong tree, GIT_DIR
+   * pointing somewhere unexpected) got back exactly the old, weaker
+   * per-line detection with nothing to say the new whole-file benefit was
+   * lost for any of it. Reported unconditionally, found or not, the same
+   * reasoning `exemptCount`, `unwarmedExtensions`,
+   * `grammarLoadFailedExtensions`, and `grammarAbsentExtensions` above
+   * already follow: a degraded run that reads like a clean one is the
+   * failure this project exists to catch, including in itself.
+   */
+  wholeFileMaskFallbackCount: number;
 }
 
 /** Renders one signal as the CLI's text-format line: `id severity file: message`. */
@@ -854,6 +881,19 @@ interface FileMaskContext {
   oldPath: string;
   /** The path an added or context line's own extension is chosen from. */
   newPath: string;
+  /** Shared across every file in this run; see MaskStats above. */
+  stats: MaskStats;
+  /** One DiffLine object is asked for its masked text by more than one
+   * check (assertions, testCases, skips, tolerance, timeout each scan the
+   * same added/removed lines; a Rust file's marker and region checks scan
+   * the same context lines too). Without this cache maskDiffLine below
+   * would recompute -- and, on a fallback, re-count against
+   * wholeFileFallbackCount -- once per check instead of once per line,
+   * turning a one-line degradation into a five- or six-times-inflated
+   * number with no meaning a caller could read. Keyed by object identity,
+   * never by content: two different DiffLine entries can carry the same
+   * text and must still be masked (and counted) independently. */
+  cache: Map<DiffLine, string>;
 }
 
 const EMPTY_SIDE_MASK: SideMask = { raw: null, masked: null };
@@ -861,6 +901,29 @@ const EMPTY_SIDE_MASK: SideMask = { raw: null, masked: null };
 function buildSideMask(text: string | undefined, path: string): SideMask {
   if (text === undefined) return EMPTY_SIDE_MASK;
   return { raw: splitLines(text), masked: splitLines(maskNonCode(text, path)) };
+}
+
+/**
+ * One counter, shared by every file's own FileMaskContext for the life of
+ * one separateTestDiff call, backing `SeparateResult.
+ * wholeFileMaskFallbackCount` (see that field's own doc for why it exists:
+ * Finding 3, the whole-file fallback having no field to say it happened).
+ *
+ * `readerSupplied` is fixed for the whole run, from whether the caller
+ * passed a `readWholeFile` option at all: a caller with none (raw diff
+ * text, no known revision -- see `readWholeFile` on SeparateOptions) is
+ * the documented, expected behaviour this file always had, not a degradation,
+ * so nothing is counted there. `wholeFileFallbackCount` only grows when a
+ * caller DID supply a reader and `maskDiffLine` still had to fall back to
+ * masking one line alone: the whole-file answer for that line's side was
+ * missing, out of range, or its raw text no longer matched what the diff
+ * itself carries. That is exactly the gap Finding 3 named: a caller whose
+ * git plumbing is misconfigured gets the old, weaker detection with
+ * nothing, until this field, to say the new benefit was lost.
+ */
+interface MaskStats {
+  readerSupplied: boolean;
+  wholeFileFallbackCount: number;
 }
 
 /**
@@ -882,11 +945,12 @@ function buildSideMask(text: string | undefined, path: string): SideMask {
 function buildFileMaskContext(
   file: RawFileDiff,
   readWholeFile: ((path: string, side: "old" | "new") => string | undefined) | undefined,
+  stats: MaskStats,
 ): FileMaskContext {
   const oldPath = file.oldPath ?? file.path;
   const newPath = file.path;
   if (readWholeFile === undefined) {
-    return { old: EMPTY_SIDE_MASK, new: EMPTY_SIDE_MASK, oldPath, newPath };
+    return { old: EMPTY_SIDE_MASK, new: EMPTY_SIDE_MASK, oldPath, newPath, stats, cache: new Map() };
   }
   const isRust = RUST_PATH_RE.test(newPath);
   const wantOld = isRust || file.removedLines.length > 0;
@@ -898,6 +962,8 @@ function buildFileMaskContext(
     new: buildSideMask(newText, newPath),
     oldPath,
     newPath,
+    stats,
+    cache: new Map(),
   };
 }
 
@@ -911,18 +977,39 @@ function buildFileMaskContext(
  * it ever does, not silently misapplied), or the whole file's own line at
  * that number no longer reading back the exact text this diff line
  * carries.
+ *
+ * The first time this reaches the final per-line branch for a given
+ * DiffLine while `ctx.stats.readerSupplied` is true, it counts against
+ * `ctx.stats.wholeFileFallbackCount` -- see MaskStats above and
+ * `SeparateResult.wholeFileMaskFallbackCount`. A caller with no reader at
+ * all (readerSupplied false) always ends up here for every line, which is
+ * the documented, expected behaviour, not a degradation, so nothing is
+ * counted for it. `ctx.cache` (see FileMaskContext) makes this "first
+ * time" real: more than one check asks the same DiffLine for its masked
+ * text, and only the first of those may compute and count; the rest reuse
+ * the cached answer, so one degraded line is counted once, not once per
+ * check that happened to scan it.
  */
 function maskDiffLine(line: DiffLine, ctx: FileMaskContext): string {
+  const cached = ctx.cache.get(line);
+  if (cached !== undefined) return cached;
+
+  let result: string | undefined;
   if (line.kind !== "removed" && line.newLineNo !== null && ctx.new.raw !== null && ctx.new.masked !== null) {
     const idx = line.newLineNo - 1;
-    if (idx >= 0 && idx < ctx.new.raw.length && ctx.new.raw[idx] === line.content) return ctx.new.masked[idx];
+    if (idx >= 0 && idx < ctx.new.raw.length && ctx.new.raw[idx] === line.content) result = ctx.new.masked[idx];
   }
-  if (line.kind !== "added" && line.oldLineNo !== null && ctx.old.raw !== null && ctx.old.masked !== null) {
+  if (result === undefined && line.kind !== "added" && line.oldLineNo !== null && ctx.old.raw !== null && ctx.old.masked !== null) {
     const idx = line.oldLineNo - 1;
-    if (idx >= 0 && idx < ctx.old.raw.length && ctx.old.raw[idx] === line.content) return ctx.old.masked[idx];
+    if (idx >= 0 && idx < ctx.old.raw.length && ctx.old.raw[idx] === line.content) result = ctx.old.masked[idx];
   }
-  const path = line.kind === "removed" ? ctx.oldPath : ctx.newPath;
-  return maskNonCode(line.content, path);
+  if (result === undefined) {
+    if (ctx.stats.readerSupplied) ctx.stats.wholeFileFallbackCount++;
+    const path = line.kind === "removed" ? ctx.oldPath : ctx.newPath;
+    result = maskNonCode(line.content, path);
+  }
+  ctx.cache.set(line, result);
+  return result;
 }
 
 /** One line kept twice: the text to test against, and the text to report. */
@@ -1472,6 +1559,11 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
   let testAdded = 0;
   let testRemoved = 0;
 
+  // One counter for the whole run, shared by every file's own
+  // FileMaskContext; see MaskStats and SeparateResult.
+  // wholeFileMaskFallbackCount above.
+  const maskStats: MaskStats = { readerSupplied: options.readWholeFile !== undefined, wholeFileFallbackCount: 0 };
+
   const readFileText = options.readFileText;
   const carriesMarker = (path: string): boolean => {
     if (readFileText === undefined) return false;
@@ -1507,7 +1599,7 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
     // buildFileMaskContext's own comment for the read itself.
     let maskCtx: FileMaskContext | null = null;
     const getMaskCtx = (): FileMaskContext => {
-      if (maskCtx === null) maskCtx = buildFileMaskContext(file, options.readWholeFile);
+      if (maskCtx === null) maskCtx = buildFileMaskContext(file, options.readWholeFile, maskStats);
       return maskCtx;
     };
 
@@ -1576,6 +1668,7 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
     unwarmedExtensions: hadUnwarmedLanguageAccess(),
     grammarLoadFailedExtensions: extensionsMatching(files.map((file) => file.path), hadGenuineGrammarLoadFailure),
     grammarAbsentExtensions: extensionsMatching(files.map((file) => file.path), hadGrammarAbsent),
+    wholeFileMaskFallbackCount: maskStats.wholeFileFallbackCount,
   };
 }
 

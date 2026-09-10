@@ -76,21 +76,75 @@ export function makeGitWholeFileReader(opts: {
  * not as a parse error: the range still goes to `git diff` exactly as
  * typed, unaffected by anything this function decides.
  *
- * The two-dot and three-dot forms are not told apart here. Git's own
- * three-dot meaning -- diff against the merge-base of A and B, not A
- * itself -- is not reproduced; the old side is read from A directly. Where
- * that disagrees with the actual pre-image, `maskDiffLine`'s own
- * raw-text check in src/test-diff-separator.ts catches the mismatch line
- * by line and falls back to per-line masking for exactly the lines it
- * disagrees on, so a three-dot range degrades gracefully instead of
- * masking the wrong file's text as if it were right.
+ * `threeDot` says which form was given. Git's own three-dot meaning --
+ * diff against the merge-base of A and B, not A itself -- is not decided
+ * here: this function only parses the string. A caller building a
+ * whole-file reader for a three-dot range must resolve the merge base
+ * itself (see `resolveMergeBase` below) and read the old side from THAT
+ * revision, not from `oldRev` as returned here; reading `oldRev` directly
+ * for a three-dot range answers the wrong pre-image for any file that
+ * diverged before the merge base.
  */
-export function splitRange(range: string): { oldRev: string; newRev: string } | null {
+export function splitRange(range: string): { oldRev: string; newRev: string; threeDot: boolean } | null {
   const idx = range.indexOf("..");
   if (idx === -1) return null;
   const oldRev = range.slice(0, idx);
   let rest = range.slice(idx + 2);
-  if (rest.startsWith(".")) rest = rest.slice(1); // the range's third dot, if any
+  const threeDot = rest.startsWith(".");
+  if (threeDot) rest = rest.slice(1); // the range's third dot
   if (oldRev === "" || rest === "") return null;
-  return { oldRev, newRev: rest };
+  return { oldRev, newRev: rest, threeDot };
+}
+
+/**
+ * Resolves the merge base of `oldRev` and `newRev`, through `git
+ * merge-base`, for a caller building a whole-file reader over a three-dot
+ * range (see `splitRange`'s own doc above for why the merge base, not
+ * `oldRev` itself, is the correct old side there). Returns undefined on
+ * any git failure -- the two revisions share no common ancestor, either
+ * fails to resolve, or git itself is unavailable -- so a caller can fall
+ * back to reading no old side at all (`oldRev: null` on
+ * `makeGitWholeFileReader`) instead of trusting a wrong one. That fallback
+ * is not silent: every line it would have answered instead falls through
+ * to src/test-diff-separator.ts's own per-line masking, which is counted
+ * in `SeparateResult.wholeFileMaskFallbackCount`.
+ */
+export function resolveMergeBase(
+  oldRev: string,
+  newRev: string,
+  opts: { cwd: string; env: NodeJS.ProcessEnv },
+): string | undefined {
+  try {
+    return execFileSync("git", ["merge-base", oldRev, newRev], {
+      cwd: opts.cwd,
+      env: opts.env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `splitRange`, with a three-dot range's old side already turned into the
+ * merge base (see `resolveMergeBase` above), so a caller that only wants
+ * the two revisions to build a whole-file reader from never has to branch
+ * on `threeDot` itself. Returns null exactly when `splitRange` would (no
+ * ".." in the string, or either side empty). For a three-dot range whose
+ * merge base could not be resolved, `oldRev` comes back null -- no old
+ * side to read from at all -- instead of the wrong revision; the old side
+ * of every removed line then falls back to per-line masking, counted in
+ * `SeparateResult.wholeFileMaskFallbackCount`, exactly as a caller that
+ * had no reader to build in the first place already degrades.
+ */
+export function resolveRangeRevisions(
+  range: string,
+  opts: { cwd: string; env: NodeJS.ProcessEnv },
+): { oldRev: string | null; newRev: string } | null {
+  const split = splitRange(range);
+  if (split === null) return null;
+  if (!split.threeDot) return { oldRev: split.oldRev, newRev: split.newRev };
+  const base = resolveMergeBase(split.oldRev, split.newRev, opts);
+  return { oldRev: base ?? null, newRev: split.newRev };
 }

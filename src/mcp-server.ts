@@ -24,7 +24,7 @@ import { join } from "node:path";
 import { checkPathAllowed } from "./path-allowlist.ts";
 import { validateReport, formatFindingText } from "./report-validator.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
-import { makeGitWholeFileReader, splitRange } from "./git-blob-reader.ts";
+import { makeGitWholeFileReader, resolveRangeRevisions } from "./git-blob-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
 import { installHintFor } from "./tree-sitter-grammars.ts";
 
@@ -293,10 +293,16 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
   // a range's two ends. undefined for diff_text, which names no revision
   // at all -- every mask then falls back to per-line, exactly as this
   // tool worked before this option existed. A --range-style string with
-  // no ".." in it (splitRange returns null) degrades the same way, never
-  // a hard failure: the diff itself still runs through `git diff` as
-  // given, unaffected by whether a reader could be built from it.
-  let revisions: { oldRev: string; newRev: string } | undefined;
+  // no ".." in it (resolveRangeRevisions returns null) degrades the same
+  // way, never a hard failure: the diff itself still runs through `git
+  // diff` as given, unaffected by whether a reader could be built from it.
+  // A three-dot range's old side is the merge base of its two ends, not
+  // the left end directly (see resolveRangeRevisions and
+  // src/git-blob-reader.ts's splitRange); when that merge base cannot be
+  // resolved, oldRev comes back null, so every removed line falls back to
+  // per-line masking, counted in the run's own wholeFileMaskFallbackCount,
+  // instead of being masked against the wrong revision.
+  let revisions: { oldRev: string | null; newRev: string } | undefined;
   if (typeof args.diff_text === "string") {
     diffText = args.diff_text;
   } else {
@@ -307,7 +313,7 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
       } else {
         const range = args.range as string;
         diffText = runGit(["diff", "--no-color", range], ctx.workingDir);
-        revisions = splitRange(range) ?? undefined;
+        revisions = resolveRangeRevisions(range, { cwd: ctx.workingDir, env: gitEnv() }) ?? undefined;
       }
     } catch (e) {
       const detail = (e as { stderr?: string; message?: string }).stderr || (e as Error).message;
@@ -390,6 +396,21 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
         "service warmed; this result may be less accurate than usual for those files.",
     );
     structured.unwarmedExtensions = result.unwarmedExtensions;
+  }
+  // Finding 3, given the same treatment as the three fields just above:
+  // a free-text line plus a structuredContent entry, never a block -- this
+  // server is advisory and blocks nothing (see SERVER_INSTRUCTIONS below).
+  // The whole-file reader is safe on its own (see maskDiffLine's own
+  // raw-text check in src/test-diff-separator.ts); this only says when its
+  // benefit was lost for some lines because the reader's own answer could
+  // not be trusted.
+  if (result.wholeFileMaskFallbackCount > 0) {
+    lines.push(
+      `Warning: ${result.wholeFileMaskFallbackCount} line(s) in this diff were masked one at a time instead of ` +
+        "through their whole file, because the whole file's own answer for that line could not be trusted (a " +
+        "stale read, or the line was missing from it).",
+    );
+    structured.wholeFileMaskFallbackCount = result.wholeFileMaskFallbackCount;
   }
 
   const toolResult = textResult(lines.join("\n"), false);
