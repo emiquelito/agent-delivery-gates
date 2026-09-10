@@ -464,6 +464,40 @@ const resolvedServices = new Map<string, LanguageService>();
 // importing successfully later in the same run.
 const grammarLoadFailures = new Set<string>();
 
+// Test-only escape hatch for reaching a real grammar-load failure without
+// touching this process's real node_modules. A reviewer's first repro
+// renamed tree-sitter-python and web-tree-sitter out of node_modules,
+// spawned the CLI as a subprocess against the crippled tree, and restored
+// the packages in a try/finally. Two hazards came with that: a SIGKILL of
+// the test process (this suite's own help text warns that a SIGKILL "leaves
+// the last mutated file mutated on disk" -- the same class of problem, one
+// level up -- and this suite has been killed mid-run before) skips the
+// finally block and leaves the package renamed for whatever runs next on
+// this machine; and `node --test tests/*.test.ts` runs test files in
+// parallel processes, so another file's in-process import of the real
+// package can land mid-rename and fail for a reason that has nothing to do
+// with what it is testing (reproduced: 0 successful imports out of 40
+// during the churn window).
+//
+// This variable removes the filesystem from the picture entirely: a test
+// that wants a grammar load to fail sets ADG_TEST_FORCE_GRAMMAR_FAILURE to
+// a comma-separated list of extensions in the subprocess's own environment
+// (nothing outside that one process's env is touched, so nothing needs
+// restoring and nothing else sharing the real node_modules can be
+// affected), and resolveTreeSitterService below skips the real load for
+// exactly those extensions -- the same code path a real failed import
+// takes, `grammarLoadFailures` included, just reached without deleting or
+// moving a single file. Read once at module load, the same way this
+// project already reads ADG_MCP_ENABLE_TEST_STALL in src/mcp-server.ts for
+// an identical reason: a name a real adopter is never going to set by
+// accident, doing nothing unless a test deliberately sets it.
+const FORCED_GRAMMAR_FAILURES: ReadonlySet<string> = new Set(
+  (process.env.ADG_TEST_FORCE_GRAMMAR_FAILURE ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0),
+);
+
 function extensionOf(path: string): string {
   const lower = path.toLowerCase();
   const dot = lower.lastIndexOf(".");
@@ -475,7 +509,13 @@ async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
   if (cached !== undefined) return cached;
   const load = TREE_SITTER_LOADERS[ext];
   let service = regexLanguageService;
-  if (load !== undefined) {
+  if (load !== undefined && FORCED_GRAMMAR_FAILURES.has(ext)) {
+    // See FORCED_GRAMMAR_FAILURES above: a test asked this extension's
+    // load to fail without touching node_modules. Recorded exactly like a
+    // real failure below, and the real loader is never called.
+    service = regexLanguageService;
+    grammarLoadFailures.add(ext);
+  } else if (load !== undefined) {
     try {
       service = await load();
     } catch {

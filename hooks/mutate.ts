@@ -46,6 +46,7 @@ import {
   formatReportText,
   planMutations,
   selectMutablePaths,
+  unrecognizedLanguagePaths,
   unsupportedLanguagePaths,
   warmAndSplitByGrammar,
   type MutationResult,
@@ -160,7 +161,12 @@ Exit codes:
      install with no devDependency for that language, most commonly):
      either way that file is reported by name and counted as unmeasured,
      not passed over in silence, and never mutated with an untrustworthy
-     mask
+     mask. A selected file in a language this tool has never built a
+     grammar or operator table for at all -- a shell script, a Terraform
+     file, anything this tool has never attempted -- is also reported by
+     name, but is NOT counted here: this tool never claimed it could
+     measure that file, so its presence never turns a clean run into
+     exit 3
 
 A run stopped by SIGINT or SIGTERM does not use any of the codes above. On
 POSIX it exits with that signal's own convention instead (130 for SIGINT,
@@ -509,6 +515,15 @@ async function main(): Promise<void> {
   // clean and found nothing" (see unsupportedLanguagePaths in
   // src/mutate.ts).
   const unsupportedPaths = unsupportedLanguagePaths(candidates);
+  // Candidates in a language this tool has never built a grammar or an
+  // operator table for at all: not test files, not config/markup/data,
+  // just an extension nothing above has ever attempted. Reported below,
+  // same as unsupportedPaths, so a shell script or a Terraform file next
+  // to a real source file is never dropped without a trace -- but never
+  // folded into exit 3, because this tool never claimed it could measure
+  // these in the first place. See unrecognizedLanguagePaths in
+  // src/mutate.ts.
+  const unrecognizedPaths = unrecognizedLanguagePaths(candidates);
   // Warms every mutable path's language service, then tells apart a file
   // whose grammar actually loaded from one that fell back to the regex
   // scanner because the load failed -- an adopter's install with no
@@ -535,8 +550,18 @@ async function main(): Promise<void> {
   // operator set, or its grammar failed to load: that is not "could not
   // run", it is a run that did happen and measured nothing, so it falls
   // through to the ordinary report below and comes out exit 3, with those
-  // files named, instead of exit 2.
-  if (attempted.length === 0 && unsupportedPaths.length === 0 && grammarUnavailablePaths.length === 0) {
+  // files named, instead of exit 2. A selection that held nothing to
+  // mutate only because every candidate is in an unrecognized language
+  // falls through the same way, but comes out exit 0: this tool never had
+  // anything to measure there, so the run is not a failure to measure,
+  // just a run whose selection turned out to be nothing this tool
+  // speaks -- reported by name, not by exit code.
+  if (
+    attempted.length === 0 &&
+    unsupportedPaths.length === 0 &&
+    grammarUnavailablePaths.length === 0 &&
+    unrecognizedPaths.length === 0
+  ) {
     fail(
       candidates.length === 0
         ? "the selector named no files, so there was nothing to mutate"
@@ -666,6 +691,7 @@ async function main(): Promise<void> {
     results,
     unsupportedFiles: unsupportedPaths,
     grammarUnavailableFiles: grammarUnavailablePaths,
+    unrecognizedFiles: unrecognizedPaths,
   };
   process.stdout.write(args.format === "json" ? formatReportJson(report) : `${formatReportText(report)}\n`);
 

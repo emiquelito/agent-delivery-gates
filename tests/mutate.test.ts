@@ -18,6 +18,7 @@ import {
   planMutationsWarmed,
   selectMutablePaths,
   summarize,
+  unrecognizedLanguagePaths,
   unsupportedLanguagePaths,
   warmAndSplitByGrammar,
   type Mutation,
@@ -252,20 +253,35 @@ test("unsupportedLanguagePaths reports a non-test file in a known language with 
   assert.deepEqual(unsupportedLanguagePaths(paths), ["app/main.rb"]);
 });
 
-// unsupportedLanguagePaths used to allowlist a fixed set of "languages
-// this project already recognises" (Python plus the six tree-sitter
-// languages). A file in any other real language -- Elixir here -- fell
-// outside that allowlist and vanished without a trace, exactly the
-// silence this function exists to close, just moved one language further
-// out; the reviewer's own reproduction used lib/discount.ex next to
-// lib/main.rb and watched the .ex file disappear entirely, not even
-// counted. It is a denylist of known non-source extensions now (see
-// NON_SOURCE_EXTENSIONS in src/mutate.ts), so nothing selected has to be
-// on a list of known languages to be reported; only a config, markup, or
-// data extension buys silence.
-test("unsupportedLanguagePaths reports a language this tool has never heard of, next to one it has: neither vanishes", () => {
+// unsupportedLanguagePaths went through two wrong forms before this one.
+// First an allowlist of "languages this project already recognises"
+// (Python plus the six tree-sitter languages): a file in any other real
+// language -- Elixir -- fell outside it and vanished without a trace.
+// Fixed by turning it into a denylist of known non-source extensions
+// instead: now a real, entirely unknown extension was reported, but so was
+// every extension the denylist had not thought to name -- including this
+// project's own scripts/pre-publication-check.sh, an ordinary tracked
+// shell script, which does not belong anywhere near "unmeasured" (this
+// repository's own commit 10dd43b exited 3 over it, for a reason
+// unconnected to code quality).
+//
+// The actual fix asks a narrower question: exit 3 means this tool could
+// not measure something it should have been able to. That is a file in a
+// language it has a grammar or an operator table for (RECOGNIZED_LANGUAGE_
+// EXTENSIONS in src/mutate.ts) that it still could not mutate -- Ruby is
+// the standing example. A language it has never heard of at all -- Elixir,
+// a shell script -- was never something it claimed to measure, so it is
+// reported (see unrecognizedLanguagePaths below, so nothing still
+// vanishes) but does not fold into exit 3.
+test("unsupportedLanguagePaths does not report a language this tool has never heard of", () => {
   const paths = ["lib/discount.ex", "lib/main.rb"];
-  assert.deepEqual(unsupportedLanguagePaths(paths), ["lib/discount.ex", "lib/main.rb"]);
+  assert.deepEqual(unsupportedLanguagePaths(paths), ["lib/main.rb"]);
+});
+
+test("unsupportedLanguagePaths does not report this project's own shell scripts", () => {
+  // The reproduction from the finding: an ordinary tracked .sh file must
+  // never be treated as an unmeasured source file.
+  assert.deepEqual(unsupportedLanguagePaths(["scripts/pre-publication-check.sh"]), []);
 });
 
 test("unsupportedLanguagePaths still keeps common data, config, and markup extensions silent", () => {
@@ -284,9 +300,58 @@ test("unsupportedLanguagePaths still keeps common data, config, and markup exten
 test("unsupportedLanguagePaths does not flag an extensionless file", () => {
   // A Makefile, a Dockerfile, a bare LICENSE: overwhelmingly build
   // metadata or documentation, not program source, and with no extension
-  // to say otherwise. Flagging every one of these would be exactly the
-  // noise NON_SOURCE_EXTENSIONS exists to keep out.
+  // to say otherwise.
   assert.deepEqual(unsupportedLanguagePaths(["Makefile", "Dockerfile", "LICENSE"]), []);
+});
+
+// --- unrecognizedLanguagePaths: reported, never folds into exit 3 -----------
+
+test("unrecognizedLanguagePaths reports a language this tool has never heard of, next to a recognised one: neither vanishes", () => {
+  const paths = ["lib/discount.ex", "lib/main.rb"];
+  // lib/discount.ex: unrecognized -> reported here.
+  // lib/main.rb: recognized, no operator table -> reported by
+  // unsupportedLanguagePaths instead (see the test above), not here.
+  assert.deepEqual(unrecognizedLanguagePaths(paths), ["lib/discount.ex"]);
+});
+
+test("unrecognizedLanguagePaths reports the twelve-extension spread from the finding, exactly", () => {
+  const paths = [
+    "scripts/deploy.sh",
+    "api.proto",
+    "fake.bmp",
+    "font.otf",
+    "run.bat",
+    "schema.graphql",
+    "schema.sql",
+    "server.crt",
+    "server.key",
+    "main.tf",
+    "notebook.ipynb",
+    ".env.local",
+  ];
+  assert.deepEqual(unrecognizedLanguagePaths(paths), [...paths].sort());
+});
+
+test("unrecognizedLanguagePaths keeps common data, config, and markup extensions silent, same as unsupportedLanguagePaths", () => {
+  const paths = [
+    "README.md",
+    "package-lock.json",
+    "yarn.lock",
+    ".github/workflows/ci.yml",
+    "styles/app.css",
+    "assets/logo.svg",
+    "notes.txt",
+  ];
+  assert.deepEqual(unrecognizedLanguagePaths(paths), []);
+});
+
+test("unrecognizedLanguagePaths does not flag an extensionless file", () => {
+  assert.deepEqual(unrecognizedLanguagePaths(["Makefile", "Dockerfile", "LICENSE"]), []);
+});
+
+test("unrecognizedLanguagePaths drops a test file, and a mutable file, the same way unsupportedLanguagePaths does", () => {
+  const paths = ["spec/thing_spec.ex", "src/a.ts"];
+  assert.deepEqual(unrecognizedLanguagePaths(paths), []);
 });
 
 test("planMutations never plans a mutation in a test file", () => {

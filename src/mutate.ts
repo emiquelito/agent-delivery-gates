@@ -17,6 +17,7 @@
 
 import { languageServiceFor, warmLanguageServices, hadLanguageLoadFailure, IDENT_CHAR } from "./code-mask.ts";
 import { classifyTestPath, isCommentLine, isImportLine, type RuleSet } from "./test-diff-separator.ts";
+import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
 /** The fixed operator set. One mutation per run, one operator per mutation. */
 export type MutationOperator =
@@ -133,25 +134,78 @@ export function selectMutablePaths(paths: string[], rules?: RuleSet): string[] {
 }
 
 /**
+ * Extensions this project has actually built language support for: the
+ * ones MUTABLE_EXTENSIONS already has an operator table for, plus every
+ * language src/tree-sitter-grammars.ts has a GrammarSpec for (Rust, Ruby,
+ * PHP, Go, Java, C#) -- Ruby among them being exactly the case that
+ * matters: this tool can already tell Ruby code from a Ruby comment or
+ * string, has never heard of a Ruby operator to mutate. `.py` is covered
+ * twice over (MUTABLE_EXTENSIONS and its own tree-sitter service) and
+ * costs nothing to union in again.
+ *
+ * This is the signal this tool already has for "I recognise this as
+ * source": whether it has gone to the trouble of writing a grammar or an
+ * operator table for the extension at all. It cannot be an accident of a
+ * forgotten name the way a denylist of non-languages is, because the only
+ * way onto this set is this project's own code doing the work -- adding a
+ * seventh GrammarSpec or an eighth MUTABLE_EXTENSIONS entry is the only
+ * way an extension joins it, so it never has to be maintained as a
+ * separate list of "languages that exist."
+ */
+const RECOGNIZED_LANGUAGE_EXTENSIONS: ReadonlySet<string> = new Set([
+  ...MUTABLE_EXTENSIONS,
+  ...Object.keys(GRAMMAR_SPECS),
+]);
+
+/**
+ * The candidate paths `selectMutablePaths` above drops for want of an
+ * operator set, restricted to a language this tool recognises (see
+ * RECOGNIZED_LANGUAGE_EXTENSIONS): a real, non-test source file this tool
+ * has a grammar or a mask for -- so it knows the file is source, not
+ * markup or data -- but has not written mutation rules for. Ruby is the
+ * standing example.
+ *
+ * A file whose extension this tool has never heard of at all -- a shell
+ * script, Terraform, a `.proto` file, Elixir -- is deliberately NOT
+ * folded in here. This function used to be the exit-3 signal for both
+ * cases at once, first as an allowlist of known languages (anything
+ * outside it, including a real, entirely unsupported language, vanished from
+ * the report without a trace) and then as a denylist of known non-source
+ * extensions (which then had to name every config, data, and script
+ * extension a real repository has, and missed enough of them --
+ * `.sh` among them -- to fail this project's own commits on files
+ * unconnected to code quality). Neither a list of known languages nor a
+ * list of known non-languages can ever be complete; the fix is not a
+ * third list, it is asking a narrower question. Exit 3 means this tool
+ * could not measure something it should have been able to; an extension
+ * it has never attempted a grammar or an operator table for is not that
+ * -- it was never going to be measured, the same way a config file never
+ * was. See `unrecognizedLanguagePaths` below for where a file like that
+ * is still reported, just without touching the exit code.
+ */
+export function unsupportedLanguagePaths(paths: string[], rules?: RuleSet): string[] {
+  return paths
+    .filter((path) => {
+      const ext = extensionOf(path);
+      if (ext === "") return false;
+      if (hasMutableExtension(path)) return false;
+      if (!RECOGNIZED_LANGUAGE_EXTENSIONS.has(ext)) return false;
+      return !classifyTestPath(path, rules).isTest;
+    })
+    .sort();
+}
+
+/**
  * Extensions this project already knows are not a programming language:
  * markup and documentation, serialized data, style sheets, lockfiles and
- * other config, and common binary/media formats. Nothing here was ever
- * going to grow an operator table, so flagging one as "unmeasured" would
- * drown the signal `unsupportedLanguagePaths` below exists to give in
- * noise -- a commit that merely touches package.json must not report exit
- * 3 for no real reason. This is deliberately a denylist, not an allowlist
- * of known languages: an earlier version of this file kept a
- * KNOWN_LANGUAGE_EXTENSIONS allowlist (Python plus the six languages
- * src/tree-sitter-grammars.ts has a GrammarSpec for), and a file in any
- * other real language -- Elixir, Zig, a shell script, anything this tool
- * has never heard of -- fell outside it and vanished from the report the
- * same way it vanished before this project's exit-3 signal existed at
- * all, just one language further out. An allowlist of languages has to
- * grow forever and is wrong on every name it has not gotten to yet; a
- * denylist of non-languages is a short, roughly fixed list, and being
- * wrong on it in the noisy direction (flagging a real source file this
- * tool has truly never seen) is the failure to have, not the quiet
- * one.
+ * other config, and common binary/media formats. This list exists only to
+ * keep `unrecognizedLanguagePaths` below quiet on an ordinary commit that
+ * touches package.json or README.md -- it is not wired to the exit code,
+ * so a name missing from it costs this project a harmless extra report
+ * line for a config file, never a failed build. That is what lets this
+ * stay a short, hand-maintained list instead of a completeness project:
+ * being wrong on it in the noisy direction (naming a file that was
+ * really was never going to matter) is the failure worth having.
  */
 const NON_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
   // markup and documentation
@@ -206,31 +260,33 @@ const NON_SOURCE_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The candidate paths `selectMutablePaths` above drops that are not
- * accounted for anywhere else: a real, non-test file whose extension is
- * neither in MUTABLE_EXTENSIONS (an operator table exists) nor in
- * NON_SOURCE_EXTENSIONS (known to never need one). A test file is not
- * included here, because it was never going to be mutated anyway. A path
- * with no extension at all (a Makefile, a Dockerfile, a bare "LICENSE")
- * is also not included: extensionOf answers "" for one, and treating
- * every extensionless file in a repository as an unmeasured language
- * would be exactly the noise NON_SOURCE_EXTENSIONS exists to keep out,
- * for files that are overwhelmingly build metadata or documentation, not
- * program source, when they carry no extension to say otherwise.
+ * The candidate paths that are none of the above: not mutable, not a
+ * recognised-but-unsupported language (`unsupportedLanguagePaths`), not a
+ * test file, and not one of the common non-source extensions this project
+ * already knows to stay quiet about. A shell script, a `.proto` file, a
+ * Terraform file, a notebook, a certificate, an extension this tool has
+ * has plainly never seen -- this is where the "nothing selected vanishes"
+ * requirement is met for them: named here, instead of silently dropped
+ * the way this project used to drop them and the way an allowlist or a
+ * denylist of "real" extensions always eventually drops something.
  *
- * A caller that silently drops these reports a run over, say, an
- * all-Elixir diff exactly the way it reports a run that mutated
- * everything and found no survivors: nothing printed, exit 0. See
- * ReportInput's `unsupportedFiles` and exitCodeFor below for how this
- * list turns that silence into an unmeasured file, reported by name, with
- * its own exit code.
+ * Deliberately outside `exitCodeFor`'s reach (see ReportInput's
+ * `unrecognizedFiles` below): a run over only files in a language this
+ * tool has never attempted did not fail to measure anything it should
+ * have been able to, so it must not read as exit 3. It also must not read
+ * as a silent exit 0/2 with the file unnamed, which is the bug this
+ * function exists to close. An extensionless path (a Makefile, a
+ * Dockerfile, a bare "LICENSE") is left out for the same reason it always
+ * was: these are overwhelmingly build metadata, not program source, and
+ * carry no extension to say otherwise.
  */
-export function unsupportedLanguagePaths(paths: string[], rules?: RuleSet): string[] {
+export function unrecognizedLanguagePaths(paths: string[], rules?: RuleSet): string[] {
   return paths
     .filter((path) => {
       const ext = extensionOf(path);
       if (ext === "") return false;
       if (hasMutableExtension(path)) return false;
+      if (RECOGNIZED_LANGUAGE_EXTENSIONS.has(ext)) return false;
       if (NON_SOURCE_EXTENSIONS.has(ext)) return false;
       return !classifyTestPath(path, rules).isTest;
     })
@@ -588,6 +644,12 @@ function isUnmeasured(result: MutationResult): boolean {
  * planning a mutation for it would have used the wrong scanner -- so it
  * is exactly as unmeasured as the other two. The CLI owns exit 2, which
  * means the run could not happen at all.
+ *
+ * A file `unrecognizedLanguagePaths` reports is deliberately not a
+ * parameter here at all: this tool never had a grammar or an operator
+ * table for that extension, so it never claimed it could measure it, and
+ * a run over only files like that must not read as exit 3 -- reported by
+ * name in the text/JSON report, never folded into this exit code.
  */
 export function exitCodeFor(
   results: MutationResult[],
@@ -627,6 +689,17 @@ export interface ReportInput {
    * Absent or empty when every candidate's grammar loaded, or needed
    * none. */
   grammarUnavailableFiles?: string[];
+  /** Candidate files skipped before planning because their extension is
+   * not a language this tool has ever built a grammar or an operator
+   * table for: see unrecognizedLanguagePaths above. Reported by name so
+   * nothing a run was asked to consider vanishes from the report, but
+   * deliberately NOT folded into exit 3 -- unlike unsupportedFiles and
+   * grammarUnavailableFiles above, this tool never claimed it could
+   * measure these, so their presence is not a failure to measure
+   * something it should have. Absent or empty when every candidate's
+   * language was either mutable, recognised-but-unsupported, or common
+   * enough to stay quiet about entirely. */
+  unrecognizedFiles?: string[];
 }
 
 function describeMutation(mutation: Mutation): string {
@@ -648,6 +721,7 @@ export function formatReportText(input: ReportInput): string {
   const summary = summarize(input.results);
   const unsupportedFiles = input.unsupportedFiles ?? [];
   const grammarUnavailableFiles = input.grammarUnavailableFiles ?? [];
+  const unrecognizedFiles = input.unrecognizedFiles ?? [];
   const lines: string[] = [];
   lines.push(`Command: ${input.command}`);
   lines.push(`Baseline: passed in ${(input.baselineMs / 1000).toFixed(1)}s`);
@@ -703,6 +777,12 @@ export function formatReportText(input: ReportInput): string {
     for (const path of grammarUnavailableFiles) lines.push(`  ${path}`);
   }
 
+  if (unrecognizedFiles.length > 0) {
+    lines.push("");
+    lines.push(`Not a language this tool recognises, not measured (${unrecognizedFiles.length}):`);
+    for (const path of unrecognizedFiles) lines.push(`  ${path}`);
+  }
+
   lines.push("");
   if (survivors.length > 0) {
     lines.push("A surviving mutation means no test noticed the code changed.");
@@ -735,6 +815,16 @@ export function formatReportText(input: ReportInput): string {
   } else {
     lines.push("No mutation survived: every break this tool made was caught.");
   }
+
+  if (unrecognizedFiles.length > 0) {
+    // Always appended, independent of the exit-3 reasoning above: this
+    // list does not change the exit code, so its explanation stands on
+    // its own instead of joining joinClauses' tally of what is unmeasured.
+    lines.push(
+      `${unrecognizedFiles.length} selected file(s) are in a language this tool has never built a grammar or ` +
+        `operator table for; they are reported by name above and skipped, not counted toward exit 3.`,
+    );
+  }
   return lines.join("\n");
 }
 
@@ -751,6 +841,7 @@ export function formatReportJson(input: ReportInput): string {
       results: input.results,
       unsupportedFiles: input.unsupportedFiles ?? [],
       grammarUnavailableFiles: input.grammarUnavailableFiles ?? [],
+      unrecognizedFiles: input.unrecognizedFiles ?? [],
     },
     null,
     2,
