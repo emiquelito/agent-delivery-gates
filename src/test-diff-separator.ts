@@ -11,13 +11,14 @@
 // what changed in the test files themselves, separately from the source
 // change that supposedly caused them to pass.
 
-import { getLanguageService } from "./code-mask.ts";
+import { languageServiceFor } from "./code-mask.ts";
 
-/** Reaches the currently selected language service on every call, so a
- * later switch (see selectLanguageService in src/code-mask.ts) takes effect
- * here without this file threading the choice through every call site. */
-function maskNonCode(text: string): string {
-  return getLanguageService().maskNonCode(text);
+/** Reaches the scanner chosen for `path` on every call (see
+ * languageServiceFor in src/code-mask.ts), so a `.py` file is read by the
+ * tree-sitter service when one is available for this process, and every
+ * other file keeps the regex scanner it always used. */
+function maskNonCode(text: string, path: string): string {
+  return languageServiceFor(path).maskNonCode(text);
 }
 
 export type SignalId =
@@ -619,6 +620,18 @@ function parseDiff(text: string): RawFileDiff[] {
   return files;
 }
 
+/**
+ * Every file path named in `diffText`, in the order the diff names them.
+ * Exists for a caller that wants to warm up a language service (see
+ * `warmLanguageServices` in src/code-mask.ts) before calling
+ * `separateTestDiff`, which stays a plain synchronous function and cannot
+ * do that loading itself. Reuses `parseDiff`, so it recognises the same
+ * kinds of diff: renames, new and deleted files, and so on.
+ */
+export function pathsInDiff(diffText: string): string[] {
+  return parseDiff(diffText).map((file) => file.path);
+}
+
 // --- Weakening signals, run against test files only --------------------------
 
 const COMMENT_LINE_RE = /^\s*(?:\/\/|#(?!\[)|\*|\/\*|--)/;
@@ -678,8 +691,8 @@ export function isImportLine(line: string): boolean {
  * there is no whole file to scan instead. For a test file where that is
  * common, the fixture marker (FIXTURE_MARKER above) is the answer.
  */
-function matching(lines: string[], re: RegExp): string[] {
-  return lines.filter((line) => !isCommentLine(line) && !isImportLine(line) && re.test(maskNonCode(line)));
+function matching(lines: string[], re: RegExp, path: string): string[] {
+  return lines.filter((line) => !isCommentLine(line) && !isImportLine(line) && re.test(maskNonCode(line, path)));
 }
 
 // An assertion that stays in place but stops proving as much. The net-count
@@ -708,8 +721,8 @@ interface MaskedLine {
   masked: string;
 }
 
-function withMask(raw: string): MaskedLine {
-  return { raw, masked: maskNonCode(raw) };
+function withMask(raw: string, path: string): MaskedLine {
+  return { raw, masked: maskNonCode(raw, path) };
 }
 
 /**
@@ -720,8 +733,8 @@ function withMask(raw: string): MaskedLine {
 function assertionWeakenedSignals(file: RawFileDiff, rules: CompiledRules): Signal[] {
   // Every pattern below is tested against the masked half of the line and
   // reported from the raw half, for the reason given on `matching` above.
-  const removed = matching(file.removedLines, rules.assertions).map(withMask);
-  const added = matching(file.addedLines, rules.assertions).map(withMask);
+  const removed = matching(file.removedLines, rules.assertions, file.path).map((line) => withMask(line, file.path));
+  const added = matching(file.addedLines, rules.assertions, file.path).map((line) => withMask(line, file.path));
   if (removed.length === 0 || added.length === 0) return [];
   const signals: Signal[] = [];
 
@@ -846,8 +859,8 @@ function netRemovalSignal(
   re: RegExp,
   message: string,
 ): Signal[] {
-  const removed = matching(file.removedLines, re);
-  const added = matching(file.addedLines, re);
+  const removed = matching(file.removedLines, re, file.path);
+  const added = matching(file.addedLines, re, file.path);
   if (removed.length <= added.length) return [];
   return removed.map((line) => ({ id, severity, file: file.path, line, message }));
 }
@@ -866,15 +879,15 @@ function changedValueSignal(
   re: RegExp,
   message: string,
 ): Signal[] {
-  const removed = matching(file.removedLines, re);
-  const added = matching(file.addedLines, re);
+  const removed = matching(file.removedLines, re, file.path);
+  const added = matching(file.addedLines, re, file.path);
   if (removed.length === 0 || added.length === 0) return [];
   return added.map((line) => ({ id, severity, file: file.path, line, message }));
 }
 
 /** skip-added fires on any added line naming a skip or exclusion, unconditionally. */
 function skipAddedSignal(file: RawFileDiff, rules: CompiledRules): Signal[] {
-  return matching(file.addedLines, rules.skips).map((line) => ({
+  return matching(file.addedLines, rules.skips, file.path).map((line) => ({
     id: "skip-added" as const,
     severity: "high" as const,
     file: file.path,
@@ -997,8 +1010,8 @@ const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_
 // code, so `#[cfg(test)]` and `#[test]` come through the mask untouched,
 // and so does `assert_eq!(total, 3)`.
 function hasRustTestMarker(file: RawFileDiff): boolean {
-  if (file.hunkHeadings.some((heading) => RUST_TEST_MARKER_RE.test(maskNonCode(heading)))) return true;
-  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(maskNonCode(line.content)));
+  if (file.hunkHeadings.some((heading) => RUST_TEST_MARKER_RE.test(maskNonCode(heading, file.path)))) return true;
+  return file.lines.some((line) => RUST_TEST_MARKER_RE.test(maskNonCode(line.content, file.path)));
 }
 
 // Matches "#[cfg(test)]" and "#[cfg(all(test, feature = \"x\"))]" (or any
@@ -1094,11 +1107,11 @@ function locateModOpener(lines: DiffLine[], attrIdx: number): { idx: number; pun
  * comment banner above this section for the brace-counting approximation
  * and its limits.
  */
-function cfgTestRegionMask(lines: DiffLine[]): boolean[] {
+function cfgTestRegionMask(lines: DiffLine[], path: string): boolean[] {
   const mask = new Array<boolean>(lines.length).fill(false);
   let i = 0;
   while (i < lines.length) {
-    if (!CFG_TEST_ATTR_RE.test(maskNonCode(lines[i].content))) {
+    if (!CFG_TEST_ATTR_RE.test(maskNonCode(lines[i].content, path))) {
       i++;
       continue;
     }
@@ -1206,7 +1219,7 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
         if (hasRustTestMarker(file)) {
           if (!skipChecks()) signals.push(...signalsForTestFile(file, rules));
         } else {
-          const mask = cfgTestRegionMask(file.lines);
+          const mask = cfgTestRegionMask(file.lines, file.path);
           const regionAdded: string[] = [];
           const regionRemoved: string[] = [];
           file.lines.forEach((line, idx) => {

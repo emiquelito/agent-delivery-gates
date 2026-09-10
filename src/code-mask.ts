@@ -351,10 +351,20 @@ function startsRegex(lastCode: string): boolean {
 //
 // Wrapping the existing functions as `regexLanguageService` changes no
 // behaviour: it is the same `classify` underneath, reached through one more
-// layer of indirection. `getLanguageService` is what a caller calls instead
-// of `codeMask`/`maskNonCode` directly, so which scanner runs is one
-// function call away from being switched, in one place, for every caller at
-// once.
+// layer of indirection.
+//
+// A first version of this seam kept the chosen service in a module-level
+// variable, set once by a `selectLanguageService` call and read back by
+// `getLanguageService`. Two problems with that survived review before
+// anything called it: nothing ever reset it, so one test choosing a
+// non-default service would leak into every test that ran after it in the
+// same file; and a single global can only ever hold one language for an
+// entire process, which cannot express what this phase exists to start,
+// per-file dispatch across a repository that mixes languages. Both callers
+// already know the path of the file they are scanning when they ask for a
+// mask, so `languageServiceFor(path)` replaces the global outright: the
+// choice is made fresh from that path on every call, and there is no
+// process-lifetime state left to leak between callers or between tests.
 
 /** What a caller needs from a source-language scanner. */
 export interface LanguageService {
@@ -366,49 +376,66 @@ export interface LanguageService {
 
 /** The regex-and-heuristic scanner this file has always run, wrapped to the
  * interface callers now go through. Byte-for-byte the same scanner as
- * before this seam existed. */
+ * before this seam existed. Still the answer for every extension this file
+ * does not name a more specific service for below. */
 export const regexLanguageService: LanguageService = {
   codeMask,
   maskNonCode,
 };
 
-/**
- * Not wired to anything yet. Phase 2 of the language-agnostic plan lands a
- * tree-sitter-backed implementation here; this stub only reserves the name
- * and the interface so that phase has somewhere to land, and fails loudly
- * instead of silently returning a wrong answer if something reaches it
- * early. No tree-sitter dependency is added in this phase.
- */
-export const treeSitterLanguageService: LanguageService = {
-  codeMask(): boolean[] {
-    throw new Error("treeSitterLanguageService: not implemented");
-  },
-  maskNonCode(): string {
-    throw new Error("treeSitterLanguageService: not implemented");
-  },
-};
+// The tree-sitter-backed Python service, once loading it has been tried for
+// this process. `undefined` means "never tried yet", which is also this
+// module's initial state: nothing here imports web-tree-sitter or
+// tree-sitter-python at module load, so a process that never touches a
+// `.py` file never even attempts it. A value of `regexLanguageService`
+// here records a real, already-made decision: the load was tried and
+// failed (the dev dependencies are not installed), and falling back to the
+// regex scanner for `.py` files is what this project did before this
+// service existed, so that is the answer once and for all for this
+// process, not retried on every call.
+let pythonService: LanguageService | undefined;
 
-const LANGUAGE_SERVICES = {
-  regex: regexLanguageService,
-  "tree-sitter": treeSitterLanguageService,
-} as const;
-
-export type LanguageServiceName = keyof typeof LANGUAGE_SERVICES;
-
-// The default is the existing scanner, so choosing to change nothing is the
-// out-of-the-box behaviour. Module-level state, not a parameter every
-// caller has to thread through: both callers already reach this file
-// through a single shared import, exactly as they reach `codeMask` today.
-let selectedService: LanguageServiceName = "regex";
-
-/** Switches which implementation `getLanguageService` returns. The one
- * place later phases flip to change every caller at once. */
-export function selectLanguageService(name: LanguageServiceName): void {
-  selectedService = name;
+async function resolvePythonService(): Promise<LanguageService> {
+  if (pythonService !== undefined) return pythonService;
+  try {
+    const { loadPythonLanguageService } = await import("./tree-sitter-python-service.ts");
+    pythonService = await loadPythonLanguageService();
+  } catch {
+    // No web-tree-sitter, no tree-sitter-python, or the wasm grammar itself
+    // failed to load: on any of those, a `.py` file gets exactly the
+    // scanner it always got, and nothing above this catch throws.
+    pythonService = regexLanguageService;
+  }
+  return pythonService;
 }
 
-/** The currently selected implementation. Defaults to the regex scanner
- * that has always run here. */
-export function getLanguageService(): LanguageService {
-  return LANGUAGE_SERVICES[selectedService];
+/**
+ * Loads whichever language services a batch of files will actually need,
+ * before any of them is scanned. `languageServiceFor` below is
+ * synchronous, because both callers need to call it deep inside otherwise
+ * synchronous, per-line and per-file logic; loading a WASM grammar is not
+ * synchronous, so the load has to happen here, ahead of time, from a
+ * caller that already knows every path it is about to process. A path
+ * list with no `.py` file in it returns immediately having imported
+ * nothing. Safe to call more than once: the second call for a process
+ * that already resolved the Python service returns at once.
+ */
+export async function warmLanguageServices(paths: readonly string[]): Promise<void> {
+  if (pythonService !== undefined) return;
+  if (!paths.some((path) => path.toLowerCase().endsWith(".py"))) return;
+  await resolvePythonService();
+}
+
+/**
+ * The scanner for one file, chosen from its path, not from any state
+ * carried between calls. Every extension other than `.py` gets the regex
+ * scanner this file has always run, unchanged. A `.py` file gets the
+ * tree-sitter-backed service when `warmLanguageServices` was able to load
+ * it for this process, and the regex scanner otherwise, including for a
+ * caller that never called `warmLanguageServices` at all: that keeps every
+ * caller written before this function existed working exactly as it did.
+ */
+export function languageServiceFor(path: string): LanguageService {
+  if (path.toLowerCase().endsWith(".py") && pythonService !== undefined) return pythonService;
+  return regexLanguageService;
 }

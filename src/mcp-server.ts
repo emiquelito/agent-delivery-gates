@@ -23,8 +23,9 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { checkPathAllowed } from "./path-allowlist.ts";
 import { validateReport, formatFindingText } from "./report-validator.ts";
-import { separateTestDiff, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
+import { separateTestDiff, formatSignalText, pathsInDiff, type RuleSet } from "./test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
+import { warmLanguageServices } from "./code-mask.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 
@@ -264,7 +265,7 @@ function resolveRules(ctx: McpContext): RuleSet | { error: string } {
   }
 }
 
-function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContext): ToolResult {
+async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContext): Promise<ToolResult> {
   const given = ["revision", "range", "diff_text"].filter(
     (key) => typeof args[key] === "string",
   );
@@ -294,6 +295,9 @@ function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContext): To
   const rules = resolveRules(ctx);
   if ("error" in rules) return toolError(rules.error);
 
+  // See hooks/test-diff-separator.ts for why this has to happen ahead of
+  // the plain synchronous separateTestDiff call, not inside it.
+  await warmLanguageServices(pathsInDiff(diffText));
   const result = separateTestDiff(diffText, { rules });
 
   const lines: string[] = [];
@@ -438,7 +442,7 @@ function parseLine(raw: string): { ok: true; msg: ParsedMessage } | { ok: false 
  * with no "id", which JSON-RPC defines as a notification and which this
  * server never replies to, whatever its method.
  */
-export function handleLine(raw: string, ctx: McpContext): string | null {
+export async function handleLine(raw: string, ctx: McpContext): Promise<string | null> {
   const parsed = parseLine(raw);
   if (parsed === null) return null;
   if (!parsed.ok) {
@@ -460,7 +464,7 @@ export function handleLine(raw: string, ctx: McpContext): string | null {
   if (!msg.hasId) return null;
 
   try {
-    return dispatch(method, msg, ctx);
+    return await dispatch(method, msg, ctx);
   } catch (e) {
     // A failure inside this server, not a failure of the request it was
     // asked to run (a tool's own failure is reported as isError: true in a
@@ -471,7 +475,7 @@ export function handleLine(raw: string, ctx: McpContext): string | null {
   }
 }
 
-function dispatch(method: string, msg: ParsedMessage, ctx: McpContext): string | null {
+async function dispatch(method: string, msg: ParsedMessage, ctx: McpContext): Promise<string | null> {
   switch (method) {
     case "initialize":
       return ok(msg.id, handleInitialize(msg.params, ctx));
@@ -489,7 +493,7 @@ function dispatch(method: string, msg: ParsedMessage, ctx: McpContext): string |
           result = runValidateReport(args, ctx);
           break;
         case "separate_test_diff":
-          result = runSeparateTestDiff(args, ctx);
+          result = await runSeparateTestDiff(args, ctx);
           break;
         default:
           return err(msg.id, errorObj(-32602, `unknown tool '${name}'`));

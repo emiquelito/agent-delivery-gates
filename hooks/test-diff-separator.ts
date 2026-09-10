@@ -21,12 +21,14 @@ import {
   classifyTestPath,
   FIXTURE_MARKER,
   formatSignalText,
+  pathsInDiff,
   separateTestDiff,
   type RuleSet,
   type SeparateResult,
   type Signal,
 } from "../src/test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
+import { warmLanguageServices } from "../src/code-mask.ts";
 
 const USAGE = `Usage: test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json] [--config PATH]
        test-diff-separator --classify PATH... [--config PATH]
@@ -414,7 +416,7 @@ function runClassify(paths: string[], rules: RuleSet, format: "text" | "json"): 
   process.exit(0);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(USAGE);
@@ -431,6 +433,11 @@ function main(): void {
   const readFileText = makeFileTextReader(tryResolveRepoRoot(process.cwd()) ?? process.cwd());
 
   const diffText = resolveDiffText(args);
+  // A .py file is masked by the tree-sitter service once it is loaded for
+  // this process; loading it is not synchronous, so it happens here, ahead
+  // of separateTestDiff, which stays a plain synchronous function. A diff
+  // with no .py file in it never imports anything for this.
+  await warmLanguageServices(pathsInDiff(diffText));
   const result = separateTestDiff(diffText, { rules, readFileText });
 
   // A .rs file's #[cfg(test)] module can sit outside the default context

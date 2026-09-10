@@ -37,11 +37,15 @@ function main(): void {
     // handleLine never throws: every failure it hits, from a malformed
     // line to an internal error mid-request, comes back as a JSON-RPC
     // reply (or null for a notification), never an exception. Nothing here
-    // writes to stdout except that reply.
-    const reply = handleLine(line, ctx);
-    if (reply !== null) {
-      process.stdout.write(`${reply}\n`);
-    }
+    // writes to stdout except that reply. It is async only because
+    // separate_test_diff may need to load the tree-sitter Python service
+    // before it can run; every other method still resolves on the same
+    // tick it always did.
+    void handleLine(line, ctx).then((reply) => {
+      if (reply !== null) {
+        process.stdout.write(`${reply}\n`);
+      }
+    });
   });
 
   rl.on("close", () => {

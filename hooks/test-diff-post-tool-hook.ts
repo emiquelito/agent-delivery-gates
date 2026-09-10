@@ -17,9 +17,10 @@ import process from "node:process";
 import { readAllStdin } from "../src/hook-io.ts";
 import { execFileSync } from "node:child_process";
 import { readSync } from "node:fs";
-import { formatSignalText, separateTestDiff, type RuleSet } from "../src/test-diff-separator.ts";
+import { formatSignalText, pathsInDiff, separateTestDiff, type RuleSet } from "../src/test-diff-separator.ts";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
+import { warmLanguageServices } from "../src/code-mask.ts";
 
 function block(message: string): never {
   process.stderr.write(message.endsWith("\n") ? message : `${message}\n`);
@@ -46,7 +47,7 @@ function gitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const raw = readAllStdin();
   let payload: Record<string, unknown>;
   try {
@@ -113,6 +114,9 @@ function main(): void {
   // fixtures marker is answered the same way by both. Without it this hook
   // reported signals the command had already been told to leave alone.
   const readFileText = repoRoot === undefined ? undefined : makeFileTextReader(repoRoot);
+  // See hooks/test-diff-separator.ts for why this has to happen ahead of
+  // the plain synchronous separateTestDiff call, not inside it.
+  await warmLanguageServices(pathsInDiff(diffText));
   const result = separateTestDiff(diffText, { rules, readFileText });
   if (result.signals.length === 0) {
     process.exit(0);
