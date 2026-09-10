@@ -132,7 +132,7 @@ test("Finding 2: the same commit with no forced failure is scanned normally (con
       { command: "git commit -m 'x'", cwd: dir, hook_event_name: "afterShellExecution" },
       dir,
     );
-    assert.notEqual(result.status, 2, `expected no gate error without the forced failure: ${result.stderr}`);
+    assert.equal(result.status, 0, `expected no gate error without the forced failure: ${result.stderr}`);
   });
 });
 
@@ -180,7 +180,7 @@ test(
           dir,
           { PATH: `${binDir}:${process.env.PATH ?? ""}` },
         );
-        assert.notEqual(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
         assert.match(result.stderr, /masked one at a time/);
         assert.match(result.stderr, /not blocking this commit/i);
       });
@@ -217,7 +217,7 @@ test("Finding 1: adding a submodule warns here, not blocks", () => {
         { command: "git commit -m 'x'", cwd: dir, hook_event_name: "afterShellExecution" },
         dir,
       );
-      assert.notEqual(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
       assert.match(result.stderr, /masked one at a time/);
       assert.match(result.stderr, /not blocking this commit/i);
     } finally {
@@ -253,7 +253,7 @@ test("Finding 1: bumping an existing submodule pointer warns here, not blocks", 
         { command: "git commit -m 'x'", cwd: dir, hook_event_name: "afterShellExecution" },
         dir,
       );
-      assert.notEqual(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
       assert.match(result.stderr, /masked one at a time/);
       assert.match(result.stderr, /not blocking this commit/i);
     } finally {

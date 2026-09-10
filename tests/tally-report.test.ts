@@ -88,7 +88,7 @@ test("--check on a broken file exits 1 and names the row", () => {
     ].join("\n"),
     (path) => {
       const result = runCli(["--tally", path]);
-      assert.notEqual(result.status, 0);
+      assert.equal(result.status, 1);
       const checked = runCli(["--tally", path, "--check"]);
       assert.equal(checked.status, 1);
       assert.match(checked.stdout, /row 3/);

@@ -134,7 +134,7 @@ test("the hook exits non-zero when a check fails, and names it with the command 
   withTempRepo((dir) => {
     buildFixture(dir, { test: 1 });
     const r = runHook(dir);
-    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
     assert.match(r.all, /FAILED at: tests/);
     assert.match(r.all, /npm test/);
   });
@@ -144,7 +144,7 @@ test("a failure at an earlier step stops before a later step runs", () => {
   withTempRepo((dir) => {
     buildFixture(dir, { test: 1, scanProse: 1 });
     const r = runHook(dir);
-    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
     // A step that passes prints nothing of its own, so the proof that a
     // later step never ran is that its name never appears.
     assert.match(r.all, /FAILED at: tests/);
@@ -156,7 +156,7 @@ test("a failure at the prose scan step is named correctly", () => {
   withTempRepo((dir) => {
     buildFixture(dir, { scanProse: 1 });
     const r = runHook(dir);
-    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
     assert.match(r.all, /FAILED at: prose scan/);
     assert.match(r.all, /hooks\/scan-prose\.ts/);
   });
@@ -166,7 +166,7 @@ test("a failure at the tally step is named correctly", () => {
   withTempRepo((dir) => {
     buildFixture(dir, { tally: 1 });
     const r = runHook(dir);
-    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
     assert.match(r.all, /FAILED at: tally check/);
     assert.match(r.all, /tally-report\.ts --check/);
   });
