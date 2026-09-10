@@ -183,17 +183,28 @@ test("--diff naming a nonexistent path: exit 2", () => {
   assert.notEqual(result.stderr.trim(), "");
 });
 
-test("--diff naming an unreadable file: exit 2", () => {
-  withTempFile(SIGNAL_DIFF, (path) => {
-    chmodSync(path, 0o000);
-    try {
-      const result = runCli({ args: ["--diff", path] });
-      assert.equal(result.status, 2);
-    } finally {
-      chmodSync(path, 0o644);
-    }
-  });
-});
+test(
+  "--diff naming an unreadable file: exit 2",
+  {
+    // Windows has no POSIX permission bits: chmodSync(path, 0o000) there
+    // only ever toggles the read-only attribute, which blocks a write, not
+    // a read, so the file stays readable and the exit-2 branch this test
+    // checks would never be reached. Skipped for that stated reason, not
+    // to make the Windows job green.
+    skip: process.platform === "win32" ? "chmod 0o000 does not make a file unreadable on Windows" : false,
+  },
+  () => {
+    withTempFile(SIGNAL_DIFF, (path) => {
+      chmodSync(path, 0o000);
+      try {
+        const result = runCli({ args: ["--diff", path] });
+        assert.equal(result.status, 2);
+      } finally {
+        chmodSync(path, 0o644);
+      }
+    });
+  },
+);
 
 test("empty --diff input: exit 2, not a pass", () => {
   withTempFile("", (path) => {
@@ -481,7 +492,23 @@ test("the wide re-run never changes the printed source file stats: a plain sourc
   });
 });
 
-test("a git failure on the wide re-run degrades quietly to the narrow result, not a crash", () => {
+test(
+  "a git failure on the wide re-run degrades quietly to the narrow result, not a crash",
+  {
+    // The fake `git` below is a POSIX shell script with no file extension.
+    // Windows resolves a bare command name on PATH by trying each
+    // extension in PATHEXT (.exe, .cmd, .bat, ...); an extension-less file
+    // named exactly "git" is never one of those candidates, so Windows
+    // skips it and keeps searching PATH until it finds the real git.exe
+    // elsewhere. The override never takes effect there, so this is
+    // skipped for that stated reason, not left to silently test
+    // nothing.
+    skip:
+      process.platform === "win32"
+        ? "a same-named extension-less script cannot shadow git.exe in PATH resolution on Windows"
+        : false,
+  },
+  () => {
   // A fake `git` on PATH that behaves exactly like the real one, except it
   // fails any invocation carrying -U30. The CLI's first (narrow) git call
   // never passes -U30, so it succeeds as normal; only the wide re-run
@@ -513,12 +540,25 @@ test("a git failure on the wide re-run degrades quietly to the narrow result, no
       assert.equal(result.status, 0, result.stdout + result.stderr);
       assert.match(result.stdout, /src\/pricing\.rs\s+\+1 -1/);
     });
-  } finally {
-    rmSync(binDir, { recursive: true, force: true });
-  }
-});
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  },
+);
 
-test("the wide re-run only ever fires for a diff touching a .rs file: observed through a fake git that logs its argv", () => {
+test(
+  "the wide re-run only ever fires for a diff touching a .rs file: observed through a fake git that logs its argv",
+  {
+    // Same hazard as the fake-git test above: this fake `git` is also an
+    // extension-less POSIX shell script, which Windows' PATH resolution
+    // never matches against a bare "git" lookup, so the override does not
+    // take effect there. Skipped for that stated reason.
+    skip:
+      process.platform === "win32"
+        ? "a same-named extension-less script cannot shadow git.exe in PATH resolution on Windows"
+        : false,
+  },
+  () => {
   // A fake `git` on PATH that appends its argv to a log file and then
   // execs the real git, so the CLI behaves normally but every invocation
   // it makes is on record. -U30 only ever belongs to the wide re-run (see
@@ -563,10 +603,11 @@ test("the wide re-run only ever fires for a diff touching a .rs file: observed t
       const log = readFileSync(logPath, "utf8");
       assert.match(log, /-U30/, `a .rs diff must trigger the wide re-run; git log was:\n${log}`);
     });
-  } finally {
-    rmSync(binDir, { recursive: true, force: true });
-  }
-});
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("a signal derivable from both the narrow and the wide diff is reported once, not twice", () => {
   withTempRepo((dir) => {

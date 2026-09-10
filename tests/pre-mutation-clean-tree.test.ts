@@ -399,26 +399,37 @@ test("clean tree, mutation-testing phase: allowed", () => {
 
 // A phase file that exists but cannot be read must block. Reading it used to
 // throw, which exited 1, and a non-zero code that is not 2 lets the tool run.
-test("unreadable phase file: blocked, not a crash", () => {
-  withTempRepo((dir) => {
-    commitFile(dir, "a.txt", "hello\n");
-    writeFileSync(join(dir, "a.txt"), "changed\n");
-    mkdirSync(join(dir, ".claude"), { recursive: true });
-    const phaseFile = join(dir, ".claude", "adg-phase");
-    writeFileSync(phaseFile, "review\n");
-    chmodSync(phaseFile, 0o000);
-    try {
-      const result = runHook({
-        input: { tool_name: "Write", tool_input: {}, cwd: dir },
-        env: { ADG_PHASE: undefined },
-      });
-      assert.equal(result.status, 2);
-      assert.match(result.stderr, /adg-phase/);
-    } finally {
-      chmodSync(phaseFile, 0o644);
-    }
-  });
-});
+test(
+  "unreadable phase file: blocked, not a crash",
+  {
+    // Windows has no POSIX permission bits: chmodSync(path, 0o000) there
+    // only ever toggles the read-only attribute, which blocks a write, not
+    // a read, so the file stays readable and the exit-2 branch this test
+    // checks would never be reached. Skipped for that stated reason, not
+    // to make the Windows job green.
+    skip: process.platform === "win32" ? "chmod 0o000 does not make a file unreadable on Windows" : false,
+  },
+  () => {
+    withTempRepo((dir) => {
+      commitFile(dir, "a.txt", "hello\n");
+      writeFileSync(join(dir, "a.txt"), "changed\n");
+      mkdirSync(join(dir, ".claude"), { recursive: true });
+      const phaseFile = join(dir, ".claude", "adg-phase");
+      writeFileSync(phaseFile, "review\n");
+      chmodSync(phaseFile, 0o000);
+      try {
+        const result = runHook({
+          input: { tool_name: "Write", tool_input: {}, cwd: dir },
+          env: { ADG_PHASE: undefined },
+        });
+        assert.equal(result.status, 2);
+        assert.match(result.stderr, /adg-phase/);
+      } finally {
+        chmodSync(phaseFile, 0o644);
+      }
+    });
+  },
+);
 
 // An inherited GIT_WORK_TREE used to point git at a different tree, so a
 // dirty repository came back clean and the mutation was allowed.

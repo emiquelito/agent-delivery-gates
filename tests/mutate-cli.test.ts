@@ -208,7 +208,15 @@ test("a run interrupted partway restores every file it wrote to", async () => {
     // middle of the run with at least one file already mutated on disk.
     const child = spawn(
       "node",
-      [CLI_PATH, "--paths", "src/order.mjs", "--command", "node -e 'setTimeout(()=>process.exit(0),1000)'"],
+      // Double-quoted, not single-quoted: this string is handed to
+      // spawnCommand, which runs `--command` through the platform's own
+      // shell (sh on POSIX, cmd.exe on Windows). cmd.exe does not treat a
+      // single quote as a string delimiter at all, so a single-quoted
+      // script here would reach node with the quote characters still
+      // attached and fail to parse. Double quotes are the delimiter both
+      // shells agree on, and the script itself contains no characters
+      // either shell would expand inside them.
+      [CLI_PATH, "--paths", "src/order.mjs", "--command", 'node -e "setTimeout(()=>process.exit(0),1000)"'],
       { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
     );
     let stderr = "";

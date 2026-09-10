@@ -107,41 +107,54 @@ test("spawnCommand's own listeners are gone while no command is in flight, and p
 // SIGTERM, killed only by a real SIGHUP sent to this test process itself,
 // exactly what a closed terminal sends.
 
-test("spawnCommand forwards SIGHUP to the command's whole process tree, killing it (design correction A)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "adg-spawn-command-sighup-"));
-  const pidFile = join(dir, "worker.pid");
-  writeFileSync(
-    join(dir, "worker.mjs"),
-    'process.on("SIGTERM", () => {});\nprocess.on("SIGINT", () => {});\nsetInterval(() => {}, 1000);\n',
-  );
-  writeFileSync(
-    join(dir, "run.mjs"),
-    `import { spawn } from "node:child_process";
+test(
+  "spawnCommand forwards SIGHUP to the command's whole process tree, killing it (design correction A)",
+  {
+    // Unlike SIGINT (used by the other new signal tests, e.g.
+    // census-cli.test.ts, induce-cli.test.ts, mutate-cli.test.ts), SIGHUP
+    // is not in Node's documented allow-list of signals Windows delivers
+    // reliably (SIGINT, SIGBREAK, SIGTERM, SIGKILL). A raw
+    // process.kill(process.pid, "SIGHUP") against this test process is not
+    // a defect in the fix being tested here; it is untested on Windows
+    // because Windows has no SIGHUP to test.
+    skip: process.platform === "win32" ? "SIGHUP delivery is unreliable on Windows; see Node's signal docs" : false,
+  },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), "adg-spawn-command-sighup-"));
+    const pidFile = join(dir, "worker.pid");
+    writeFileSync(
+      join(dir, "worker.mjs"),
+      'process.on("SIGTERM", () => {});\nprocess.on("SIGINT", () => {});\nsetInterval(() => {}, 1000);\n',
+    );
+    writeFileSync(
+      join(dir, "run.mjs"),
+      `import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 const worker = spawn(process.execPath, ["worker.mjs"], { stdio: "ignore" });
 writeFileSync(${JSON.stringify(pidFile)}, String(worker.pid));
 worker.on("exit", (code) => process.exit(code ?? 0));
 `,
-  );
+    );
 
-  const promise = spawnCommand("node run.mjs", { cwd: dir });
-  const recordDeadline = Date.now() + 10_000;
-  while (true) {
-    try {
-      const pid = Number(readFileSync(pidFile, "utf8"));
-      if (Number.isInteger(pid) && pid > 0) break;
-    } catch {
-      // not written yet
+    const promise = spawnCommand("node run.mjs", { cwd: dir });
+    const recordDeadline = Date.now() + 10_000;
+    while (true) {
+      try {
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        if (Number.isInteger(pid) && pid > 0) break;
+      } catch {
+        // not written yet
+      }
+      if (Date.now() > recordDeadline) assert.fail("expected the worker's pid to be recorded before SIGHUP");
+      await new Promise((r) => setTimeout(r, 50));
     }
-    if (Date.now() > recordDeadline) assert.fail("expected the worker's pid to be recorded before SIGHUP");
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  const workerPid = Number(readFileSync(pidFile, "utf8"));
-  assert.ok(isAlive(workerPid), "expected the worker to be alive just before SIGHUP");
+    const workerPid = Number(readFileSync(pidFile, "utf8"));
+    assert.ok(isAlive(workerPid), "expected the worker to be alive just before SIGHUP");
 
-  process.kill(process.pid, "SIGHUP");
-  await promise;
+    process.kill(process.pid, "SIGHUP");
+    await promise;
 
-  const survivors = await waitForNoneAlive([workerPid], 5_000);
-  assert.deepEqual(survivors, [], "the worker outlived a real SIGHUP sent to this process");
-});
+    const survivors = await waitForNoneAlive([workerPid], 5_000);
+    assert.deepEqual(survivors, [], "the worker outlived a real SIGHUP sent to this process");
+  },
+);

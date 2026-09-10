@@ -360,7 +360,13 @@ async function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: nu
   const steps: StepResult[] = [];
   let stopped = false;
   for (const { step, command } of planned) {
-    if (stopped) {
+    // `interrupted` is checked here too, not only via `stopped`: a signal
+    // that arrives while one step's command is running must stop the next
+    // step's command from being spawned at all, the same way mutate's own
+    // mutation loop checks it between iterations. `stopped` alone only
+    // covers a failing baseline; it says nothing about a Ctrl-C that lands
+    // between, say, inject and neutralize.
+    if (stopped || interrupted) {
       steps.push({ step, command, outcome: "not-run", exitCode: null, durationMs: 0, stdout: "", stderr: "" });
       continue;
     }

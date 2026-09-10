@@ -13,7 +13,30 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Every platform this tool claims to run on gets its own leg of the
+    # same job, over a matrix, instead of three near-duplicate jobs that
+    # would drift apart the way copy-pasted CI config always does. This is
+    # what actually stands behind spawn-command's platform split (POSIX
+    # process-group kill vs. Windows' `taskkill /t`): before this, every
+    # job here was ubuntu-latest, so a macOS or Windows regression in that
+    # split had nothing running it, and a past round of macOS-only bugs
+    # was found solely because the owner happened to run the tool on a
+    # Mac by hand.
+    #
+    # The prose scan, the tally check, and the README tally check read
+    # tracked prose and doc figures; nothing about them depends on the
+    # operating system underneath, so running them on all three legs would
+    # burn CI minutes three times over for the same single answer. They
+    # run once, gated to the ubuntu-latest leg below. Typecheck and the
+    # test suite are not given that treatment: they are the whole reason
+    # for the matrix, since they exercise process spawning, signal
+    # handling, and path behaviour that actually differs by platform, so
+    # they run on every leg in full. No leg skips them.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     # Declared, not inherited. The repository default is read only
     # today, and a job that says nothing is safe only for as long as
     # nobody changes that setting. This workflow runs on a pull
@@ -29,6 +52,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          # package.json's engines field requires >=22.18; '22' resolves
+          # to the newest 22.x release on every runner, which satisfies
+          # that today and keeps doing so as 22.x moves forward.
           node-version: '22'
 
       - run: npm ci
@@ -39,11 +65,19 @@ jobs:
       - name: tests
         run: npm test
 
+      # Platform-independent checks: run once, on Linux only. See the
+      # comment above the matrix for why.
       - name: prose scan
+        if: matrix.os == 'ubuntu-latest'
         run: node hooks/scan-prose.ts --require-rules
 
       - name: tally check
+        if: matrix.os == 'ubuntu-latest'
         run: node scripts/tally-report.ts --check
+
+      - name: README tally check
+        if: matrix.os == 'ubuntu-latest'
+        run: node scripts/refresh-readme-tally.ts --check
 
   test-diff:
     # What changed in the tests, reported apart from what changed in the

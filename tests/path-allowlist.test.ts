@@ -1,13 +1,33 @@
 // Tests for src/path-allowlist.ts. The resolver is a plain function built
 // per test, never node:fs, so these run without touching a real filesystem
 // and can construct symlink-like resolution scenarios exactly as needed.
+//
+// src/path-allowlist.ts resolves paths with plain node:path (not
+// path.posix), the same module a real caller's real filesystem paths go
+// through, so the fixtures below build their absolute paths with the `p()`
+// helper instead of POSIX literals: on win32, node:path.resolve treats a
+// leading "/" as drive-relative to the current drive, not as an
+// absolute path, so a literal "/repo/src/a.ts" would never match itself
+// after resolution and every fake-resolver lookup below would miss. `p()`
+// builds a path each platform's own path.resolve treats as absolute, so the
+// same logic is exercised on every platform.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkPathAllowed, type PathResolver } from "../src/path-allowlist.ts";
 import { mkdtempSync, writeFileSync, symlinkSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
+import process from "node:process";
+
+/** Joins segments into an absolute path in the current platform's own
+ * flavor: forward slashes rooted at "/" on POSIX, backslashes rooted at a
+ * drive on win32. Never used on a relative candidate, where cwd already
+ * supplies the platform-appropriate root. */
+function p(...segments: string[]): string {
+  const root = process.platform === "win32" ? "C:\\" : "/";
+  return root + segments.join(sep);
+}
 
 /**
  * Builds a resolver from a map of path -> real path. Any path not present
@@ -23,29 +43,29 @@ function fakeResolver(overrides: Record<string, string>): PathResolver {
   };
 }
 
-const CWD = "/srv/project";
+const CWD = p("srv", "project");
 
 test("a path inside a root is allowed", () => {
-  const resolver = fakeResolver({ "/repo": "/repo", "/repo/src/a.ts": "/repo/src/a.ts" });
-  const result = checkPathAllowed("/repo/src/a.ts", ["/repo"], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("repo", "src", "a.ts")]: p("repo", "src", "a.ts") });
+  const result = checkPathAllowed(p("repo", "src", "a.ts"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, true);
 });
 
 test("a path outside every root is denied", () => {
-  const resolver = fakeResolver({ "/repo": "/repo", "/etc/passwd": "/etc/passwd" });
-  const result = checkPathAllowed("/etc/passwd", ["/repo"], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("etc", "passwd")]: p("etc", "passwd") });
+  const result = checkPathAllowed(p("etc", "passwd"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, false);
-  assert.equal(result.realPath, "/etc/passwd");
-  assert.deepEqual(result.roots, ["/repo"]);
+  assert.equal(result.realPath, p("etc", "passwd"));
+  assert.deepEqual(result.roots, [p("repo")]);
 });
 
 test("a path that does not exist yet, inside a root, is allowed", () => {
   // /repo/src exists; /repo/src/new-file.ts does not, the way a Write
   // target never exists beforehand.
-  const resolver = fakeResolver({ "/repo": "/repo", "/repo/src": "/repo/src" });
-  const result = checkPathAllowed("/repo/src/new-file.ts", ["/repo"], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("repo", "src")]: p("repo", "src") });
+  const result = checkPathAllowed(p("repo", "src", "new-file.ts"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, true);
-  assert.equal(result.realPath, "/repo/src/new-file.ts");
+  assert.equal(result.realPath, p("repo", "src", "new-file.ts"));
 });
 
 test("a symlink inside a root pointing outside it is denied", () => {
@@ -53,59 +73,59 @@ test("a symlink inside a root pointing outside it is denied", () => {
   // case the whole rule turns on: the lexical path looks contained, the
   // real path is not.
   const resolver = fakeResolver({
-    "/repo": "/repo",
-    "/repo/link": "/outside/secret",
-    "/repo/link/file.txt": "/outside/secret/file.txt",
+    [p("repo")]: p("repo"),
+    [p("repo", "link")]: p("outside", "secret"),
+    [p("repo", "link", "file.txt")]: p("outside", "secret", "file.txt"),
   });
-  const result = checkPathAllowed("/repo/link/file.txt", ["/repo"], resolver, CWD);
+  const result = checkPathAllowed(p("repo", "link", "file.txt"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, false);
-  assert.equal(result.realPath, "/outside/secret/file.txt");
+  assert.equal(result.realPath, p("outside", "secret", "file.txt"));
 });
 
 test("a symlinked root still matches a path inside its target", () => {
   // The root itself is given as a symlink; it resolves to /real-repo.
   const resolver = fakeResolver({
-    "/repo": "/real-repo",
-    "/repo/src/a.ts": "/real-repo/src/a.ts",
+    [p("repo")]: p("real-repo"),
+    [p("repo", "src", "a.ts")]: p("real-repo", "src", "a.ts"),
   });
-  const result = checkPathAllowed("/repo/src/a.ts", ["/repo"], resolver, CWD);
+  const result = checkPathAllowed(p("repo", "src", "a.ts"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, true);
 });
 
 test("/repo-evil is not counted as inside /repo", () => {
   const resolver = fakeResolver({
-    "/repo": "/repo",
-    "/repo-evil/x.txt": "/repo-evil/x.txt",
+    [p("repo")]: p("repo"),
+    [p("repo-evil", "x.txt")]: p("repo-evil", "x.txt"),
   });
-  const result = checkPathAllowed("/repo-evil/x.txt", ["/repo"], resolver, CWD);
+  const result = checkPathAllowed(p("repo-evil", "x.txt"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, false);
 });
 
 test("a relative path is resolved against the working directory", () => {
   const resolver = fakeResolver({
-    "/srv/project": "/srv/project",
-    "/srv/project/src/a.ts": "/srv/project/src/a.ts",
+    [p("srv", "project")]: p("srv", "project"),
+    [p("srv", "project", "src", "a.ts")]: p("srv", "project", "src", "a.ts"),
   });
-  const result = checkPathAllowed("src/a.ts", ["/srv/project"], resolver, CWD);
+  const result = checkPathAllowed(join("src", "a.ts"), [p("srv", "project")], resolver, CWD);
   assert.equal(result.allowed, true);
-  assert.equal(result.realPath, "/srv/project/src/a.ts");
+  assert.equal(result.realPath, p("srv", "project", "src", "a.ts"));
 });
 
 test("a candidate equal to the root itself is allowed", () => {
-  const resolver = fakeResolver({ "/repo": "/repo" });
-  const result = checkPathAllowed("/repo", ["/repo"], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo")]: p("repo") });
+  const result = checkPathAllowed(p("repo"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, true);
 });
 
 test("several roots, candidate in the second, is allowed", () => {
   const resolver = fakeResolver({
-    "/roots/first": "/roots/first",
-    "/roots/second": "/roots/second",
-    "/roots/second/file.txt": "/roots/second/file.txt",
+    [p("roots", "first")]: p("roots", "first"),
+    [p("roots", "second")]: p("roots", "second"),
+    [p("roots", "second", "file.txt")]: p("roots", "second", "file.txt"),
   });
   const result = checkPathAllowed(
-    "/roots/second/file.txt",
-    ["/roots/first", "/roots/second"],
+    p("roots", "second", "file.txt"),
+    [p("roots", "first"), p("roots", "second")],
     resolver,
     CWD,
   );
@@ -113,8 +133,8 @@ test("several roots, candidate in the second, is allowed", () => {
 });
 
 test("an empty root list denies everything", () => {
-  const resolver = fakeResolver({ "/repo/a.ts": "/repo/a.ts" });
-  const result = checkPathAllowed("/repo/a.ts", [], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo", "a.ts")]: p("repo", "a.ts") });
+  const result = checkPathAllowed(p("repo", "a.ts"), [], resolver, CWD);
   assert.equal(result.allowed, false);
   assert.deepEqual(result.roots, []);
 });
@@ -123,30 +143,31 @@ test("a path containing .. that resolves back inside a root is allowed", () => {
   // /repo/tmp/../src/a.ts is not itself in the map; node:path collapses the
   // .. before the resolver ever sees it, since path.resolve is applied to
   // the raw candidate before ancestor walking begins.
-  const resolver = fakeResolver({ "/repo": "/repo", "/repo/src/a.ts": "/repo/src/a.ts" });
-  const result = checkPathAllowed("/repo/tmp/../src/a.ts", ["/repo"], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("repo", "src", "a.ts")]: p("repo", "src", "a.ts") });
+  const result = checkPathAllowed(p("repo", "tmp", "..", "src", "a.ts"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, true);
-  assert.equal(result.realPath, "/repo/src/a.ts");
+  assert.equal(result.realPath, p("repo", "src", "a.ts"));
 });
 
 test("a path containing .. that escapes the root is denied", () => {
-  const resolver = fakeResolver({ "/repo": "/repo", "/etc/passwd": "/etc/passwd" });
-  const result = checkPathAllowed("/repo/../../etc/passwd", ["/repo"], resolver, CWD);
+  const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("etc", "passwd")]: p("etc", "passwd") });
+  const result = checkPathAllowed(p("repo", "..", "..", "etc", "passwd"), [p("repo")], resolver, CWD);
   assert.equal(result.allowed, false);
 });
 
 test("a denied result names the candidate, real path, and roots in its message", () => {
-  const resolver = fakeResolver({ "/repo": "/repo", "/etc/passwd": "/etc/passwd" });
-  const result = checkPathAllowed("/etc/passwd", ["/repo"], resolver, CWD);
-  assert.match(result.message, /\/etc\/passwd/);
-  assert.match(result.message, /\/repo/);
+  const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("etc", "passwd")]: p("etc", "passwd") });
+  const result = checkPathAllowed(p("etc", "passwd"), [p("repo")], resolver, CWD);
+  assert.match(result.message, /etc/);
+  assert.match(result.message, /passwd/);
+  assert.match(result.message, /repo/);
 });
 
 test("a root that fails to resolve is left out, and the check still returns a decision", () => {
-  const resolver = fakeResolver({ "/repo/a.ts": "/repo/a.ts" });
+  const resolver = fakeResolver({ [p("repo", "a.ts")]: p("repo", "a.ts") });
   // "/missing-root" is not in the map at any ancestor level, including "/",
   // so it can never resolve. It should simply grant nothing.
-  const result = checkPathAllowed("/repo/a.ts", ["/missing-root"], resolver, CWD);
+  const result = checkPathAllowed(p("repo", "a.ts"), [p("missing-root")], resolver, CWD);
   assert.equal(result.allowed, false);
 });
 

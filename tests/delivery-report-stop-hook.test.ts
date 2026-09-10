@@ -92,19 +92,30 @@ test("ADG_REPORT naming a directory: exits 2", () => {
   });
 });
 
-test("ADG_REPORT naming an unreadable file: exits 2", () => {
-  withTempDir((dir) => {
-    const p = join(dir, "report.md");
-    writeFileSync(p, PASSING_REPORT);
-    chmodSync(p, 0o000);
-    try {
-      const r = runHook(JSON.stringify({ hook_event_name: "Stop" }), { ADG_REPORT: p });
-      assert.equal(r.status, 2);
-    } finally {
-      chmodSync(p, 0o644);
-    }
-  });
-});
+test(
+  "ADG_REPORT naming an unreadable file: exits 2",
+  {
+    // Windows has no POSIX permission bits: chmodSync(path, 0o000) there
+    // only ever toggles the read-only attribute, which blocks a write, not
+    // a read, so the file stays readable and the exit-2 branch this test
+    // checks would never be reached. Skipped for that stated reason, not
+    // to make the Windows job green.
+    skip: process.platform === "win32" ? "chmod 0o000 does not make a file unreadable on Windows" : false,
+  },
+  () => {
+    withTempDir((dir) => {
+      const p = join(dir, "report.md");
+      writeFileSync(p, PASSING_REPORT);
+      chmodSync(p, 0o000);
+      try {
+        const r = runHook(JSON.stringify({ hook_event_name: "Stop" }), { ADG_REPORT: p });
+        assert.equal(r.status, 2);
+      } finally {
+        chmodSync(p, 0o644);
+      }
+    });
+  },
+);
 
 test("a malformed payload with a failing report still blocks", () => {
   withTempDir((dir) => {

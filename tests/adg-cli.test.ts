@@ -1,7 +1,13 @@
-// Tests for bin/adg.ts, the one binary this package installs. It is spawned
-// as a real subprocess, through its own shebang, the way an installed copy
-// would actually be invoked: the executable bit and #!/usr/bin/env node line
-// are as much a part of its contract as any exit code.
+// Tests for bin/adg.ts, the one binary this package installs. On POSIX it is
+// spawned as a real subprocess through its own shebang, the way an installed
+// copy would actually be invoked: the executable bit and #!/usr/bin/env node
+// line are as much a part of its contract as any exit code. Windows has no
+// shebang to invoke this way; an installed copy there runs through an
+// npm-generated .cmd shim that itself calls `node` on the target file, so
+// this runs the same way there: `node BIN args...` instead of executing BIN
+// directly. Either way, what every test below actually exercises is
+// bin/adg.ts's own dispatch logic, which is unaffected by which of the two
+// invokes it.
 //
 // The most important thing this file checks is that the wrapper never
 // flattens an exit code. This package's whole reason to exist is that a
@@ -15,6 +21,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import process from "node:process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
@@ -28,7 +35,9 @@ interface Run {
 }
 
 function runCli(args: string[], options: { cwd?: string; input?: string } = {}): Run {
-  const r = spawnSync(BIN, args, {
+  const [command, commandArgs] =
+    process.platform === "win32" ? [process.execPath, [BIN, ...args]] : [BIN, args];
+  const r = spawnSync(command, commandArgs, {
     encoding: "utf8",
     cwd: options.cwd,
     input: options.input ?? "",

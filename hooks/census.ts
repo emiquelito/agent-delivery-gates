@@ -833,6 +833,7 @@ async function main(): Promise<void> {
     if (args.rerun && censusResult.findings.length > 0 && baseTests !== null) {
       await new Promise((tick) => setImmediate(tick));
       const headAgain = await runAndParse(command, repoRoot, args, timeoutMs);
+      if (interrupted) return;
       await new Promise((tick) => setImmediate(tick));
       const baseAgain = await runAndParse(command, worktree.dir, args, timeoutMs);
       if (interrupted) return;
