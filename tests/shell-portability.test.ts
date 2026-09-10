@@ -197,6 +197,12 @@ function writeFile(dir: string, relPath: string, content: string): void {
 function writeExecutable(dir: string, relPath: string, content: string): void {
   writeFile(dir, relPath, content);
   execFileSync("chmod", ["+x", join(dir, relPath)]);
+  // See the matching comment in tests/precommit-hook.test.ts: without a
+  // `.cmd` shim beside it, this stub is invisible to `npx tsc` on Windows,
+  // which then runs whichever real `tsc` is next on PATH instead.
+  if (process.platform === "win32") {
+    writeFile(dir, `${relPath}.cmd`, `@echo off\r\nbash "%~dpn0" %*\r\n`);
+  }
 }
 
 function withTempDir(fn: (dir: string) => void): void {

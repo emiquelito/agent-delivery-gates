@@ -58,6 +58,16 @@ function writeFile(dir: string, relPath: string, content: string): void {
 function writeExecutable(dir: string, relPath: string, content: string): void {
   writeFile(dir, relPath, content);
   execFileSync("chmod", ["+x", join(dir, relPath)]);
+  // A real `npm install` leaves a matching `.cmd` shim beside a POSIX
+  // shebang script so Windows' own process creation, which cannot run a
+  // bare extensionless file no matter what its first line says, has
+  // something to invoke. `npx tsc` here is finding this stub through the
+  // same lookup a real install would use, so without the shim it resolves
+  // to nothing local on Windows and falls through to whatever real `tsc`
+  // is next on PATH instead -- the fixture's stub was never seen at all.
+  if (process.platform === "win32") {
+    writeFile(dir, `${relPath}.cmd`, `@echo off\r\nbash "%~dpn0" %*\r\n`);
+  }
 }
 
 interface StepExit {

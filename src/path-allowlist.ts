@@ -66,6 +66,31 @@ function isWithin(outerSegments: string[], innerSegments: string[]): boolean {
  * catching a candidate whose parent directory is a symlink pointing outside
  * an allowed root, because that parent is the ancestor that resolves.
  */
+/**
+ * Best-effort realpath of `cwd` itself, before it is ever joined onto a
+ * relative candidate.
+ *
+ * `cwd` always exists (a process cannot run from a directory that is
+ * gone), so this only ever changes its spelling, never its meaning. It
+ * matters on Windows, where the directory a process was launched into can
+ * still carry an 8.3 short name (`RUNNER~1`) that `process.cwd()` reports
+ * back verbatim, while a root read from git (`git rev-parse
+ * --show-toplevel`) comes back already expanded to its long form
+ * (`runneradmin`). A relative candidate resolved against the short form
+ * and a root resolved through the long form are two spellings of the same
+ * directory, and `isWithin`'s segment comparison treats them as
+ * unrelated. Realpathing `cwd` first, before either side of the
+ * comparison is built, closes that gap at its source instead of chasing
+ * it through every caller.
+ */
+function realCwd(cwd: string, resolver: PathResolver): string {
+  try {
+    return resolver(cwd);
+  } catch {
+    return cwd;
+  }
+}
+
 function resolveRealOrPending(absPath: string, resolver: PathResolver): string {
   const pendingFromLeaf: string[] = [];
   let current = absPath;
@@ -103,7 +128,8 @@ export function checkPathAllowed(
   // path.resolve normalizes ".." segments and, given an absolute candidate,
   // ignores cwd entirely (an absolute second argument short-circuits it), so
   // this handles both the relative and the absolute case in one call.
-  const absCandidate = resolve(cwd, candidate);
+  const resolvedCwd = realCwd(cwd, resolver);
+  const absCandidate = resolve(resolvedCwd, candidate);
 
   let realPath: string;
   try {
@@ -121,7 +147,7 @@ export function checkPathAllowed(
 
   const resolvedRoots: string[] = [];
   for (const root of allowedRoots) {
-    const absRoot = resolve(cwd, root);
+    const absRoot = resolve(resolvedCwd, root);
     try {
       resolvedRoots.push(resolveRealOrPending(absRoot, resolver));
     } catch {
@@ -191,8 +217,9 @@ export function resolveWithinRoot(
   resolver: PathResolver,
   cwd: string,
 ): ContainmentResult {
-  const absRoot = resolve(cwd, root);
-  const absCandidate = resolve(cwd, candidate);
+  const resolvedCwd = realCwd(cwd, resolver);
+  const absRoot = resolve(resolvedCwd, root);
+  const absCandidate = resolve(resolvedCwd, candidate);
 
   let realRoot: string;
   try {

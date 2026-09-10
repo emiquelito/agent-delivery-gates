@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, symlinkSync, existsSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
@@ -97,7 +97,13 @@ test("mutate accepts a file named through a symlinked repository path", (t) => {
   // Proof the two halves really do disagree as strings: this is the exact
   // condition the defect needed, asserted and not assumed.
   const toplevel = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd: linked, encoding: "utf8" });
-  assert.equal(toplevel.stdout.trim(), real);
+  // git always answers with forward slashes, on every platform, while
+  // `real` was built with path.join and carries this OS's own separator.
+  // That is a spelling difference, not the disagreement this assertion is
+  // proof of, so both sides are normalized to "/" before the comparison;
+  // the segments still have to match exactly.
+  const normalizeSep = (p: string): string => p.split(sep).join("/");
+  assert.equal(normalizeSep(toplevel.stdout.trim()), normalizeSep(real));
 
   const result = runMutate(linked, ["--paths", join(linked, "src", "pick.mjs"), "--command", "true"]);
   assert.doesNotMatch(result.stderr, /outside the repository/);

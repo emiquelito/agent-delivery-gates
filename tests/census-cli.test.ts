@@ -920,8 +920,13 @@ test("a real Ctrl-C (SIGINT) to the census process leaves no descendant running"
         assert.equal((exitResult as { signal: NodeJS.Signals | null }).signal, "SIGINT");
       }
     } finally {
-      rmSync(pidDir, { recursive: true, force: true });
-      rmSync(dir, { recursive: true, force: true });
+      // A worker just SIGINTed or SIGKILLed can still hold a Windows
+      // directory handle open for a few dozen milliseconds after the OS
+      // reports the process gone, and a bare rmSync lands inside that
+      // window often enough to fail with EBUSY. maxRetries/retryDelay give
+      // the handle time to actually let go instead of racing it once.
+      rmSync(pidDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 });

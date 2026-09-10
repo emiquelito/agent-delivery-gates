@@ -25,7 +25,7 @@ interface Run {
 }
 
 function runInitCli(args: string[]): Run {
-  const r = spawnSync(BIN, ["init", ...args], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, [BIN, "init", ...args], { encoding: "utf8" });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -274,7 +274,7 @@ test("--prose-preset house-style: writes a rules file that resolves, and the sca
     // banned word is caught, using the rules init just wrote.
     const filePath = join(dir, "notes.md");
     writeFileSync(filePath, "this is " + "gen" + "uinely banned prose\n");
-    const scanResult = spawnSync(BIN, ["scan-prose", "--rules", rulesPath, filePath], { encoding: "utf8" });
+    const scanResult = spawnSync(process.execPath, [BIN, "scan-prose", "--rules", rulesPath, filePath], { encoding: "utf8" });
     assert.equal(scanResult.status, 1, scanResult.stderr);
   });
 });
@@ -287,7 +287,7 @@ test("without --prose-preset: no rules file exists, and the scan reports nothing
 
     const filePath = join(dir, "notes.md");
     writeFileSync(filePath, "anything at all\n");
-    const scanResult = spawnSync(BIN, ["scan-prose", filePath], { encoding: "utf8", cwd: dir });
+    const scanResult = spawnSync(process.execPath, [BIN, "scan-prose", filePath], { encoding: "utf8", cwd: dir });
     assert.equal(scanResult.status, 0);
     assert.match(scanResult.stdout, /no prose rules are configured/);
   });
@@ -429,7 +429,7 @@ test("--prose-preset house-style --baseline in a project with legacy violations 
 
     // The same legacy violation, scanned with the baseline in place, no
     // longer fails: this is what makes the commit-time scan pass.
-    const scanResult = spawnSync(BIN, ["scan-prose", "--rules", rulesPath, "--baseline", baselinePath], {
+    const scanResult = spawnSync(process.execPath, [BIN, "scan-prose", "--rules", rulesPath, "--baseline", baselinePath], {
       cwd: dir,
       encoding: "utf8",
     });
@@ -437,7 +437,7 @@ test("--prose-preset house-style --baseline in a project with legacy violations 
 
     // A brand-new violation still fails, baseline or not.
     writeFileSync(join(dir, "new.md"), `this is a ${legacyWord} new problem\n`);
-    const scanWithNew = spawnSync(BIN, ["scan-prose", "--rules", rulesPath, "--baseline", baselinePath], {
+    const scanWithNew = spawnSync(process.execPath, [BIN, "scan-prose", "--rules", rulesPath, "--baseline", baselinePath], {
       cwd: dir,
       encoding: "utf8",
     });

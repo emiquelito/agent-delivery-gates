@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInit } from "../src/init.ts";
 
@@ -39,7 +39,12 @@ function pathsInitWouldCreate(): Set<string> {
     const paths = new Set<string>();
     for (const line of outcome.lines) {
       const m = /^would (?:create|overwrite): (.+)$/.exec(line);
-      if (m) paths.add(m[1]);
+      // init reports paths with this OS's own separator, while every doc
+      // this project ships names a path the way prose always does, with
+      // "/". Normalizing here, and not in init's own output, keeps a
+      // Windows user's `--dry-run` output reading like a Windows path
+      // while still letting it stand for the same README-quoted path.
+      if (m) paths.add(m[1].split(sep).join("/"));
     }
     return paths;
   } finally {

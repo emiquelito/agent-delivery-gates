@@ -379,7 +379,7 @@ test("templates/cursor-hooks.json parses, sets failClosed on every entry, and co
 // --- init writes .cursor/hooks.json only when absent ----------------------
 
 function runInitCli(args: string[], cwd: string): RunResult {
-  const r = spawnSync(BIN, ["init", ...args], { encoding: "utf8", cwd });
+  const r = spawnSync(process.execPath, [BIN, "init", ...args], { encoding: "utf8", cwd });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
