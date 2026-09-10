@@ -38,7 +38,7 @@
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { spawnCommand, reraiseSignal } from "../src/spawn-command.ts";
 import {
   exitCodeFor,
@@ -403,7 +403,15 @@ function toRepoRelative(path: string, repoRoot: string): string {
   if (!found.contained) {
     fail(`'${path}' is outside the repository at ${found.realRoot}`);
   }
-  return relative(found.realRoot, found.realPath);
+  // git, census, and induce all report repository-relative paths with
+  // forward slashes on every platform, because that is what git's own
+  // output uses and what the test-diff gate reads. node:path's relative()
+  // joins with the platform separator instead, so on Windows this would
+  // otherwise be the one place a repository-relative path in this tool's
+  // reports did not match git's own spelling. Splitting on the platform
+  // separator and rejoining with "/" is a no-op on POSIX, where sep is
+  // already "/".
+  return relative(found.realRoot, found.realPath).split(sep).join("/");
 }
 
 /** Reads each selected file, dropping any that no longer exists (a commit

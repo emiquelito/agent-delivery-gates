@@ -71,7 +71,7 @@
 // reraiseSignal below: this module's listener only ever kills the
 // in-flight command's group, it never decides how the caller itself ends.
 
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import process from "node:process";
 
 export interface SpawnCommandOptions {
@@ -109,12 +109,34 @@ export interface SpawnCommandResult {
  * back by spawn() for the command itself (the process group leader on
  * POSIX). Errors are swallowed: by the time this runs, the group or the
  * process may already be gone, and that is success, not a failure to
- * report. */
+ * report.
+ *
+ * The Windows branch runs taskkill synchronously on purpose. It used to
+ * fire the async execFile and return immediately, without waiting for the
+ * callback: killTree() is called from a SIGINT/SIGTERM/SIGHUP listener
+ * registered with prependListener specifically so it runs before whatever
+ * the caller does on the same signal (mutate restoring a mutated file and
+ * exiting, census removing its worktree and exiting). Node invokes every
+ * listener for one signal synchronously in registration order; it does
+ * not await one before calling the next, so returning before taskkill's
+ * own process had actually finished let the caller's handler reach
+ * process.exit while taskkill was still walking the tree in the
+ * background. This tool's own process could then be gone -- and a test
+ * watching for it could see that exit and move on to removing the
+ * directory the still-terminating descendants were still running out of
+ * -- before every one of them had actually stopped. execFileSync blocks
+ * killTree, and so this listener, until taskkill itself has exited,
+ * closing that race; it does not by itself prove the OS has released
+ * every handle those processes held (see reraiseSignal's caller for that
+ * part), but it does mean the kill was actually issued and taskkill's own
+ * process has ended before anything downstream of this signal runs. */
 function killTree(pid: number): void {
   if (process.platform === "win32") {
-    execFile("taskkill", ["/pid", String(pid), "/t", "/f"], () => {
+    try {
+      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+    } catch {
       // best effort; nothing to do if the process already exited
-    });
+    }
     return;
   }
   try {

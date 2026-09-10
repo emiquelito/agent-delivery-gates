@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -18,6 +18,21 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "mutate.ts");
 const REPO_ROOT = join(HERE, "..");
 const NODE_MODULES = join(REPO_ROOT, "node_modules");
+
+/** A test whose command spawns a worker that mutate (or this test's own
+ * cleanup) just killed can still be mid-teardown on Windows: the process
+ * is gone from the process list, but the kernel has not yet let go of the
+ * handle it held on this directory as its own current working directory,
+ * and a bare rmSync lands inside that window often enough to fail with
+ * EBUSY. tests/census-cli.test.ts and tests/induce-cli.test.ts hit the
+ * same thing and settled on 10 retries at 300ms (Node's own linear
+ * backoff, up to ~16.5s) as enough headroom without being unbounded; this
+ * repeats those same numbers instead of picking a new one, and this
+ * file's own rmSync calls did not have any retry at all before, which on
+ * its own accounted for most of this file's EBUSY failures. */
+function rmSyncResilient(path: string): void {
+  rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+}
 
 interface RunResult {
   status: number | null;
@@ -96,7 +111,7 @@ function withRepo(dir: string, fn: () => void): void {
   try {
     fn();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSyncResilient(dir);
   }
 }
 
@@ -254,7 +269,7 @@ test("a run interrupted partway restores every file it wrote to", async () => {
     assert.deepEqual(readFileSync(join(dir, "src/order.mjs")), before);
     assert.equal(runGit(dir, ["status", "--porcelain"]), "", "the tree is clean again");
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSyncResilient(dir);
   }
 });
 
@@ -694,7 +709,7 @@ test("a timed-out mutation leaves no descendant running", () => {
       const survivors = waitForNoneAlive(pids, 5_000);
       assert.deepEqual(survivors, [], "a worker process outlived the timed-out mutation");
     } finally {
-      rmSync(pidDir, { recursive: true, force: true });
+      rmSyncResilient(pidDir);
     }
   });
 });
@@ -797,8 +812,8 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
       );
     }
   } finally {
-    rmSync(pidDir, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    rmSyncResilient(pidDir);
+    rmSyncResilient(dir);
   }
 });
 
@@ -880,8 +895,8 @@ test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already r
     );
     assert.match(stderr, /interrupted by SIGINT/);
   } finally {
-    rmSync(pidDir, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    rmSyncResilient(pidDir);
+    rmSyncResilient(dir);
   }
 });
 
@@ -918,8 +933,8 @@ test("a hung baseline run is timed out, reported plainly, and leaves no descenda
     assert.ok(pids.length > 0, `expected the baseline to spawn a worker; got: ${result.stdout}\n${result.stderr}`);
     assert.deepEqual(survivors, [], "a worker process outlived the timed-out baseline run");
   } finally {
-    rmSync(pidDir, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    rmSyncResilient(pidDir);
+    rmSyncResilient(dir);
   }
 });
 
@@ -984,64 +999,80 @@ if (shouldFlood(0)) {
   });
 });
 
-test("a mutation whose run is killed by a signal, not by the timeout or the output cap, is its own verdict too (finding 2)", () => {
-  // Built the same way as the flood test above: the baseline runs the original
-  // `<`, which is false, and exits cleanly; the one mutation to `<=` makes
-  // the gate true and the command signals itself instead of exiting. A
-  // command killed by a signal arrives with a null status, and used to
-  // read exactly like a plain non-zero exit ("killed"), crediting the
-  // suite with a catch a segfault or an out-of-memory kill has nothing to
-  // do with.
-  //
-  // spawnCommand runs the command through a shell (`sh -c "node
-  // die-run.mjs"`), and a shell that notices its own foreground child die
-  // by a signal reports that as its OWN plain exit code (128 + the signal
-  // number), not by dying of the signal itself; `process.kill(process.pid,
-  // ...)` from inside the node process therefore never reaches
-  // spawnCommand's `close` handler as a signal at all. `process.kill(0,
-  // ...)` sends to pid 0, which POSIX defines as "every process in the
-  // caller's own process group" -- the shell included, since detached:
-  // true made it the leader of that group -- so the shell itself dies by
-  // the signal directly, which is what a real segfault or an external
-  // out-of-memory kill would also do to it.
-  const dir = makeRepo({
-    "src/gate.mjs": "export function shouldDie(n) {\n  return n < 0;\n}\n",
-    "die-run.mjs": `import { shouldDie } from "./src/gate.mjs";
+// Same category of gap as the "kill -9 $$" test in tests/induce-cli.test.ts
+// and tests/census-cli.test.ts, one level further down: this one does not
+// rely on a shell builtin, but on Node's child_process reporting which
+// signal ended a process. Node's own docs say that reporting is POSIX-only
+// -- "On Windows, the exit signal is not supported and will always be
+// null" -- so spawnCommand's `signal`, and the killedBySignal it derives
+// from it, can never be anything but null there, whatever actually killed
+// the tree. die-run.mjs's process.kill(0, "SIGKILL") additionally depends
+// on pid 0 addressing the caller's whole POSIX process group, which
+// Windows has no equivalent of either. This is skipped, not rewritten,
+// because there is no Windows signal to observe: assumed from Node's
+// documented behaviour, not verified on a Windows runner.
+test(
+  "a mutation whose run is killed by a signal, not by the timeout or the output cap, is its own verdict too (finding 2)",
+  { skip: process.platform === "win32" ? "Windows never reports a child's exit signal; see the comment above" : false },
+  () => {
+    // Built the same way as the flood test above: the baseline runs the original
+    // `<`, which is false, and exits cleanly; the one mutation to `<=` makes
+    // the gate true and the command signals itself instead of exiting. A
+    // command killed by a signal arrives with a null status, and used to
+    // read exactly like a plain non-zero exit ("killed"), crediting the
+    // suite with a catch a segfault or an out-of-memory kill has nothing to
+    // do with.
+    //
+    // spawnCommand runs the command through a shell (`sh -c "node
+    // die-run.mjs"`), and a shell that notices its own foreground child die
+    // by a signal reports that as its OWN plain exit code (128 + the signal
+    // number), not by dying of the signal itself; `process.kill(process.pid,
+    // ...)` from inside the node process therefore never reaches
+    // spawnCommand's `close` handler as a signal at all. `process.kill(0,
+    // ...)` sends to pid 0, which POSIX defines as "every process in the
+    // caller's own process group" -- the shell included, since detached:
+    // true made it the leader of that group -- so the shell itself dies by
+    // the signal directly, which is what a real segfault or an external
+    // out-of-memory kill would also do to it.
+    const dir = makeRepo({
+      "src/gate.mjs": "export function shouldDie(n) {\n  return n < 0;\n}\n",
+      "die-run.mjs": `import { shouldDie } from "./src/gate.mjs";
 if (shouldDie(0)) {
   process.kill(0, "SIGKILL");
 } else {
   process.exit(0);
 }
 `,
-  });
-  withRepo(dir, () => {
-    const result = runCli(dir, [
-      "--paths",
-      "src/gate.mjs",
-      "--command",
-      "node die-run.mjs",
-      "--format",
-      "json",
-    ]);
-    const report = JSON.parse(result.stdout) as {
-      results: Array<{ verdict: string; exitCode: number | null }>;
-    };
-    assert.equal(report.results.length, 1, result.stdout);
-    const [entry] = report.results;
-    assert.equal(entry.verdict, "killed-by-signal", result.stdout);
-    assert.equal(entry.exitCode, null);
-    assert.equal(result.status, 3, "nothing survived, but the one mutation was never judged");
-    const parsed = JSON.parse(result.stdout) as { summary: Record<string, number> };
-    assert.deepEqual(parsed.summary, {
-      killed: 0,
-      survived: 0,
-      timeout: 0,
-      skipped: 0,
-      outputOverflow: 0,
-      killedBySignal: 1,
     });
-  });
-});
+    withRepo(dir, () => {
+      const result = runCli(dir, [
+        "--paths",
+        "src/gate.mjs",
+        "--command",
+        "node die-run.mjs",
+        "--format",
+        "json",
+      ]);
+      const report = JSON.parse(result.stdout) as {
+        results: Array<{ verdict: string; exitCode: number | null }>;
+      };
+      assert.equal(report.results.length, 1, result.stdout);
+      const [entry] = report.results;
+      assert.equal(entry.verdict, "killed-by-signal", result.stdout);
+      assert.equal(entry.exitCode, null);
+      assert.equal(result.status, 3, "nothing survived, but the one mutation was never judged");
+      const parsed = JSON.parse(result.stdout) as { summary: Record<string, number> };
+      assert.deepEqual(parsed.summary, {
+        killed: 0,
+        survived: 0,
+        timeout: 0,
+        skipped: 0,
+        outputOverflow: 0,
+        killedBySignal: 1,
+      });
+    });
+  },
+);
 
 // --- Python end to end --------------------------------------------------
 
@@ -1410,6 +1441,20 @@ test("a SIGKILLed run using ADG_TEST_FORCE_GRAMMAR_FAILURE leaves node_modules u
   // up itself once the assertion is made -- a test-hygiene detail with
   // nothing to do with what is under test here, which is only that
   // node_modules itself is never touched.
+  //
+  // On Windows, `child` (the CLI) is not the only process with `dir` as
+  // its current working directory: spawnCommand's own child there is the
+  // shell it runs the mutation command through (`cmd.exe /c node
+  // slow.mjs ...`), and that shell inherits `dir` as its cwd too. A plain
+  // `child.kill("SIGKILL")` only ends the CLI itself; the shell is its own
+  // process, not signalled by killing its parent, and keeps running with
+  // that handle open. Killing the worker.pid the worker wrote out (below,
+  // in the finally block) cleans up the innermost process but still
+  // leaves that shell alive. `taskkill /pid <pid> /t /f` kills the CLI's
+  // whole descendant tree -- the shell included -- in one call, which is
+  // what actually clears every handle this test's own rmSync needs
+  // released. Assumed from how cmd.exe /c hosts a command's process tree;
+  // not verified on a Windows runner.
   const pidDir = mkdtempSync(join(tmpdir(), "adg-mutate-grammar-kill-pids-"));
   const dir = makeRepo({
     "package.json": `${JSON.stringify({ name: "scratch", private: true, type: "module", scripts: { test: "node -e 1" } }, null, 2)}\n`,
@@ -1432,7 +1477,15 @@ await new Promise((r) => setTimeout(r, 60_000));
       await new Promise((resolveTick) => setTimeout(resolveTick, 25));
     }
     assert.ok(existsSync(pidFile), "the mutation command must have started before this test can kill mid-run");
-    child.kill("SIGKILL");
+    if (process.platform === "win32" && child.pid !== undefined) {
+      try {
+        execFileSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      } catch {
+        // already gone
+      }
+    } else {
+      child.kill("SIGKILL");
+    }
     await new Promise((resolveExit) => child.on("exit", resolveExit));
 
     const after = readdirSync(NODE_MODULES).sort();
@@ -1449,8 +1502,8 @@ await new Promise((r) => setTimeout(r, 60_000));
         // already gone
       }
     }
-    rmSync(pidDir, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
+    rmSyncResilient(pidDir);
+    rmSyncResilient(dir);
   }
 });
 
