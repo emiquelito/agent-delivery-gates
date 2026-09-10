@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkPathAllowed, resolveWithinRoot, realPath, type PathResolver } from "../src/path-allowlist.ts";
-import { mkdtempSync, writeFileSync, symlinkSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep, dirname, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -345,6 +345,17 @@ test("the same case, both sides canonicalized by the one authority realPath is, 
   assert.equal(result.realPath, join(root, "src", "order.mjs"));
 });
 
+// Files excluded from the scan below, and why each one is safe to skip.
+// Recorded here, next to the exclusion set itself, so a reviewer can check
+// every entry has a live reason instead of trusting a bare list of names.
+const REALPATHSYNC_SCAN_EXCLUSIONS: ReadonlyMap<string, string> = new Map([
+  ["src/path-allowlist.ts", "defines realPath (fs.realpathSync.native) itself; the bare identifier is its own implementation, not a call site reverting to the unsafe resolver"],
+  [
+    "hooks/scan-prose.ts",
+    "resolves paths only for its own include-cycle detection and never compares the result against a root or another authority, so the Windows short-name mismatch this scan exists to catch cannot occur here",
+  ],
+]);
+
 test("every production containment call site injects the shared realPath, never a bare fs.realpathSync", () => {
   // The bug that produced 35 of 40 Windows failures was not in this file's
   // logic; every test above it in this file already passed on Windows. It
@@ -357,19 +368,74 @@ test("every production containment call site injects the shared realPath, never 
   // caller reverting to the plain import is a defect this can catch on any
   // platform: the fix is "one resolver, used everywhere," and that claim
   // can be checked directly with a grep, not merely trusted.
-  const skip = new Set(["path-allowlist.ts", "scan-prose.ts"]);
+  //
+  // Walks src/ and hooks/ recursively, not just their top level: a file
+  // reintroducing the bare resolver from a subdirectory is exactly as real
+  // a regression as one at the top level, and both directories being flat
+  // today is luck, not a guarantee the scan can lean on.
   const offenders: string[] = [];
   for (const dir of ["src", "hooks"]) {
     const full = join(REPO_ROOT, dir);
-    for (const entry of readdirSync(full)) {
-      if (extname(entry) !== ".ts" || skip.has(entry)) continue;
-      const text = readFileSync(join(full, entry), "utf8");
+    for (const entry of readdirSync(full, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || extname(entry.name) !== ".ts") continue;
+      const entryDir = join(entry.parentPath, entry.name);
+      const relative = [dir, ...entryDir.slice(full.length + 1).split(sep)].join("/");
+      if (REALPATHSYNC_SCAN_EXCLUSIONS.has(relative)) continue;
+      const text = readFileSync(entryDir, "utf8");
       // A bare "realpathSync" not immediately followed by ".native" and not
       // part of the identifier "realPath" itself (this module's export).
       if (/\brealpathSync\b(?!\.native)/.test(text)) {
-        offenders.push(`${dir}/${entry}`);
+        offenders.push(relative);
       }
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+test("every exclusion in the realpathSync scan is still a real .ts file under src/ or hooks/", () => {
+  // A stale exclusion (the file moved, was renamed, or was deleted) would
+  // silently stop excluding anything and just as silently never be noticed,
+  // since an exclusion that matches nothing looks identical to one that is
+  // still doing its job. This pins every entry to a file that actually
+  // exists, so a rename shows up here instead of nowhere.
+  for (const relative of REALPATHSYNC_SCAN_EXCLUSIONS.keys()) {
+    const full = join(REPO_ROOT, ...relative.split("/"));
+    assert.ok(
+      readFileSync(full, "utf8").length > 0,
+      `exclusion '${relative}' does not point at a real file any more`,
+    );
+  }
+});
+
+// The recursive walk above is only worth having if it actually catches a
+// file a top-level-only listing would miss. This proves it does, the same
+// way the reviewer who found the gap did: plant a file reintroducing the
+// bare resolver in a subdirectory, watch the scan report it, then clean up.
+test("the recursive scan catches a bare fs.realpathSync reintroduced from a subdirectory", () => {
+  const nestedDir = join(REPO_ROOT, "src", "sneaky");
+  const nestedFile = join(nestedDir, "evil-resolver.ts");
+  mkdirSync(nestedDir, { recursive: true });
+  writeFileSync(
+    nestedFile,
+    'import { realpathSync } from "node:fs";\nexport const bareResolver = realpathSync;\n',
+  );
+  try {
+    const offenders: string[] = [];
+    for (const dir of ["src", "hooks"]) {
+      const full = join(REPO_ROOT, dir);
+      for (const entry of readdirSync(full, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile() || extname(entry.name) !== ".ts") continue;
+        const entryDir = join(entry.parentPath, entry.name);
+        const relative = [dir, ...entryDir.slice(full.length + 1).split(sep)].join("/");
+        if (REALPATHSYNC_SCAN_EXCLUSIONS.has(relative)) continue;
+        const text = readFileSync(entryDir, "utf8");
+        if (/\brealpathSync\b(?!\.native)/.test(text)) {
+          offenders.push(relative);
+        }
+      }
+    }
+    assert.deepEqual(offenders, ["src/sneaky/evil-resolver.ts"]);
+  } finally {
+    rmSync(nestedDir, { recursive: true, force: true });
+  }
 });

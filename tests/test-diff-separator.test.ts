@@ -202,6 +202,41 @@ test("an ordinary added line with no skip wording does not fire skip-added", () 
   assert.deepEqual(signalIds(result.signals), []);
 });
 
+// Finding 8: "\bSkip\s*=" was written for xUnit's [Fact(Skip = "reason")],
+// but the skips bucket compiles case-insensitively (see bucketFlags in
+// src/test-diff-separator.ts), so the unanchored form also matched an
+// ordinary variable declaration -- "const skip = new Set(...)" fired a
+// high-severity skip-added on this repository's own commit. The fragment
+// now requires an unclosed "[" earlier on the line, since the real
+// attribute is always written inside a square-bracket attribute list and a
+// plain assignment never is.
+
+test("a variable named skip does not fire skip-added", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ['const skip = new Set(["a.ts", "b.ts"]);']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+test("an added [Fact(Skip = \"reason\")] still fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Fact(Skip = "not ready yet")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("an added [Fact(Skip = \"reason\")] fires skip-added across its spacing variants", () => {
+  for (const line of ['[Fact(Skip = "not ready")]', '[Fact(Skip="not ready")]', '[Fact(Skip  =  "not ready")]']) {
+    const diff = oneFileDiff("tests/WidgetTests.cs", [], [line]);
+    const result = separateTestDiff(diff);
+    assert.deepEqual(signalIds(result.signals), ["skip-added"], `expected skip-added for: ${line}`);
+  }
+});
+
+test("an added [Theory(Skip = \"reason\")] still fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Theory(Skip = "not ready")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
 // --- tolerance-widened ---------------------------------------------------------
 
 test("a changed tolerance line, one removed and one added, fires tolerance-widened", () => {

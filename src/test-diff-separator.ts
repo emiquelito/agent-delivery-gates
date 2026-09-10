@@ -170,6 +170,19 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "@ParameterizedTest\\b",
   ],
   skips: [
+    // Checked against the same failure this bucket's "Skip =" fragment had
+    // (see its comment further down): compiled case-insensitively, ".skip\b"
+    // also matches a non-disabling ".Skip(n)"/".skip(n)" call -- C# LINQ's
+    // pagination method and the JS Iterator Helpers method of the same name
+    // -- inside a test file that happens to use either for ordinary data
+    // slicing, not to disable a test. Left unanchored anyway: narrowing it
+    // (say, to a bare call with no arguments, or a call whose argument is a
+    // string/function) risks missing a real ".skip(someCondition)" or
+    // ".skip(() => ...)" narrowing, and unlike the "Skip =" case there is no
+    // bracket or attribute context to anchor on. Recorded here as an
+    // accepted, narrower false-positive risk instead of a fix, since every
+    // attempt at tightening it traded a real miss for a rarer false
+    // positive.
     "\\.skip\\b",
     "\\.only\\b",
     "\\bxit\\(",
@@ -194,8 +207,17 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\bpending\\(",
     "\\bpending\\s+[\"']",
     "\\bxcontext\\b",
-    // xUnit's [Fact(Skip = "reason")].
-    "\\bSkip\\s*=",
+    // xUnit's [Fact(Skip = "reason")] / [Theory(Skip = "reason")]. Anchored
+    // to an unclosed "[" earlier on the line, never a bare "skip =": this
+    // whole bucket compiles case-insensitively (see compileFragments below),
+    // so an unanchored "\bSkip\s*=" also matched an ordinary variable
+    // declaration like "const skip = new Set(...)" and fired a high-severity
+    // false positive on this repository's own commit. The attribute form is
+    // always written inside a square-bracket attribute list; requiring one
+    // to still be open when "Skip =" appears keeps every spacing variant of
+    // the real attribute (Skip=, Skip =, Skip  =) while a plain assignment,
+    // which never sits inside "[...]", cannot match.
+    "\\[[^\\]]*\\bSkip\\s*=",
   ],
   tolerance: [
     "\\btolerance\\b",
