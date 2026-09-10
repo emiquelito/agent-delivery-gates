@@ -19,7 +19,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -119,8 +119,9 @@ test(
     // because Windows has no SIGHUP to test.
     skip: process.platform === "win32" ? "SIGHUP delivery is unreliable on Windows; see Node's signal docs" : false,
   },
-  async () => {
+  async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "adg-spawn-command-sighup-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
     const pidFile = join(dir, "worker.pid");
     writeFileSync(
       join(dir, "worker.mjs"),
