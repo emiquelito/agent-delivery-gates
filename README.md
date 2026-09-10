@@ -114,10 +114,12 @@ On Windows, a few tests are skipped for a real limitation: Windows has no
 way to deliver an interrupt to another process the way Unix does. Asking
 Node to send one terminates the target process instead of letting its own
 interrupt handler run, so those particular tests cannot pass as written on
-this platform. A real Ctrl-C typed in a terminal takes a different route
-and does reach the handler, so ordinary use is unaffected; what is skipped
-is only the path that simulates sending the signal from outside, which is
-not tested on Windows.
+this platform. A real Ctrl-C typed in a terminal takes a different,
+documented route to the handler; ordinary use is expected to be
+unaffected, reasoned from how the platform's console control events work
+and not confirmed by a test here. What is skipped is only the path that
+simulates sending the signal from outside, which is not tested on
+Windows.
 
 Windows on Node 23 and 24 hits an unfixed Node bug that aborts these tools
 on exit (nodejs/node#56645). The owner reproduces this reliably on real
