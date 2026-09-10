@@ -133,15 +133,21 @@ export interface SpawnCommandResult {
 function killTree(pid: number): void {
   if (process.platform === "win32") {
     try {
-      // Bounded so a hung taskkill (a busy runner, antivirus interception,
-      // an unkillable target) degrades to best-effort instead of blocking
-      // this signal handler -- and everything Node cannot run until it
-      // returns, including the caller's own SIGINT/SIGTERM/SIGHUP handler
-      // -- indefinitely. 5s comfortably covers a normally-slow taskkill on
-      // a loaded CI runner while still keeping Ctrl-C responsive; a timeout
-      // throws ETIMEDOUT, which the catch below treats the same as any
-      // other taskkill failure.
-      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", timeout: 5000 });
+      // Bounded because a taskkill that never returns would block this
+      // signal handler, and everything else Node cannot run until it
+      // returns, for as long as taskkill hangs -- and what runs immediately
+      // after this handler is the caller's own cleanup (mutate writing
+      // mutated source files back to disk; census removing its worktree),
+      // which is the part that actually matters. Every millisecond spent
+      // here is taken directly out of that cleanup's budget, and a Ctrl-C
+      // that looks frozen invites a force-kill that guarantees the cleanup
+      // never runs at all -- strictly worse than any orphan this bound
+      // might leave behind. A taskkill that hits the bound mid-walk has
+      // already killed whatever part of the tree it reached and abandons
+      // the rest, so a timeout here means bounded, partial orphan cleanup,
+      // never less than doing nothing; a timeout throws ETIMEDOUT, which
+      // the catch below treats the same as any other taskkill failure.
+      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", timeout: 1500 });
     } catch {
       // best effort; nothing to do if the process already exited or the
       // call above timed out
@@ -195,6 +201,24 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
       if (timer !== undefined) clearTimeout(timer);
     };
 
+    // The signal handler, the output-overflow handler, and the timeout
+    // below all reach for the same child and can each fire independently
+    // within one run (an impatient second Ctrl-C, an overflow followed by
+    // a signal, and so on). Without a guard, a kill that stalls -- the
+    // exact case the timeout in killTree's Windows branch exists for --
+    // would let a later trigger run the whole blocking call again on top
+    // of the first. killAttempted caps it at one call per child, and
+    // folds in clearTimer() so that whichever trigger fires first also
+    // cancels the timeout timer, instead of leaving it to fire later and
+    // attempt a second kill of its own.
+    let killAttempted = false;
+    const attemptKill = (): void => {
+      if (killAttempted) return;
+      killAttempted = true;
+      clearTimer();
+      if (child.pid !== undefined) killTree(child.pid);
+    };
+
     // A real Ctrl-C (or an external SIGTERM) reaches this tool's own
     // process, not the detached group the command runs in. These two
     // listeners are what makes that signal keep killing the group the way
@@ -202,7 +226,7 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
     // them ahead of any handler the caller registered earlier at startup,
     // so the group is dead before that handler's own process.exit runs.
     const onSignal = (): void => {
-      if (child.pid !== undefined) killTree(child.pid);
+      attemptKill();
     };
     process.prependListener("SIGINT", onSignal);
     process.prependListener("SIGTERM", onSignal);
@@ -234,7 +258,7 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
     const killForOverflow = (): void => {
       if (outputOverflowed) return;
       outputOverflowed = true;
-      if (child.pid !== undefined) killTree(child.pid);
+      attemptKill();
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -251,7 +275,7 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true;
-        if (child.pid !== undefined) killTree(child.pid);
+        attemptKill();
       }, timeoutMs);
     }
 

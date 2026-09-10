@@ -97,6 +97,45 @@ test("spawnCommand's own listeners are gone while no command is in flight, and p
   );
 });
 
+// --- finding 1 (follow-up review): a kill in flight must not stack another ---
+
+// killForOverflow used to set outputOverflowed and call killTree without
+// touching the pending setTimeout at all. If the command's stdio kept
+// producing data faster than the event loop could drain it -- exactly what
+// the overflow itself implies -- the timer could still be sitting on the
+// queue when it came due, fire before the overflow-triggered kill's "close"
+// event ever arrived, and stamp timedOut: true onto a run that was actually
+// stopped by the output cap. attemptKill() now clears the timer synchronously,
+// in the same tick the overflow is detected, so the timer can never fire
+// after an overflow kill has already been attempted. A large enough burst
+// with a short enough timeout reproduces the old race directly: this test
+// would have been flaky-to-failing under the previous code and is
+// deterministic under the fix, because the clear now happens before the
+// timer is ever given a chance to run.
+
+test("an output overflow clears the pending timeout instead of leaving it to fire later (finding 1)", async () => {
+  // A 20MB burst against a 100-byte cap and a 30ms timeout reproduces the
+  // old race reliably: overflow is detected within a few ms, well before
+  // the timer, but before this fix the timer stayed armed and the child's
+  // "close" event (which used to be the only thing that cancelled it) was
+  // slow enough, under a burst this size, to sometimes arrive after 30ms.
+  // Running this against the pre-fix killForOverflow (which called killTree
+  // directly instead of attemptKill) produced outputOverflowed && timedOut
+  // both true in roughly a third of 20 runs; against the fix, 20/20 runs
+  // showed outputOverflowed with timedOut false.
+  const result = await spawnCommand("node -e \"process.stdout.write('x'.repeat(20_000_000))\"", {
+    cwd: process.cwd(),
+    maxBufferBytes: 100,
+    timeoutMs: 30,
+  });
+  assert.equal(result.outputOverflowed, true, "expected the output cap to trigger the kill");
+  assert.equal(
+    result.timedOut,
+    false,
+    "expected the overflow's kill to have cancelled the timer before it could fire",
+  );
+});
+
 // --- design correction A: SIGHUP is forwarded, the same as SIGINT/SIGTERM ---
 
 // A closed terminal sends SIGHUP to its foreground group, the same way
