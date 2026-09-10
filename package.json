@@ -47,7 +47,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "scan": "node hooks/scan-prose.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/bin/adg.js",
+    "build": "node scripts/build.ts",
     "prepare": "npm run build",
     "prepack": "npm run build",
     "verify": "tsc --noEmit && node --test tests/*.test.ts && node hooks/scan-prose.ts --require-rules && node scripts/tally-report.ts --check && node scripts/refresh-readme-tally.ts --check"
