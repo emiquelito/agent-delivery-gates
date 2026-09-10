@@ -33,6 +33,7 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
 /** A character that may appear inside an identifier. */
@@ -536,10 +537,67 @@ const grammarAbsentExtensions = new Set<string>();
 const grammarGenuineFailures = new Set<string>();
 
 /**
- * True when `packageName`'s own package.json is actually on disk, in one of
- * the node_modules directories Node would search from this file's
- * location. Deliberately NOT `require.resolve(\`${packageName}/package.json\`)`
- * -- the approach resolveWasmPath uses for a grammar package in
+ * Minimal form of the `pnpapi` virtual module Yarn's Plug'n'Play runtime
+ * injects into `require` for every file it controls. `resolveToUnqualified`
+ * locates a package's root directory in the dependency graph -- a zip
+ * archive entry or an unplugged directory, neither of which is a real
+ * node_modules tree -- without resolving anything inside it: no `main`
+ * field, no `exports` map, no file on disk is consulted. It throws (code
+ * `MODULE_NOT_FOUND`) when the package is not a declared dependency at all,
+ * and otherwise returns the path, even when every file the package ships
+ * has been deleted. That is exactly "is this package present," asked
+ * without depending on any one file inside it existing.
+ */
+interface PnpApi {
+  resolveToUnqualified(
+    specifier: string,
+    issuer: string | null,
+    opts?: { considerBuiltins?: boolean },
+  ): string | null;
+}
+
+/**
+ * The active Plug'n'Play API, or null when this process is not running
+ * under Yarn PnP. `process.versions.pnp` is set (to a format-version
+ * string, e.g. `"3"`) only when Yarn's generated `.pnp.cjs` loader has
+ * patched this process's module system; checking it first avoids paying
+ * for a `require("pnpapi")` attempt -- and risking whatever a stray real
+ * package named "pnpapi" would do -- in the overwhelmingly common
+ * non-PnP case. `require("pnpapi")` is Yarn's own documented interface
+ * for reaching this API from any file it controls, not a filesystem
+ * module: nothing on disk is named "pnpapi".
+ */
+function getPnpApi(): PnpApi | null {
+  if (process.versions.pnp === undefined) return null;
+  try {
+    return createRequire(import.meta.url)("pnpapi") as PnpApi;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `packageName` is actually present -- installed, at some
+ * version, regardless of what state its own files are in -- as far as
+ * this process's module resolution is concerned.
+ *
+ * Under Yarn Plug'n'Play (`getPnpApi()` returns non-null) there is no
+ * node_modules directory tree to walk at all: real packages live inside
+ * zip archives or an unplugged directory, addressed through a generated
+ * map, not a filesystem search. `pnpApi.resolveToUnqualified` is asked
+ * directly instead (see `PnpApi` above): it throws only when the package
+ * is not a declared dependency, never because a file inside it is
+ * missing. A `Set` cannot be told to a stale answer here -- membership in
+ * the dependency graph does not change mid-process -- so a manifest
+ * check would only reconfirm what this already answers precisely.
+ *
+ * Otherwise (a real node_modules tree, which is what every other package
+ * manager this project supports -- npm hoisted, npm and pnpm workspaces,
+ * a linked install -- produces): `packageName`'s own package.json is
+ * checked directly on disk, in one of the node_modules directories Node
+ * would search from this file's location. Deliberately NOT
+ * `require.resolve(\`${packageName}/package.json\`)` -- the approach
+ * resolveWasmPath uses for a grammar package in
  * src/tree-sitter-python-service.ts and src/tree-sitter-language-service.ts
  * -- because that subpath resolution honours the target package's own
  * `exports` map, and web-tree-sitter's map (checked directly against the
@@ -562,6 +620,14 @@ const grammarGenuineFailures = new Set<string>();
  * for `<candidate>/<packageName>/package.json` directly on disk.
  */
 function isPackageManifestResolvable(packageName: string): boolean {
+  const pnpApi = getPnpApi();
+  if (pnpApi !== null) {
+    try {
+      return pnpApi.resolveToUnqualified(packageName, fileURLToPath(import.meta.url), { considerBuiltins: false }) !== null;
+    } catch {
+      return false;
+    }
+  }
   const candidates = createRequire(import.meta.url).resolve.paths(packageName);
   if (!candidates) return false;
   return candidates.some((dir) => existsSync(join(dir, packageName, "package.json")));
@@ -607,10 +673,35 @@ function isPackageManifestResolvable(packageName: string): boolean {
  * just no "manifest present, main file missing" case a grammar package can
  * reach
  * that this function needs to separate out, the way web-tree-sitter's can.
+ *
+ * `ERR_PACKAGE_PATH_NOT_EXPORTED` is included in the code guard below for
+ * the same reason the previous two are: it is what `import()` of a bare
+ * specifier throws when the target package ships an `exports` map that
+ * does not list a root (".") entry -- a form none of the eight packages
+ * this project depends on uses today (checked directly against each
+ * installed copy), but nothing stops a future release of any of them
+ * from adding one. Without this code included, that release would throw
+ * a code this guard does not recognise, `return false` before ever
+ * reaching `isPackageManifestResolvable`, and read as a real failure
+ * for every adopter of that language -- installed or not, since the
+ * check never gets far enough to tell the difference -- with no
+ * reinstall able to fix a exports map shipped by the package itself:
+ * exactly the silent, permanent hard-block this function exists to
+ * avoid causing. Including the code costs nothing when it never fires:
+ * `isPackageManifestResolvable` still resolves the package (its
+ * manifest, or under Plug'n'Play its presence in the dependency graph,
+ * neither of which touches the `exports` map) and correctly reports it
+ * present, so this stays a real failure, not a manufactured absence.
  */
 function isModuleAbsenceError(err: unknown, packageNames: readonly string[]): boolean {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
-  if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") return false;
+  if (
+    code !== "MODULE_NOT_FOUND" &&
+    code !== "ERR_MODULE_NOT_FOUND" &&
+    code !== "ERR_PACKAGE_PATH_NOT_EXPORTED"
+  ) {
+    return false;
+  }
   return packageNames.some((packageName) => !isPackageManifestResolvable(packageName));
 }
 
