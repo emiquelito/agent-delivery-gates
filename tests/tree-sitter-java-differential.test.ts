@@ -4,8 +4,12 @@
 // tests/lib/tree-sitter-differential-harness.ts for what a "disagree" and
 // an "agree" case each check and why.
 //
-// Java has no string interpolation, so the one construct the regex
-// scanner cannot see at all is a `"""` text block.
+// Java's grammar does define a string_interpolation node, for its
+// `STR."value is \{expr}"` string templates, but this project deliberately
+// leaves it out of the java GrammarSpec's contentTypes (see
+// src/tree-sitter-grammars.ts's own note on why) so it is reopened as code
+// like any other unrecognised named child. The one construct here that
+// the regex scanner cannot see at all is a `"""` text block.
 
 import { regexLanguageService } from "../src/code-mask.ts";
 import { loadTreeSitterLanguageService } from "../src/tree-sitter-language-service.ts";

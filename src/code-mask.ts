@@ -481,13 +481,19 @@ async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
 // (a caller reads a mask before its grammar finished loading, and gets
 // the regex fallback silently) is the same bug for a `.rs` file as it was
 // for `.py`, so one flag answers "did this batch hit that bug for any
-// language it touched", not one flag per language. `SeparateResult`'s own
-// field keeps its historic name, `unwarmedPythonUsed`: existing callers
-// (src/agent-adapter.ts) and existing tests already read that name for
-// the Python case this flag first covered, and this phase does not
-// change what either one needs to say about a `.py` file, only what else
-// this same flag now also catches.
-let unwarmedLanguageAccess = false;
+// language it touched", not one flag per language.
+//
+// A reviewer found that this stayed a plain boolean, and `SeparateResult`
+// kept the boolean's historic name, `unwarmedPythonUsed`, past the point
+// where the flag actually covers seven languages: src/agent-adapter.ts's
+// failure message named Python, blamed docstrings and f-strings, for a
+// diff that carried none, because the flag it read could say only "some
+// registered extension was unwarmed", never which one. Fixed by
+// recording the actual extensions hit, not just that one was: nothing
+// outside this repository reads `unwarmedPythonUsed` or
+// `hadUnwarmedPythonAccess` (this is an internal gate, not a published
+// library), so there is no external caller to keep either name for.
+const unwarmedExtensions = new Set<string>();
 
 // Re-entrancy guard for the reset/read pair above. `separateTestDiff`
 // documents itself as synchronous end to end specifically so that a
@@ -502,23 +508,24 @@ let unwarmedLanguageAccess = false;
 // first's.
 let unwarmedAccessBatchOpen = false;
 
-/** True once this process has answered a mask request, for some file
- * whose extension has a tree-sitter service, with the regex scanner
- * because `warmLanguageServices` had not yet resolved that service for
- * it -- not because the load was tried and failed. A caller that always
- * warms before asking (every production entry point this project ships
- * now does) never sets this; a caller that forgets to does, silently or
- * not. Reading this closes the batch opened by
- * `resetUnwarmedLanguageAccess`; see that function and
- * `unwarmedAccessBatchOpen` above. */
-export function hadUnwarmedPythonAccess(): boolean {
+/** The extensions (".py", ".rs", and so on) this process has answered a
+ * mask request for, for a file whose extension has a tree-sitter service,
+ * with the regex scanner because `warmLanguageServices` had not yet
+ * resolved that service for it -- not because the load was tried and
+ * failed. Empty when a caller always warms before asking (every
+ * production entry point this project ships now does); one entry per
+ * extension a caller forgot to warm, silently or not. Reading this closes
+ * the batch opened by `resetUnwarmedLanguageAccess`; see that function and
+ * `unwarmedAccessBatchOpen` above. Returns a fresh array, safe for a
+ * caller to keep past the next reset. */
+export function hadUnwarmedLanguageAccess(): readonly string[] {
   unwarmedAccessBatchOpen = false;
-  return unwarmedLanguageAccess;
+  return [...unwarmedExtensions];
 }
 
-/** Clears the flag `hadUnwarmedPythonAccess` reports. Meant to be called
- * immediately before one synchronous batch of `languageServiceFor` calls,
- * so the flag it reports after that batch reflects only that batch, not
+/** Clears the extensions `hadUnwarmedLanguageAccess` reports. Meant to be
+ * called immediately before one synchronous batch of `languageServiceFor`
+ * calls, so what that batch reports after reflects only that batch, not
  * whatever ran earlier in this same process. Safe to call this way
  * because every reader of this flag is itself synchronous, start to
  * finish: nothing else can run between the reset and the read to blur one
@@ -528,13 +535,13 @@ export function hadUnwarmedPythonAccess(): boolean {
 export function resetUnwarmedLanguageAccess(): void {
   if (unwarmedAccessBatchOpen) {
     throw new Error(
-      "resetUnwarmedLanguageAccess called again before the previous batch's hadUnwarmedPythonAccess read. " +
+      "resetUnwarmedLanguageAccess called again before the previous batch's hadUnwarmedLanguageAccess read. " +
         "separateTestDiff must stay synchronous end to end for this flag to mean anything; an `await` was " +
         "added somewhere in its call graph, letting two calls interleave.",
     );
   }
   unwarmedAccessBatchOpen = true;
-  unwarmedLanguageAccess = false;
+  unwarmedExtensions.clear();
 }
 
 /**
@@ -588,6 +595,6 @@ export function languageServiceFor(path: string): LanguageService {
   if (!(ext in TREE_SITTER_LOADERS)) return regexLanguageService;
   const cached = resolvedServices.get(ext);
   if (cached !== undefined) return cached;
-  unwarmedLanguageAccess = true;
+  unwarmedExtensions.add(ext);
   return regexLanguageService;
 }

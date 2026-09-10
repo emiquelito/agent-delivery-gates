@@ -23,6 +23,8 @@ const heredoc = "x = <<~HEREDOC\n  hello\nHEREDOC\nassert_equal(1, 2)\n";
 const blockComment = "=begin\nblock comment\n=end\nassert_equal(1, 2)\n";
 const percentW = "w = %w[a b assert]\n";
 const percentQ = "q = %q(assert this)\n";
+const percentBigW = "x = %W[a#{DANGEROUS}b c]\n";
+const percentBigI = "x = %I[a#{DANGEROUS}b c]\n";
 const interpolated = 'greeting = "hi #{name}!"\n';
 const interpolatedWithComment = 'greeting = "hi #{name}!"  # trailing\n';
 
@@ -73,6 +75,43 @@ const cases: DifferentialCase[] = [
     percentQ,
     percentQ,
     blank(percentQ, "%q(assert this)"),
+  ),
+  disagree(
+    "a %W[] interpolating word array: regex reads it all as code, tree-sitter blanks the words and keeps the interpolation",
+    // Reviewer finding: bare_string, %w[]/%W[]'s own per-word wrapper, was
+    // once listed in contentTypes, which blanked it wholesale without
+    // ever recursing into it -- so an interpolation written inside a %W
+    // word was masked away as if it were plain text, along with the
+    // surrounding word. `%W[a#{DANGEROUS}b c]` masked to blank spaces
+    // from `%W[` through the closing `]`, DANGEROUS included, live code
+    // treated as though it were the array's own literal text.
+    // Regex reasoning: %W[] is not a form classify knows at all (no
+    // quote, backtick, or C-family comment syntax matches it), so every
+    // character is read as ordinary code, unchanged.
+    // tree-sitter reasoning, after the fix: bare_string is now in
+    // literalTypes, not contentTypes, so the walk recurses into each
+    // word instead of blanking it whole. "a" and "b" (plain
+    // string_content) stay blanked, the space separator and the
+    // surrounding %W[ ] punctuation stay blanked (anonymous, part of the
+    // wholesale string_array/bare_string span), and #{DANGEROUS} (a named
+    // interpolation child, still not in contentTypes) is reopened as
+    // code, exactly as it already was for an ordinary interpolated
+    // string.
+    percentBigW,
+    percentBigW,
+    blank(blank(percentBigW, "%W[a"), "b c]"),
+  ),
+  disagree(
+    "a %I[] interpolating symbol array: regex reads it all as code, tree-sitter blanks the words and keeps the interpolation",
+    // Same bug and same fix as %W[] above, for the symbol-array form: the
+    // config had no symbol_array/bare_symbol entry at all before this
+    // fix, so %i[]/%I[] were left as pure code, interpolation and all --
+    // not the "masked as literal" failure mode %W[] had, but the same
+    // class of omission this project's node-types.json conformance test
+    // now exists to catch (see tests/tree-sitter-node-types-conformance.test.ts).
+    percentBigI,
+    percentBigI,
+    blank(blank(percentBigI, "%I[a"), "b c]"),
   ),
   disagree(
     "string interpolation: regex blanks the whole literal including #{name}, tree-sitter keeps only the interpolated expression",

@@ -14,7 +14,7 @@
 import {
   languageServiceFor,
   warmLanguageServices,
-  hadUnwarmedPythonAccess,
+  hadUnwarmedLanguageAccess,
   resetUnwarmedLanguageAccess,
 } from "./code-mask.ts";
 
@@ -310,18 +310,26 @@ export interface SeparateResult {
   exemptFiles: string[];
   exemptCount: number;
   /**
-   * True when this run answered at least one `.py` file's mask with the
-   * regex scanner because nothing had warmed the Python service first, not
-   * because the load was tried and failed. A caller that warms before
-   * calling (see `separateTestDiffWarmed` below, and every production
-   * entry point in this project) never sees this true; a caller that
-   * skips the warm and happens to touch a `.py` file does, whether or not
-   * anyone reading its code ever noticed the skip. This is reported
-   * unconditionally, found or not, the same reasoning `exemptCount` above
-   * already follows: a degraded run that reads like a clean one is the
-   * failure this project exists to catch, including in itself.
+   * The extensions (".py", ".rs", and so on) this run answered at least
+   * one file's mask for with the regex scanner because nothing had warmed
+   * that language's service first, not because the load was tried and
+   * failed. Empty when a caller warms before calling (see
+   * `separateTestDiffWarmed` below, and every production entry point in
+   * this project); one entry per extension a caller skipped the warm for
+   * and happened to touch, whether or not anyone reading its code ever
+   * noticed the skip. This is reported unconditionally, found or not, the
+   * same reasoning `exemptCount` above already follows: a degraded run
+   * that reads like a clean one is the failure this project exists to
+   * catch, including in itself.
+   *
+   * Named for what actually triggered it, not for the language that
+   * happened to trigger it first: an earlier version of this field was a
+   * plain boolean named `unwarmedPythonUsed`, left over from when Python
+   * was the only tree-sitter-backed language, and a caller reading it true
+   * had no way to tell a Rust file from a Python one. Renamed because
+   * nothing outside this repository reads this field's name.
    */
-  unwarmedPythonUsed: boolean;
+  unwarmedExtensions: readonly string[];
 }
 
 /** Renders one signal as the CLI's text-format line: `id severity file: message`. */
@@ -1181,7 +1189,32 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
   // in anything it calls), so nothing else in this process can run between
   // the reset below and the read at the bottom to blur one call's answer
   // into another's, however many other callers share this same process.
+  //
+  // The body between the reset and the read is wrapped in try/catch so the
+  // read always happens, on the thrown path as well as the normal one. An
+  // earlier version of this function had no such wrapper: an exception
+  // thrown by, say, options.readFileText mid-batch left the reset's batch
+  // open forever, since nothing after it ever ran to close it. That turned
+  // one bad diff into a permanent failure for every later call in the same
+  // process (src/mcp-server.ts is long-lived and calls this many times per
+  // session) -- the guard existed to make a silent blur loud, not to make a
+  // recoverable error permanent. Catching here and rethrowing keeps that
+  // error visible to this call's own caller while still closing the batch,
+  // so the next call starts clean. An actual re-entrancy bug -- two calls
+  // to this function really overlapping, in violation of the synchronous
+  // invariant above -- is unaffected: the second call's reset still runs
+  // before this first call's catch could possibly close its batch, so it
+  // still throws loudly, exactly as before.
   resetUnwarmedLanguageAccess();
+  try {
+    return separateTestDiffBody(diffText, options);
+  } catch (err) {
+    hadUnwarmedLanguageAccess();
+    throw err;
+  }
+}
+
+function separateTestDiffBody(diffText: string, options: SeparateOptions): SeparateResult {
   const ruleSet = options.rules ?? DEFAULT_RULES;
   const rules = ruleSet === DEFAULT_RULES ? DEFAULT_COMPILED : compileRuleSet(ruleSet);
   const files = parseDiff(diffText);
@@ -1282,7 +1315,7 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
     signalCount: signals.length,
     exemptFiles,
     exemptCount: exemptFiles.length,
-    unwarmedPythonUsed: hadUnwarmedPythonAccess(),
+    unwarmedExtensions: hadUnwarmedLanguageAccess(),
   };
 }
 

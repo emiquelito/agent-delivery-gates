@@ -1675,12 +1675,51 @@ test("Finding 6: unwarmed, a trailing '#' comment's word counts as a real assert
   const diff = oneFileDiff("tests/test_thing.py", ["    result = compute()  # assert result == 42"], []);
   const result = separateTestDiff(diff);
   assert.deepEqual(signalIds(result.signals), ["assertion-removed"]);
-  assert.equal(result.unwarmedPythonUsed, true);
+  assert.deepEqual(result.unwarmedExtensions, [".py"]);
 });
 
 test("Finding 6: warmed first, the same diff reports nothing and the run is not marked degraded", async () => {
   const diff = oneFileDiff("tests/test_thing.py", ["    result = compute()  # assert result == 42"], []);
   const result = await separateTestDiffWarmed(diff);
   assert.deepEqual(signalIds(result.signals), []);
-  assert.equal(result.unwarmedPythonUsed, false);
+  assert.deepEqual(result.unwarmedExtensions, []);
+});
+
+// --- reviewer finding: a throw between reset and read must not poison later calls ---
+//
+// separateTestDiff resets the module-level unwarmed-access flag before its
+// own work and reads it back after, relying on itself staying synchronous
+// so nothing else can run in between. An earlier version had no try/catch
+// around that body: an exception thrown mid-batch (readFileText throwing,
+// most plausibly) left the reset's batch open forever, since the read that
+// would have closed it never ran. Every later call, however unrelated,
+// then failed its own reset with "called again before the previous
+// batch's read", permanently, for the rest of the process -- worse than
+// the silent blur the guard exists to catch, since src/mcp-server.ts calls
+// this many times in one long-lived process.
+
+test("a throw between reset and read closes the batch instead of poisoning every later call", () => {
+  const diff = oneFileDiff("tests/test_thing.py", ["    assert result == 42"], []);
+
+  const ok = separateTestDiff(diff);
+  assert.equal(Array.isArray(ok.unwarmedExtensions), true, "an ordinary call still works");
+
+  assert.throws(
+    () =>
+      separateTestDiff(diff, {
+        readFileText: () => {
+          throw new Error("simulated failure mid-batch");
+        },
+      }),
+    /simulated failure mid-batch/,
+    "the original error still reaches this call's own caller",
+  );
+
+  // The real assertion: two calls after the throw, with ordinary
+  // arguments, must both succeed instead of failing on the re-entrancy
+  // guard for a batch nothing ever closed.
+  const after1 = separateTestDiff(diff);
+  assert.equal(Array.isArray(after1.unwarmedExtensions), true, "not poisoned by the earlier throw");
+  const after2 = separateTestDiff(diff);
+  assert.equal(Array.isArray(after2.unwarmedExtensions), true, "still not poisoned on a second call after that");
 });

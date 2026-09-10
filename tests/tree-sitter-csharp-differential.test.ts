@@ -22,6 +22,7 @@ function agree(name: string, text: string): DifferentialCase {
 const verbatim = 'string a = @"verbatim ""assert(1)"" end";\n';
 const interpolated = 'string b = $"interp {x} assert";\n';
 const rawTriple = 'string c = """raw {escaped} assert""";\n';
+const utf8Suffix = 'var x = "hello"u8; assert(1);\n';
 
 const cases: DifferentialCase[] = [
   disagree(
@@ -87,6 +88,22 @@ const cases: DifferentialCase[] = [
     rawTriple,
     blank(rawTriple, "raw {escaped} assert"),
     blank(rawTriple, '"""raw {escaped} assert"""'),
+  ),
+  disagree(
+    "a UTF-8 byte string literal's `u8` suffix: regex leaves it as code after the string, tree-sitter blanks it with the string",
+    // Regex reasoning: `"hello"` is an ordinary `"`-quoted string to
+    // classify, blanked between its (visible) quotes; the `u8` right
+    // after it is just more code, no different than any other
+    // identifier-like text following a string literal.
+    // tree-sitter reasoning: `string_literal_encoding` is `u8`'s own
+    // named node type, a sibling of string_literal_content inside the
+    // same string_literal -- not an interpolation, so listing it in
+    // contentTypes (see src/tree-sitter-grammars.ts's csharp entry) keeps
+    // it blanked along with the rest of the literal instead of reopened
+    // as code.
+    utf8Suffix,
+    blank(utf8Suffix, "hello"),
+    blank(utf8Suffix, '"hello"u8'),
   ),
   agree(
     "an ordinary double-quoted string with an escape sequence: both scanners agree on which characters are code",

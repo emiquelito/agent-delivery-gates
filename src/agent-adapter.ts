@@ -235,6 +235,27 @@ function runsGitCommit(command: string): boolean {
   return /(^|[;&|]|\s)git\s+commit(\s|$)/.test(command);
 }
 
+/** A human-readable language name for each extension `SeparateResult.
+ * unwarmedExtensions` can name, for the fail message below. Kept as a
+ * plain map, not sourced from src/tree-sitter-grammars.ts's GRAMMAR_SPECS,
+ * because that file deliberately imports nothing and knows nothing about
+ * display names, only package names and node types; and because ".py"
+ * itself is not in GRAMMAR_SPECS at all (Python's service is loaded from
+ * its own bespoke module, not the generic tree-sitter one). An extension
+ * missing here (there should never be one -- GRAMMAR_SPECS plus ".py" is
+ * every extension languageServiceFor can mark unwarmed) falls back to
+ * printing the extension itself, which is still specific, just less
+ * friendly, and definitely still not "Python". */
+const UNWARMED_LANGUAGE_NAMES: Readonly<Record<string, string>> = {
+  ".py": "Python",
+  ".rs": "Rust",
+  ".rb": "Ruby",
+  ".php": "PHP",
+  ".go": "Go",
+  ".java": "Java",
+  ".cs": "C#",
+};
+
 export async function runTestDiffGate(payload: CanonicalPayload): Promise<AdapterDecision> {
   const command = payload.command ?? "";
   if (!runsGitCommit(command)) {
@@ -291,17 +312,24 @@ export async function runTestDiffGate(payload: CanonicalPayload): Promise<Adapte
   // warm-then-call pair, so a fifth path (or a sixth, or this one again
   // after a future refactor) cannot silently repeat the miss by forgetting
   // a step: there is only one step. The check right after is the backstop
-  // for when it happens anyway: result.unwarmedPythonUsed is set by
+  // for when it happens anyway: result.unwarmedExtensions is set by
   // src/code-mask.ts's languageServiceFor itself, from inside the one
   // function every caller of this scanner already goes through, so it
   // catches a future bypass of separateTestDiffWarmed too, not only this
   // one.
   const result = await separateTestDiffWarmed(diffText, { rules });
-  if (result.unwarmedPythonUsed) {
+  if (result.unwarmedExtensions.length > 0) {
+    // A reviewer caught this message naming Python unconditionally, for
+    // any of the seven languages the flag now covers: a diff touching only
+    // src/main.rs set unwarmedExtensions to [".rs"] and still got told
+    // about a missed docstring or f-string, neither of which Rust has.
+    // Named here from the extensions that actually triggered it instead.
+    const languages = result.unwarmedExtensions.map((ext) => UNWARMED_LANGUAGE_NAMES[ext] ?? ext).join(", ");
     return fail(
-      "test-diff: a Python file in this diff was masked without the Python language service warmed first; " +
-        "the regex fallback may have missed a docstring, an f-string interpolation, or a trailing comment. " +
-        "This is a bug in the gate itself, not in the commit; treat this run as unmeasured, not as clean.",
+      `test-diff: a ${languages} file in this diff was masked without its language service warmed first; ` +
+        "the regex fallback may have missed a string, a comment, or an interpolation this project's tree-sitter " +
+        "service for that language would have caught. This is a bug in the gate itself, not in the commit; " +
+        "treat this run as unmeasured, not as clean.",
     );
   }
   if (result.signals.length === 0) return allow();

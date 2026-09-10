@@ -10,7 +10,7 @@ import {
   codeMask,
   maskNonCode,
   languageServiceFor,
-  hadUnwarmedPythonAccess,
+  hadUnwarmedLanguageAccess,
   resetUnwarmedLanguageAccess,
 } from "../src/code-mask.ts";
 
@@ -151,22 +151,28 @@ test("languageServiceFor answers an unregistered extension with the regex scanne
   resetUnwarmedLanguageAccess();
   const service = languageServiceFor("src/thing.js");
   assert.equal(service.maskNonCode("a + 'b'"), maskNonCode("a + 'b'"), "still the regex scanner, unchanged");
-  assert.equal(hadUnwarmedPythonAccess(), false, "a .js path is not in the tree-sitter registry at all");
+  assert.deepEqual(hadUnwarmedLanguageAccess(), [], "a .js path is not in the tree-sitter registry at all");
 });
 
-test("languageServiceFor answers a registered extension with the regex fallback when unwarmed, and records it", () => {
+test("languageServiceFor answers a registered extension with the regex fallback when unwarmed, and records which extension", () => {
   // Every one of the six languages this phase adds -- .rs, .rb, .php, .go,
   // .java, .cs -- shares this same path with .py before it: unwarmed, the
   // registry has never resolved a service for that extension, so the call
   // falls back to the regex scanner exactly as it did before that
   // language's service existed, and the fact that it did so unwarmed is
-  // recorded instead of lost silently.
+  // recorded instead of lost silently -- by extension, not just as a
+  // single flag, so a caller can say which language actually triggered it.
   resetUnwarmedLanguageAccess();
-  for (const path of ["src/thing.rs", "src/thing.rb", "src/thing.php", "src/thing.go", "src/thing.java", "src/thing.cs"]) {
+  const paths = ["src/thing.rs", "src/thing.rb", "src/thing.php", "src/thing.go", "src/thing.java", "src/thing.cs"];
+  for (const path of paths) {
     const service = languageServiceFor(path);
     assert.equal(service.maskNonCode("a + 'b'"), maskNonCode("a + 'b'"), `${path}: still the regex fallback`);
   }
-  assert.equal(hadUnwarmedPythonAccess(), true, "every one of those paths was answered unwarmed");
+  assert.deepEqual(
+    [...hadUnwarmedLanguageAccess()].sort(),
+    [".cs", ".go", ".java", ".php", ".rb", ".rs"],
+    "every one of those extensions was answered unwarmed, named individually",
+  );
 });
 
 // --- the re-entrancy guard -------------------------------------------------
@@ -174,7 +180,7 @@ test("languageServiceFor answers a registered extension with the regex fallback 
 // src/code-mask.ts's own comment on unwarmedAccessBatchOpen explains what
 // this guards against: separateTestDiff documents itself as synchronous
 // end to end specifically so that resetUnwarmedLanguageAccess and
-// hadUnwarmedPythonAccess can bracket one batch of work with nothing able
+// hadUnwarmedLanguageAccess can bracket one batch of work with nothing able
 // to run in between and blur one batch's answer into another's. Today
 // that invariant holds only because nothing in that call graph awaits
 // anything; if a future refactor added one, two overlapping batches could
@@ -188,19 +194,19 @@ test("resetUnwarmedLanguageAccess throws when called again before the previous b
   assert.throws(
     () => resetUnwarmedLanguageAccess(),
     /called again before the previous batch/,
-    "a second reset before the first batch's hadUnwarmedPythonAccess call must fail loudly",
+    "a second reset before the first batch's hadUnwarmedLanguageAccess call must fail loudly",
   );
   // Closing the batch the first reset opened, so this test does not leave
   // the module-level guard open for whatever test runs after it in this
   // same file/process.
-  hadUnwarmedPythonAccess();
+  hadUnwarmedLanguageAccess();
 });
 
 test("resetUnwarmedLanguageAccess works normally again once the previous batch's read has happened", () => {
   resetUnwarmedLanguageAccess();
   languageServiceFor("src/thing.rs");
-  assert.equal(hadUnwarmedPythonAccess(), true, "closes the batch");
+  assert.deepEqual(hadUnwarmedLanguageAccess(), [".rs"], "closes the batch, naming the extension");
   // A fresh, non-overlapping batch: no re-entrancy, so this must not throw.
   resetUnwarmedLanguageAccess();
-  assert.equal(hadUnwarmedPythonAccess(), false, "a batch that touched nothing reports clean");
+  assert.deepEqual(hadUnwarmedLanguageAccess(), [], "a batch that touched nothing reports clean");
 });

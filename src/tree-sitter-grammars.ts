@@ -63,10 +63,23 @@ const ruby: GrammarSpec = {
     // "heredoc" wrapper: a `<<~HEREDOC` line opens a sibling
     // heredoc_beginning node elsewhere in the tree, and the body that
     // follows is heredoc_body on its own.
-    literalTypes: new Set(["comment", "string", "string_array", "heredoc_body"]),
-    // bare_string is %w[]'s own per-word wrapper; string_content is its
-    // child holding the actual characters, and the actual word itself.
-    contentTypes: new Set(["string_content", "escape_sequence", "bare_string", "heredoc_content", "heredoc_end"]),
+    //
+    // bare_string and bare_symbol are %w[]/%W[]'s and %i[]/%I[]'s own
+    // per-word wrapper, one per word inside the array. Both belong here in
+    // literalTypes, not in contentTypes: per tree-sitter-ruby's own
+    // node-types.json, a bare_string/bare_symbol can itself hold a named
+    // `interpolation` child (only %W and %I actually produce one; %w and
+    // %i cannot interpolate, but the grammar gives all four the same node
+    // structure). Listing bare_string/bare_symbol in contentTypes, as an
+    // earlier version of this file did, blanks that child wholesale along
+    // with the rest of the word instead of recursing into it, so a `%W[a#{
+    // DANGEROUS}b]` interpolation was masked as literal text and never
+    // reopened as code. Listing them here instead makes the walk recurse
+    // into each word exactly as it already does for `string`: the word's
+    // own plain-text children (string_content/escape_sequence) stay
+    // blanked, and an interpolation child, unlisted anywhere, is reopened.
+    literalTypes: new Set(["comment", "string", "string_array", "symbol_array", "bare_string", "bare_symbol", "heredoc_body"]),
+    contentTypes: new Set(["string_content", "escape_sequence", "heredoc_content", "heredoc_end"]),
   },
 };
 
@@ -102,7 +115,20 @@ const java: GrammarSpec = {
     // text block; the grammar gives them the same node type and tells
     // them apart only by which content-fragment type is inside.
     literalTypes: new Set(["line_comment", "block_comment", "string_literal", "character_literal"]),
-    // No interpolation type: Java has none.
+    // Deliberately not listed: `string_interpolation`, the grammar's node
+    // type for a `STR."value is \{expr}"` string template's `\{...}`
+    // span. An earlier version of this comment said "No interpolation
+    // type: Java has none", which was wrong -- the shipped grammar does
+    // define string_interpolation -- and was a landmine for exactly the
+    // maintainer who goes looking for it: finding an interpolation node
+    // and reading this comment, they would have "fixed" the surprise
+    // by adding string_interpolation to contentTypes, which blanks it
+    // wholesale and hides the very expression that should stay visible as
+    // code. Left unlisted here on purpose, the same as every other named
+    // child not accounted for: an unlisted named child is reopened as
+    // code by the walk's default, which is exactly the right answer for
+    // an interpolation. Verified live: 'var x = STR."value is \{DANGEROUS}
+    // ";' masks to keep \{DANGEROUS} visible and blank everything else.
     contentTypes: new Set(["string_fragment", "multiline_string_fragment", "escape_sequence"]),
   },
 };
@@ -138,6 +164,13 @@ const csharp: GrammarSpec = {
       "raw_string_start",
       "raw_string_content",
       "raw_string_end",
+      // string_literal_encoding is the "u8" suffix on a UTF-8 byte string
+      // literal, `"foo"u8`, a named sibling of string_literal_content
+      // inside the same string_literal node. Unlisted, it read as an
+      // unrecognised named child, and the walk reopened it as code:
+      // `"hello"u8` masked to `       u8`, with the suffix showing as
+      // live code after a string that was otherwise blanked.
+      "string_literal_encoding",
       "interpolation_start",
       "interpolation_quote",
       "escape_sequence",
