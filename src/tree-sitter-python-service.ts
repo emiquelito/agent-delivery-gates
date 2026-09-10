@@ -43,7 +43,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Parser, Language, type Node as TSNode } from "web-tree-sitter";
 import type { LanguageService } from "./code-mask.ts";
-import { localWasmPath } from "./tree-sitter-grammar-store.ts";
+import { localWasmPath, verifyLocalGrammarDigest } from "./tree-sitter-grammar-store.ts";
 
 /** Inside a string or a comment. */
 const LITERAL = 0;
@@ -202,10 +202,15 @@ function makeService(parser: Parser): LanguageService {
  * grammar store (`.adg/grammars/tree-sitter-python.wasm`, written by
  * `adg lang add python`) when the package itself is not resolvable, the
  * ordinary state for an adopter since npm never installs this package's
- * own devDependencies for anyone downstream of it. See the matching
- * comment on src/tree-sitter-language-service.ts's own resolveWasmPath for
- * why the original resolution error is rethrown unchanged when neither is
- * found. */
+ * own devDependencies for anyone downstream of it. A file found in the
+ * local store is verified against its pinned sha256 before this function
+ * returns its path -- see src/tree-sitter-grammar-store.ts's
+ * verifyLocalGrammarDigest for why a file already on disk still needs
+ * checking even though fetchGrammar already checked one before writing it,
+ * and what a failed check is classified as. See the matching comment on
+ * src/tree-sitter-language-service.ts's own resolveWasmPath for why the
+ * original resolution error is rethrown unchanged when the store has no
+ * file there either. */
 function resolveWasmPath(): string {
   const require = createRequire(import.meta.url);
   try {
@@ -213,7 +218,10 @@ function resolveWasmPath(): string {
     return join(dirname(packageJsonPath), "tree-sitter-python.wasm");
   } catch (err) {
     const local = localWasmPath(process.cwd(), "tree-sitter-python.wasm");
-    if (existsSync(local)) return local;
+    if (existsSync(local)) {
+      verifyLocalGrammarDigest("tree-sitter-python.wasm", local);
+      return local;
+    }
     throw err;
   }
 }

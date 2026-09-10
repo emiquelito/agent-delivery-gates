@@ -518,17 +518,58 @@ test("init: reports every tracked language it recognises, and none it does not",
   });
 });
 
-test("init: a language whose grammar is already in .adg/grammars/ is not reported as missing", () => {
+test("init: a language whose grammar is already in .adg/grammars/, and matches its pinned digest, is not reported as missing", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.py"), "print('hi')\n");
+    execFileSync("git", ["add", "main.py"], { cwd: dir });
+    mkdirSync(join(dir, ".adg", "grammars"), { recursive: true });
+    // The real bytes this project's own devDependency ships, at the exact
+    // pinned version -- the one set of bytes guaranteed to pass digest
+    // verification without this file duplicating the pinned sha256's
+    // preimage by hand. Same technique as
+    // tests/tree-sitter-grammar-store.test.ts's own realWasmBytes.
+    const realBytes = readFileSync(join("node_modules", "tree-sitter-python", "tree-sitter-python.wasm"));
+    writeFileSync(join(dir, ".adg", "grammars", "tree-sitter-python.wasm"), realBytes);
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Languages found in this repository: python\./);
+    assert.doesNotMatch(result.stdout, /No tree-sitter grammar resolvable/);
+    assert.doesNotMatch(result.stdout, /failed digest verification/);
+  });
+});
+
+// Finding 2 (reviewer audit of commit 603c794): a file already sitting at
+// .adg/grammars/<name>.wasm used to be treated as reachable outright, with
+// no check against what it actually contained -- fetchGrammar's own digest
+// check protected the download path and nothing else. This is the red half
+// of that fix's own red-before-green: before the fix, this exact scenario
+// (wrong bytes at the pinned path) passed the test above unmodified, i.e.
+// init reported python as already resolvable. After the fix, the same
+// bytes are refused and reported distinctly from "never installed".
+test("init: a wrong file sitting at .adg/grammars/ fails digest verification and is reported distinctly from missing", () => {
   withTempDir((dir) => {
     initGitRepo(dir);
     writeFileSync(join(dir, "main.py"), "print('hi')\n");
     execFileSync("git", ["add", "main.py"], { cwd: dir });
     mkdirSync(join(dir, ".adg", "grammars"), { recursive: true });
     writeFileSync(join(dir, ".adg", "grammars", "tree-sitter-python.wasm"), "fake wasm bytes");
-    const result = runInitCli(["--dir", dir]);
+    const result = runInitCli(["--dir", dir, "--no-install-grammars"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Languages found in this repository: python\./);
-    assert.doesNotMatch(result.stdout, /No tree-sitter grammar resolvable/);
+    assert.match(result.stdout, /Local grammar file\(s\) failed digest verification: python\./);
+    assert.match(result.stdout, /No tree-sitter grammar resolvable yet for: python\./);
+    assert.match(result.stdout, /npx adg lang add python/);
+  });
+});
+
+test("init: a grammar store directory gets a .gitignore reminder not to commit it, whenever a language is detected", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.py"), "print('hi')\n");
+    execFileSync("git", ["add", "main.py"], { cwd: dir });
+    const result = runInitCli(["--dir", dir, "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\.adg\/grammars\/ is a fetch cache, not source/);
   });
 });
 

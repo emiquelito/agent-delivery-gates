@@ -319,6 +319,14 @@ these languages it finds tracked in your repository and offers to fetch
 them; until one is installed, that file's language falls back to the regex
 scanner with a warning, not a block.
 
+`.adg/grammars/` is a fetch cache, not source: `adg lang add` and `adg init`
+write a `.gitignore` into it the first time they create it, so an ordinary
+`git add -A` does not sweep an unverified `.wasm` file into a commit. Every
+file read from that directory, at the moment it is actually loaded, is
+checked against the same pinned sha256 `adg lang add` checks before writing
+it in the first place -- a stale file left over from before this check
+existed, or one that got there some other way, is refused, not trusted.
+
 **What does it cost to run?**
 Nothing, and no account. The cost is time: `mutate` and `census` run your
 suite many times over, so they belong in a pre-push hook or in CI, never on

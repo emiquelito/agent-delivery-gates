@@ -343,6 +343,16 @@ first. It only ever creates a file that does not
 exist yet; nothing already on disk is changed unless `--force` is given.
 Run `agent-delivery-gates init --help` for the full option list.
 
+`init` also reports which languages it finds tracked with no tree-sitter
+grammar resolvable yet, and, asked, fetches them into `.adg/grammars/`.
+That directory is a fetch cache, not source: it gets its own `.gitignore`
+the first time a fetch creates it, so do not `git add` anything inside it
+by hand, and do not undo that ignore. A file there is checked against a
+pinned digest every time it is actually loaded, not only when it is
+fetched, so a stale or hand-placed one is refused, not trusted -- but
+refused is still a broken gate for that language until it is fixed
+with `npx adg lang add <language>`.
+
 ## Wiring into Claude Code
 
 Two routes exist. The plugin route needs no manual wiring at all;

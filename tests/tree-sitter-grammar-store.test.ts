@@ -27,6 +27,7 @@ import {
   grammarStoreDir,
   localWasmPath,
   fetchGrammar,
+  verifyLocalGrammarDigest,
 } from "../src/tree-sitter-grammar-store.ts";
 
 /** The real wasm bytes this project's own devDependency ships for
@@ -182,6 +183,160 @@ test("fetchGrammar refuses a redirect instead of following it", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("fetchGrammar reports a refused redirect's real cause, not only fetch()'s generic message", async () => {
+  // Finding 3: undici's real fetch() (confirmed live against a local
+  // server answering with a 302 while redirect: "error" is set --
+  // see this fix's own verification notes) throws a TypeError whose own
+  // message is only ever the generic "fetch failed", with the actual
+  // reason ("unexpected redirect") on `.cause`. Before this fix, only the
+  // outer message reached the report, so a refused redirect and a DNS
+  // failure both read as "could not reach ...: fetch failed" -- this pins
+  // that the cause is folded in when present.
+  const go = findLanguage("go")!;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const err = new TypeError("fetch failed");
+    (err as TypeError & { cause?: unknown }).cause = new Error("unexpected redirect");
+    throw err;
+  }) as typeof fetch;
+  try {
+    await withTempDirAsync(async (dir) => {
+      const result = await fetchGrammar(go, dir);
+      assert.equal(result.ok, false);
+      assert.match(result.message, /fetch failed/);
+      assert.match(result.message, /unexpected redirect/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchGrammar leaves a network error with no cause exactly as it was, no stray '(undefined)' appended", async () => {
+  // Guards the other branch of the same change: a plain Error (a DNS
+  // failure, say) has no `.cause` at all, and the message must come
+  // through unchanged, not grown a spurious "(undefined)" suffix.
+  const csharp = findLanguage("csharp")!;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("getaddrinfo ENOTFOUND unpkg.com");
+  }) as typeof fetch;
+  try {
+    await withTempDirAsync(async (dir) => {
+      const result = await fetchGrammar(csharp, dir);
+      assert.equal(result.ok, false);
+      assert.equal(result.message, "could not reach https://unpkg.com/tree-sitter-c-sharp@" + csharp.version + "/" + csharp.wasmFileName + ": getaddrinfo ENOTFOUND unpkg.com");
+      assert.doesNotMatch(result.message, /undefined/);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchGrammar writes a .gitignore into a freshly created grammar store, so an ordinary git add does not sweep a fetched file into a commit", async () => {
+  const php = findLanguage("php")!;
+  const bytes = realWasmBytes(php);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => fakeResponse(true, 200, bytes)) as typeof fetch;
+  try {
+    await withTempDirAsync(async (dir) => {
+      const result = await fetchGrammar(php, dir);
+      assert.equal(result.ok, true, result.message);
+      const gitignorePath = join(grammarStoreDir(dir), ".gitignore");
+      assert.equal(existsSync(gitignorePath), true);
+      const content = readFileSync(gitignorePath, "utf8");
+      assert.match(content, /^\*$/m);
+      assert.match(content, /^!\.gitignore$/m);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchGrammar does not overwrite a .gitignore an adopter already customised in the grammar store", async () => {
+  const ruby = findLanguage("ruby")!;
+  const bytes = realWasmBytes(ruby);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => fakeResponse(true, 200, bytes)) as typeof fetch;
+  try {
+    await withTempDirAsync(async (dir) => {
+      mkdirSync(grammarStoreDir(dir), { recursive: true });
+      writeFileSync(join(grammarStoreDir(dir), ".gitignore"), "custom\n");
+      const result = await fetchGrammar(ruby, dir);
+      assert.equal(result.ok, true, result.message);
+      assert.equal(readFileSync(join(grammarStoreDir(dir), ".gitignore"), "utf8"), "custom\n");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- verifyLocalGrammarDigest ---------------------------------------------
+//
+// Finding 2 (reviewer audit of commit 603c794): a file already sitting at
+// .adg/grammars/<name>.wasm used to be trusted outright, at both the point
+// init decided a grammar was already reachable and the point the loader
+// actually read it -- fetchGrammar's digest check protected the download
+// path and nothing else. verifyLocalGrammarDigest is the one place both of
+// those callers (src/init.ts's grammarState and the two service files'
+// resolveWasmPath) now go through.
+
+test("verifyLocalGrammarDigest accepts a file whose bytes match the pinned sha256", () => {
+  withTempDir((dir) => {
+    const python = findLanguage("python")!;
+    const path = join(dir, python.wasmFileName);
+    writeFileSync(path, realWasmBytes(python));
+    assert.doesNotThrow(() => verifyLocalGrammarDigest(python.wasmFileName, path));
+  });
+});
+
+test("verifyLocalGrammarDigest throws on a file that does not match the pinned sha256, with the mismatch itself in the message", () => {
+  withTempDir((dir) => {
+    const python = findLanguage("python")!;
+    const path = join(dir, python.wasmFileName);
+    writeFileSync(path, "definitely not the real wasm bytes");
+    assert.throws(
+      () => verifyLocalGrammarDigest(python.wasmFileName, path),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, new RegExp(python.sha256));
+        assert.match(err.message, /does not match the pinned sha256/);
+        assert.match(err.message, /npx adg lang add python/);
+        return true;
+      },
+    );
+  });
+});
+
+test("verifyLocalGrammarDigest throws no MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND code, so it can never misclassify as 'never installed'", () => {
+  // src/code-mask.ts's isModuleAbsenceError reads exactly these two codes
+  // to decide whether a load failure means the package was never
+  // installed at all. A digest mismatch is the opposite fact -- the
+  // package IS there, in some form -- so this error must carry neither
+  // code, and lands in the "installed and broken" bucket by construction, with
+  // no change needed in code-mask.ts itself.
+  withTempDir((dir) => {
+    const rust = findLanguage("rust")!;
+    const path = join(dir, rust.wasmFileName);
+    writeFileSync(path, "not rust's real grammar");
+    try {
+      verifyLocalGrammarDigest(rust.wasmFileName, path);
+      assert.fail("expected verifyLocalGrammarDigest to throw");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      assert.notEqual(code, "MODULE_NOT_FOUND");
+      assert.notEqual(code, "ERR_MODULE_NOT_FOUND");
+    }
+  });
+});
+
+test("verifyLocalGrammarDigest is a no-op for a wasm file name this table does not know about", () => {
+  withTempDir((dir) => {
+    const path = join(dir, "not-a-real-grammar.wasm");
+    writeFileSync(path, "anything at all");
+    assert.doesNotThrow(() => verifyLocalGrammarDigest("not-a-real-grammar.wasm", path));
+  });
 });
 
 test("fetchGrammar reports a body read failure (a connection dropped after headers) the same clean way, instead of throwing", async () => {

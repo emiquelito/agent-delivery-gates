@@ -149,7 +149,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Parser, Language, type Node as TSNode } from "web-tree-sitter";
 import type { LanguageService } from "./code-mask.ts";
-import { localWasmPath } from "./tree-sitter-grammar-store.ts";
+import { localWasmPath, verifyLocalGrammarDigest } from "./tree-sitter-grammar-store.ts";
 
 /** Inside a string or a comment. */
 const LITERAL = 0;
@@ -244,15 +244,31 @@ function makeService(parser: Parser, config: GrammarConfig): LanguageService {
  * through the package's own package.json, the same way
  * src/tree-sitter-python-service.ts resolves tree-sitter-python's -- this
  * is what a checkout of this repository itself, or an adopter who chose to
- * `npm install` a grammar package directly, gets. When that resolution
- * fails, an adopter's local grammar store (`.adg/grammars/`, written by
- * `adg lang add`; see src/tree-sitter-grammar-store.ts) is checked next,
- * since npm never installs this package's own devDependencies for anyone
- * downstream of it. The original resolution error is rethrown when neither
- * is found, unchanged: src/code-mask.ts's isModuleAbsenceError still reads
- * that error's code and package manifests to tell "never installed" apart
- * from "installed and broken", and nothing about that classification
- * changes here. */
+ * `npm install` a grammar package directly, gets. That route is trusted
+ * without a digest check: it is this repository's own devDependency, or an
+ * adopter's own `npm install`, either way a package manager's own install,
+ * not a file this process's caller could have swapped out from under it
+ * mid-run the way anything with write access to `.adg/grammars/` can.
+ *
+ * When package.json resolution fails, an adopter's local grammar store
+ * (`.adg/grammars/`, written by `adg lang add`; see
+ * src/tree-sitter-grammar-store.ts) is checked next, since npm never
+ * installs this package's own devDependencies for anyone downstream of it.
+ * A file found there is verified against its pinned sha256 before this
+ * function ever returns its path -- `fetchGrammar` already checks a digest
+ * before writing it, but that only proves something about the moment of
+ * that one download; nothing re-checked it since, and this is a fresh
+ * grammar-store directory that could hold a file `fetchGrammar` never
+ * wrote at all (see verifyLocalGrammarDigest's own doc comment for the
+ * full reasoning and what a failure is classified as). The original
+ * resolution error is rethrown, unchanged, when the store has no file
+ * there either: src/code-mask.ts's isModuleAbsenceError still reads that
+ * error's code and package manifests to tell "never installed" apart from
+ * "installed and broken", and nothing about that classification changes
+ * here. A digest failure below throws a different error, with no
+ * MODULE_NOT_FOUND/ERR_MODULE_NOT_FOUND code, so isModuleAbsenceError's own
+ * guard on that code already keeps it out of the "never installed" bucket
+ * without any change needed there. */
 function resolveWasmPath(packageName: string, wasmFileName: string): string {
   const require = createRequire(import.meta.url);
   try {
@@ -260,7 +276,10 @@ function resolveWasmPath(packageName: string, wasmFileName: string): string {
     return join(dirname(packageJsonPath), wasmFileName);
   } catch (err) {
     const local = localWasmPath(process.cwd(), wasmFileName);
-    if (existsSync(local)) return local;
+    if (existsSync(local)) {
+      verifyLocalGrammarDigest(wasmFileName, local);
+      return local;
+    }
     throw err;
   }
 }

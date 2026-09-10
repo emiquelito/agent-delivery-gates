@@ -973,6 +973,13 @@ ${jsonLdText}
         exact package version, so a wrong, truncated, or tampered download is rejected instead of
         installed. <code>adg init</code> can do the same, but only after asking and only if you
         say yes. Neither runs unless you invoke it; nothing else in this package ever does.</p>
+      <p>That same digest is checked again every time a grammar already in
+        <code>.adg/grammars/</code> is actually loaded, not only at the moment it is fetched: a
+        file that fails is refused, not read. <code>.adg/grammars/</code> gets a
+        <code>.gitignore</code> written into it the first time it is created, so it is not
+        something an ordinary commit sweeps in by accident, but the digest check does not depend
+        on that -- a stale file from before this check existed, or one that reached the directory
+        some other way, is checked and refused on its own bytes, regardless of how it got there.</p>
       <p>The package has one runtime dependency, <a href="https://www.npmjs.com/package/web-tree-sitter">web-tree-sitter</a>
         (MIT licensed, zero dependencies of its own): the WebAssembly runtime that loads a
         grammar fetched the way above. A WebAssembly grammar has no capability to open a socket,

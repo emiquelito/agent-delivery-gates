@@ -22,7 +22,12 @@ import {
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveWithinRoot } from "./path-allowlist.ts";
-import { LANGUAGES, localWasmPath, type LanguageEntry } from "./tree-sitter-grammar-store.ts";
+import {
+  LANGUAGES,
+  localWasmPath,
+  verifyLocalGrammarDigest,
+  type LanguageEntry,
+} from "./tree-sitter-grammar-store.ts";
 
 export interface InitOptions {
   /** Directory init writes into. Must already be an absolute path. */
@@ -47,8 +52,12 @@ export interface InitOutcome {
   lines: string[];
   /** Names (from src/tree-sitter-grammar-store.ts's LANGUAGES) of every
    * language init found tracked files for in this repository, with no
-   * grammar resolvable for it yet -- neither in node_modules nor in this
-   * project's own `.adg/grammars/`. Empty on a dry run, since nothing
+   * grammar it can currently trust: neither node_modules nor this
+   * project's own `.adg/grammars/` has anything for it (missing), or
+   * `.adg/grammars/` has a file that fails digest verification (corrupt --
+   * see grammarState's own doc comment for why that is folded in here
+   * instead of dropped: the fix bin/adg.ts offers, a fresh verified
+   * fetch, is the same for both). Empty on a dry run, since nothing
    * checked here writes anything either way. bin/adg.ts reads this to
    * decide whether to ask about installing them; runInit itself never
    * downloads anything; see fetchGrammar in src/tree-sitter-grammar-store.ts. */
@@ -176,16 +185,46 @@ function detectRepoLanguages(targetDir: string): LanguageEntry[] {
   return [...found.values()];
 }
 
-/** True when `entry`'s grammar is already reachable for `targetDir`: either
- * this project's own local store already holds its wasm file, or the
- * grammar package sits in `targetDir`'s own node_modules (an adopter who
- * `npm install`ed it directly, or this repository's own checkout). Not a
- * guarantee the load will actually succeed -- that is resolveWasmPath's
- * job, at the moment a file of that language is actually scanned -- only
- * that init has nothing useful left to offer for this language. */
-function grammarAlreadyReachable(targetDir: string, entry: LanguageEntry): boolean {
-  if (existsSync(localWasmPath(targetDir, entry.wasmFileName))) return true;
-  return existsSync(join(targetDir, "node_modules", entry.packageName));
+/** Whether `entry`'s grammar is reachable for `targetDir`, and if not, why.
+ *
+ * "ok": this project's own local store already holds a wasm file that
+ * verifies against its pinned digest, or the grammar package sits in
+ * `targetDir`'s own node_modules (an adopter who `npm install`ed it
+ * directly, or this repository's own checkout, trusted the same way
+ * src/tree-sitter-language-service.ts's resolveWasmPath trusts it -- a
+ * package manager's own install, not a file that could have been placed
+ * there some other way). Not a guarantee the load will actually succeed --
+ * that is resolveWasmPath's job, at the moment a file of that language is
+ * actually scanned -- only that init has nothing useful left to offer for
+ * this language.
+ *
+ * "corrupt": a file already sits at `.adg/grammars/<name>.wasm`, but it
+ * fails verifyLocalGrammarDigest's check against the pinned sha256 for its
+ * package and version. This is deliberately not folded into "missing"
+ * silently, even though both end up asking for the same fix (`npx adg lang
+ * add <name>`, which overwrites whatever is there with a freshly verified
+ * download): a file that was never installed and a file that is sitting
+ * there under a name that does not match its own contents are different
+ * facts, worth telling a person apart, even when the remedy happens to be
+ * identical. See verifyLocalGrammarDigest's own doc comment in
+ * src/tree-sitter-grammar-store.ts for the full reasoning, including why
+ * this is also not the same thing this project already calls "installed
+ * and broken" (src/code-mask.ts's grammarGenuineFailures).
+ *
+ * "missing": neither the local store nor node_modules has anything for
+ * this language at all.
+ */
+function grammarState(targetDir: string, entry: LanguageEntry): "ok" | "corrupt" | "missing" {
+  const local = localWasmPath(targetDir, entry.wasmFileName);
+  if (existsSync(local)) {
+    try {
+      verifyLocalGrammarDigest(entry.wasmFileName, local);
+      return "ok";
+    } catch {
+      return "corrupt";
+    }
+  }
+  return existsSync(join(targetDir, "node_modules", entry.packageName)) ? "ok" : "missing";
 }
 
 /** The four hook wiring lines for the standalone `.claude/settings.json`
@@ -461,20 +500,45 @@ export function runInit(options: InitOptions): InitOutcome {
   // downloads anything: dryRun aside, that decision belongs to bin/adg.ts,
   // which asks before it acts (see maybeInstallGrammars there).
   const detectedLanguages = detectRepoLanguages(targetDir);
-  const missingGrammarLanguages = detectedLanguages.filter((entry) => !grammarAlreadyReachable(targetDir, entry));
+  const languageStates = detectedLanguages.map((entry) => ({ entry, state: grammarState(targetDir, entry) }));
+  const corruptGrammarLanguages = languageStates.filter((s) => s.state === "corrupt").map((s) => s.entry);
+  const absentGrammarLanguages = languageStates.filter((s) => s.state === "missing").map((s) => s.entry);
+  // corrupt and absent both need the same fix (fetch a freshly verified
+  // copy), so both feed the one install-command block below and the one
+  // list bin/adg.ts's maybeInstallGrammars reads -- but corrupt gets its
+  // own line above it, since "a file is there and it is wrong" is not the
+  // same fact as "nothing is there yet", even though the remedy is
+  // identical. See grammarState's own doc comment for why.
+  const grammarsToInstall = [...corruptGrammarLanguages, ...absentGrammarLanguages];
   if (detectedLanguages.length > 0) {
     lines.push("");
     lines.push(`Languages found in this repository: ${detectedLanguages.map((entry) => entry.name).join(", ")}.`);
   }
-  if (missingGrammarLanguages.length > 0) {
+  if (corruptGrammarLanguages.length > 0) {
     lines.push(
-      `No tree-sitter grammar resolvable yet for: ${missingGrammarLanguages.map((entry) => entry.name).join(", ")}. ` +
+      `Local grammar file(s) failed digest verification: ${corruptGrammarLanguages.map((entry) => entry.name).join(", ")}. ` +
+        "A file already exists in .adg/grammars/ for these, but its sha256 does not match the pinned digest for its " +
+        "package and version -- not the same thing as never having installed one. It may be left over from before " +
+        "this check existed, or it may have been placed there some other way. Refused, not trusted; treated the same " +
+        "as missing below.",
+    );
+  }
+  if (grammarsToInstall.length > 0) {
+    lines.push(
+      `No tree-sitter grammar resolvable yet for: ${grammarsToInstall.map((entry) => entry.name).join(", ")}. ` +
         "Until one is installed, mutate and test-diff fall back to the regex scanner for these files, with a warning.",
     );
     lines.push("Install with:");
-    for (const entry of missingGrammarLanguages) {
+    for (const entry of grammarsToInstall) {
       lines.push(`  npx adg lang add ${entry.name}`);
     }
+  }
+  if (detectedLanguages.length > 0) {
+    lines.push(
+      ".adg/grammars/ is a fetch cache, not source: adg lang add and adg init write a .gitignore into it so an " +
+        "ordinary `git add` does not sweep an unverified file into a commit. Do not commit anything in that " +
+        "directory by hand.",
+    );
   }
 
   lines.push("");
@@ -506,7 +570,7 @@ export function runInit(options: InitOptions): InitOutcome {
   return {
     exitCode: 0,
     lines,
-    missingGrammarLanguages: dryRun ? [] : missingGrammarLanguages.map((entry) => entry.name),
+    missingGrammarLanguages: dryRun ? [] : grammarsToInstall.map((entry) => entry.name),
   };
 }
 

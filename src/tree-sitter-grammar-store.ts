@@ -30,7 +30,7 @@
 // purpose, never something `check`, `mutate`, `census`, `induce`, or
 // `test-diff` calls on your behalf.
 
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
@@ -164,6 +164,92 @@ export function localWasmPath(root: string, wasmFileName: string): string {
   return join(grammarStoreDir(root), wasmFileName);
 }
 
+/**
+ * Verifies a wasm file already sitting on disk, at `wasmPath`, against the
+ * sha256 pinned in LANGUAGES for whichever language ships `wasmFileName`.
+ * Throws when the bytes do not match; returns normally (does nothing else)
+ * when they do, or when `wasmFileName` names no language this table knows
+ * about (nothing to check against).
+ *
+ * `fetchGrammar` below already hashes what it downloads before ever writing
+ * it, so a file this function refuses was never written by a call to
+ * `fetchGrammar` that returned `ok: true` -- that path already only ever
+ * lands a byte-for-byte match. A file that fails this check got to
+ * `.adg/grammars/` some other way: written before this project pinned a
+ * digest for it at all, copied in from another machine, committed into a
+ * repository by hand or by a compromised build step, or corrupted on disk
+ * after a good install. This function does not attempt to tell those apart
+ * -- it cannot, from the bytes alone -- it only refuses to trust any of
+ * them.
+ *
+ * This is deliberately not the same fact as src/code-mask.ts's
+ * `grammarGenuineFailures` ("the package resolved but the load still
+ * failed: a corrupt wasm file, an ABI mismatch, a truncated install"), even
+ * though a digest failure ends up routed through that same bucket once it
+ * reaches code-mask.ts (see the two callers of this function for how: an
+ * error thrown here carries no MODULE_NOT_FOUND/ERR_MODULE_NOT_FOUND code,
+ * so it can never read as "never installed" -- isModuleAbsenceError's
+ * guard on the error code alone already keeps it out of that bucket, with
+ * no change needed here). "Installed and broken" describes a file that
+ * came from a real install and stopped working; this describes a file that
+ * was never verified as the thing it claims to be in the first place, at
+ * any point. The two are worth the same reaction, blocking, which is why
+ * no third bucket was built for this in code-mask.ts -- but they are not
+ * the same story, which is why this function's own message says exactly
+ * what it found, not "your install is broken".
+ *
+ * Cost: this reads the whole file into memory and hashes it. Measured
+ * against this project's own largest grammar (tree-sitter-c-sharp's wasm,
+ * about 3.8MB) on ordinary developer hardware, sha256 over bytes already
+ * read from disk runs in low single-digit milliseconds -- see this fix's
+ * own measurement notes for the actual numbers. That cost is paid once per
+ * language per process (the two callers below are each reached through a
+ * loader that resolveTreeSitterService/resolvePythonLanguageService in
+ * src/code-mask.ts caches after the first call), not once per file
+ * scanned, so a gate run touching a thousand Python files still hashes the
+ * grammar exactly once.
+ */
+export function verifyLocalGrammarDigest(wasmFileName: string, wasmPath: string): void {
+  const entry = LANGUAGES.find((candidate) => candidate.wasmFileName === wasmFileName);
+  if (entry === undefined) return;
+  const bytes = readFileSync(wasmPath);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (digest !== entry.sha256) {
+    throw new Error(
+      `'${wasmPath}' does not match the pinned sha256 for ${entry.packageName}@${entry.version} ` +
+        `(expected ${entry.sha256}, found ${digest}). Refusing to load it: this file was never ` +
+        `verified by a fetchGrammar download that actually matched -- it may be left over from ` +
+        `before this check existed, or it may have been placed there some other way. Delete it and ` +
+        `run 'npx adg lang add ${entry.name}' to fetch a verified copy.`,
+    );
+  }
+}
+
+// A grammar store directory holds nothing but a fetch cache: every file in
+// it is either written by fetchGrammar's own verified download, or refused
+// at load time by verifyLocalGrammarDigest above. Writing this once, the
+// first time this directory is created, means a project's own `git add -A`
+// (or an agent's) does not sweep a fetched .wasm file into a commit, where
+// it would sit unverified against every future clone -- exactly the state
+// this file's digest check exists to catch. `!.gitignore` keeps the marker
+// itself trackable, so the intent is visible in the directory even if
+// nothing else in it ever is.
+function ensureGrammarStoreGitignore(dir: string): void {
+  const gitignorePath = join(dir, ".gitignore");
+  if (existsSync(gitignorePath)) return;
+  try {
+    writeFileSync(
+      gitignorePath,
+      "# Fetched by `adg lang add` / `adg init`. A cache, not source -- do not commit it.\n" +
+        "*\n" +
+        "!.gitignore\n",
+    );
+  } catch {
+    // Best effort: a failed write here is not worth failing an otherwise-
+    // successful grammar install over.
+  }
+}
+
 export interface FetchGrammarResult {
   ok: boolean;
   message: string;
@@ -240,7 +326,19 @@ export async function fetchGrammar(
     }
     bytes = new Uint8Array(await response.arrayBuffer());
   } catch (err) {
-    return { ok: false, message: `could not reach ${url}: ${(err as Error).message}` };
+    // undici's own fetch() collapses a refused redirect to the generic
+    // TypeError "fetch failed" -- indistinguishable, by message alone,
+    // from a DNS failure, a refused connection, or any other network
+    // error. The actual reason lives on `.cause` (here, "unexpected
+    // redirect"; confirmed live against a local server that answers with
+    // a 302 while this function's own `redirect: "error"` is set).
+    // Appended when present so a refused redirect reads as what it is
+    // instead of a generic "could not reach" message a person has to
+    // guess at.
+    const cause = (err as Error & { cause?: unknown }).cause;
+    const causeMessage = cause instanceof Error ? cause.message : undefined;
+    const detail = causeMessage !== undefined ? `${(err as Error).message} (${causeMessage})` : (err as Error).message;
+    return { ok: false, message: `could not reach ${url}: ${detail}` };
   }
 
   const digest = createHash("sha256").update(bytes).digest("hex");
@@ -255,6 +353,7 @@ export async function fetchGrammar(
 
   const dir = grammarStoreDir(root);
   mkdirSync(dir, { recursive: true });
+  ensureGrammarStoreGitignore(dir);
   const finalPath = localWasmPath(root, entry.wasmFileName);
   const tmpPath = `${finalPath}.download-${process.pid}`;
   try {
