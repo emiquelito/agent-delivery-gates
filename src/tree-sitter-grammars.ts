@@ -110,6 +110,20 @@ const ruby: GrammarSpec = {
     // escape_sequence/interpolation/string_content -- and the same
     // interpolation risk a plain string has.
     //
+    // subshell (the backtick and `%x{}` shell-command literal) has that
+    // same identical child structure a fourth time -- escape_sequence/
+    // interpolation/string_content -- and was left in the node-types
+    // conformance test's own CODE_TYPES list instead, ordinary code, not
+    // a literal container, in the very commit that moved regex,
+    // delimited_symbol, and chained_string out of it for having those
+    // exact children. Verified live before this fix: `` cmd = `echo
+    // DANGEROUS_SECRET_TOKEN` `` masked to itself, unchanged. The
+    // completeness check in tests/tree-sitter-node-types-conformance.test.ts
+    // could not have caught this on its own -- subshell's name was
+    // present, just in the wrong bucket -- which is why that file now
+    // also checks each CODE_TYPES entry's own children for exactly this
+    // structure.
+    //
     // uninterpreted is Ruby's own name for whatever text follows a
     // `__END__` line: a script's own trailing data section, never parsed
     // as Ruby at all. It is exactly as much "not code" as a comment, and
@@ -132,6 +146,7 @@ const ruby: GrammarSpec = {
       "delimited_symbol",
       "chained_string",
       "regex",
+      "subshell",
       "uninterpreted",
       "character",
     ]),
@@ -164,6 +179,22 @@ const php: GrammarSpec = {
       // encapsed_string (string_content, escape_sequence, and PHP's five
       // interpolation forms), so it needs the same treatment.
       "shell_command_expression",
+      // text_interpolation only wraps raw HTML found *between* two PHP
+      // spans, or after the last one: per tree-sitter-php's own
+      // node-types.json, `program`'s own children can include a bare
+      // `text` node directly, unwrapped, for HTML before the first
+      // `<?php` tag, or for a template-only file with no PHP tag at all.
+      // That bare text was invisible to this walk the same way any
+      // unlisted named child is: `program` is not itself a literalType,
+      // so its bare `text` child was never blanked, only ever reopened
+      // by the walk's ordinary recursion, which reads as "stays code" for
+      // a leaf with nothing further inside it. Listing `text` here too,
+      // not only in contentTypes below, means the walk blanks it
+      // directly wherever it appears as its own node -- inside a
+      // text_interpolation, where it is still reached via contentTypes
+      // and its parent's own wholesale fill, or bare under `program`,
+      // where literalTypes is what actually blanks it now.
+      "text",
     ]),
     // heredoc_start/heredoc_end are the `<<<EOT` tag's own name, repeated
     // at open and close; not code, and not blanked by accident either

@@ -90,6 +90,40 @@
 // `preproc_arg` (a `#region` label's own free text, entirely unmasked).
 // Every one of those is a real fix in src/tree-sitter-grammars.ts, not
 // just a new line in this file's own accounting.
+//
+// That version of this file shipped with a defect of its own, found by
+// the next round of review, and this file overstated what it covered
+// until now: the flat check above proves every named type lands in
+// *some* bucket. It never proved a type landed in the *right* one --
+// CODE_TYPES and literalTypes were both just sets of strings to it, so a
+// type filed into the wrong one passed exactly as cleanly as a correctly
+// classified one would. Ruby's own `subshell` (the backtick and `%x{}`
+// shell-command literal) sat in CODE_TYPES with the identical child
+// structure as `string`, `regex`, and `delimited_symbol` --
+// escape_sequence/interpolation/string_content -- in the very commit that
+// moved those three out of CODE_TYPES for having those exact children, and
+// this file's own completeness check passed anyway: subshell's name was
+// present, just filed under the wrong heading. `findMisclassifiedCodeTypes`
+// below closes that: it reads each CODE_TYPES entry's own children.types
+// and flags one whose children mark it as a literal container, with a
+// narrower marker set than "any child that could be text" (see that
+// function's own comment for why PHP's interpolation forms could not be
+// used as markers without flagging ordinary statements too). Any
+// CODE_TYPES entry the check would otherwise flag as actually ordinary
+// code is named in CORRECTNESS_EXCEPTIONS, with the reason recorded there
+// instead of the check being narrowed further or silenced.
+//
+// The same round of review found this file's own Python half was
+// decorative in a different way: PYTHON_MODEL was a hand-typed copy of
+// what tree-sitter-python-service.ts's markNode actually did, not a check
+// against markNode itself, so removing format_specifier's real handling
+// from that file left the untouched copy here still green -- 15 of 15
+// passing, including the test named for exactly this. PYTHON_MODEL below
+// is now built from PYTHON_CONFIG, imported directly from
+// tree-sitter-python-service.ts, which markNode reads at runtime: there is
+// one object, not two that can drift apart. See that file's own header
+// for why it needed a third classification bucket, delimiterTypes, that
+// the other six grammars do not.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -98,6 +132,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { GRAMMAR_SPECS, type GrammarSpec } from "../src/tree-sitter-grammars.ts";
 import type { GrammarConfig } from "../src/tree-sitter-language-service.ts";
+import { PYTHON_CONFIG } from "../src/tree-sitter-python-service.ts";
 
 /** One named node type entry from a grammar's own node-types.json, pared
  * down to what this file reads: its own type name, whether it is a real
@@ -252,7 +287,7 @@ const CODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
     "pair", "parenthesized_pattern", "parenthesized_statements", "pattern", "program", "range", "rational",
     "redo", "rescue", "rescue_modifier", "rest_assignment", "retry", "return", "right_assignment_list",
     "scope_resolution", "self", "setter", "singleton_class", "singleton_method", "splat_argument",
-    "splat_parameter", "subshell", "super", "superclass", "test_pattern", "then", "true", "unary", "undef",
+    "splat_parameter", "super", "superclass", "test_pattern", "then", "true", "unary", "undef",
     "unless", "unless_guard", "unless_modifier", "until", "until_modifier", "variable_reference_pattern",
     "when", "while", "while_modifier", "yield",
   ]),
@@ -381,26 +416,29 @@ const CODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
 
 /**
  * Python's own tree-sitter service, src/tree-sitter-python-service.ts,
- * predates GrammarConfig and is not driven by one: its markNode hardcodes
- * "comment", "string", and (as of this round's fix for the same
- * unmasked-format-specifier bug this file's own method found)
- * "format_specifier" directly, instead of reading a literalTypes/
- * contentTypes pair. This model mirrors that hardcoded behaviour just
- * closely enough for this file's own accounting to run the same check
- * against it: literalTypes/contentTypes/exclusions here describe what
- * markNode actually does, not a real GrammarConfig object anywhere in
- * src/. If tree-sitter-python-service.ts's markNode ever changes which
- * node types it special-cases, this model has to change by hand to match
- * -- there is no shared source of truth to import from, the same
- * trade-off Python already made by predating this file. That drift risk
- * is accepted for the same reason src/tree-sitter-language-service.ts's
- * own header gives for leaving Python's service exactly as it is: it
- * already works, and folding it into GrammarConfig is a separate change
- * with no gain for this one.
+ * predates GrammarConfig and is not driven by one -- but it is driven by
+ * its own PYTHON_CONFIG, a plain data object markNode reads instead of a
+ * chain of `if (node.type === ...)` branches, imported directly below
+ * instead of retyped here. That import is the actual fix for a defect a
+ * prior round of review found: this file used to keep its own hand-typed
+ * copy of what markNode did (PYTHON_MODEL), and removing format_specifier's
+ * real handling from the service left that copy untouched and this test
+ * still green -- 15 of 15 passing, including the one whose name claimed to
+ * account for the hardcoded walk. A model built apart from the code it
+ * checks can only ever agree with its own memory of that code, not with
+ * what the code actually does now. Importing PYTHON_CONFIG closes that
+ * gap: the set this file checks against and the set markNode actually
+ * reads from are the same object, so a change to one is necessarily a
+ * change to the other. PYTHON_CONFIG's own contentTypes only lists
+ * string_content/escape_sequence -- string_start/string_end are a third
+ * bucket, delimiterTypes, that none of the other six grammars need (see
+ * that file's own doc comment) -- so they are unioned into `contentTypes`
+ * here purely for this file's own accounting, which only needs to know
+ * a type is spoken for, not which of markNode's three outcomes it gets.
  */
 const PYTHON_MODEL: GrammarConfig = {
-  literalTypes: new Set(["comment", "string", "format_specifier"]),
-  contentTypes: new Set(["string_content", "escape_sequence", "string_start", "string_end"]),
+  literalTypes: PYTHON_CONFIG.literalTypes,
+  contentTypes: new Set([...PYTHON_CONFIG.contentTypes, ...PYTHON_CONFIG.delimiterTypes]),
 };
 const PYTHON_EXCLUSIONS = new Set(["interpolation", "format_expression"]);
 const PYTHON_CODE_TYPES = new Set([
@@ -485,15 +523,37 @@ for (const [ext, spec] of Object.entries(GRAMMAR_SPECS) as Array<[string, Gramma
   });
 }
 
-test(".py: tree-sitter-python-service.ts's hardcoded markNode accounts for every named type tree-sitter-python's own node-types.json says it can produce", () => {
+test(".py: src/tree-sitter-python-service.ts's real PYTHON_CONFIG accounts for every named type tree-sitter-python's own node-types.json says it can produce", () => {
   const nodeTypes = loadNodeTypes("tree-sitter-python", NODE_TYPES_SUBPATH[".py"]);
   const missing = findUnclassifiedTypes(nodeTypes, PYTHON_MODEL, PYTHON_EXCLUSIONS, PYTHON_CODE_TYPES);
   assert.deepEqual(
     missing,
     [],
-    `.py: tree-sitter-python's node-types.json can produce ${JSON.stringify(missing)}, unaccounted for in PYTHON_MODEL, ` +
-      "PYTHON_EXCLUSIONS, or PYTHON_CODE_TYPES above. If markNode in src/tree-sitter-python-service.ts needs to " +
-      "change to handle it, update PYTHON_MODEL to match by hand -- there is no config object to read this from.",
+    `.py: tree-sitter-python's node-types.json can produce ${JSON.stringify(missing)}, unaccounted for in the real ` +
+      "PYTHON_CONFIG imported from src/tree-sitter-python-service.ts, or in this file's own PYTHON_EXCLUSIONS or " +
+      "PYTHON_CODE_TYPES. If markNode needs to change to handle it, that change to PYTHON_CONFIG is what this test " +
+      "reads -- there is no separate copy left to fall out of sync.",
+  );
+});
+
+// Finding 2, reproduced directly: the reviewer proved this file's old
+// PYTHON_MODEL was a hand-typed copy of markNode's behaviour, not a check
+// against markNode itself, by removing format_specifier's real handling
+// from the service and watching PYTHON_MODEL -- untouched -- keep this
+// test green. Now that PYTHON_MODEL is built from the real, imported
+// PYTHON_CONFIG, the same removal has to fail here, because there is only
+// one object left to remove it from.
+test("removing format_specifier from the real PYTHON_CONFIG.literalTypes is caught (Finding 2, red before green)", () => {
+  const nodeTypes = loadNodeTypes("tree-sitter-python", NODE_TYPES_SUBPATH[".py"]);
+  assert.ok(PYTHON_CONFIG.literalTypes.has("format_specifier"), "sanity check: the real service must actually handle format_specifier");
+  const brokenConfig: GrammarConfig = {
+    literalTypes: new Set([...PYTHON_CONFIG.literalTypes].filter((t) => t !== "format_specifier")),
+    contentTypes: new Set([...PYTHON_CONFIG.contentTypes, ...PYTHON_CONFIG.delimiterTypes]),
+  };
+  const missing = findUnclassifiedTypes(nodeTypes, brokenConfig, PYTHON_EXCLUSIONS, PYTHON_CODE_TYPES);
+  assert.ok(
+    missing.includes("format_specifier"),
+    "removing format_specifier's real handling must be caught, the same defect the old hand-typed PYTHON_MODEL let through silently",
   );
 });
 
@@ -536,6 +596,159 @@ const ROOT_LITERAL_TYPE: Readonly<Record<string, string>> = {
   ".cs": "comment",
   ".py": "comment",
 };
+
+// --- correctness, not just completeness -------------------------------
+
+// The completeness check above proves every named type lands in *some*
+// bucket. It cannot prove a type landed in the *right* bucket: CODE_TYPES
+// and literalTypes are both just sets of strings to it, so a literal
+// misfiled into CODE_TYPES -- exactly what happened to Ruby's `subshell`,
+// in the same commit that fixed nine other instances of this bug class --
+// passes it just as cleanly as a correctly classified type would. Nothing
+// above reads a single type's own children.types; it only reads whether
+// the type's name is present somewhere.
+//
+// The signal that was sitting in the data the whole time: a literal
+// container's own node-types.json entry lists named children that are
+// plain content or an interpolation, and nothing else structural. Ruby's
+// `subshell` has exactly the same three named children as `string`,
+// `regex`, and `delimited_symbol` -- escape_sequence, interpolation,
+// string_content -- because tree-sitter-ruby gives all four literal forms
+// that identical structure. A type in CODE_TYPES whose own children include one
+// of these content-or-interpolation markers is, structurally, the same
+// kind of node as a literal this file already knows how to recognise; it
+// just was not classified as one.
+//
+// This check is deliberately narrower than "any named child that could
+// plausibly be text": PHP's own interpolation forms are named
+// `expression`, `variable_name`, `member_access_expression`,
+// `subscript_expression`, and `dynamic_variable_name` -- and `expression`
+// in particular is also the ordinary operand of dozens of ordinary
+// statements (`return_statement`, `echo_statement`, `break_statement`, and
+// more all have exactly one child, `expression`, and nothing else). Using
+// PHP's own EXCLUSIONS as markers here would flag every one of those as a
+// false "literal in disguise" the moment it has any child at all, since
+// their entire children list would trivially satisfy "includes a marker".
+// So the marker set below is each grammar's own contentTypes (the
+// actually unambiguous "this is plain text, not an expression" child
+// types) plus, only where the grammar gives the concept an unambiguous
+// name never reused for an ordinary code operand, its interpolation node
+// type: Ruby's, C#'s, and Java's `interpolation`/`string_interpolation`,
+// and Python's `interpolation`/`format_expression`. PHP and Go get no such
+// addition -- PHP because its interpolation forms are not unambiguous
+// (see above), Go because it has no interpolation concept at all.
+const CONTENT_SHAPED_MARKERS: Readonly<Record<string, ReadonlySet<string>>> = {
+  ".rs": new Set(["string_content", "escape_sequence"]),
+  ".rb": new Set(["string_content", "escape_sequence", "heredoc_content", "heredoc_end", "interpolation"]),
+  ".php": new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end", "text", "php_tag", "php_end_tag"]),
+  ".go": new Set(["interpreted_string_literal_content", "raw_string_literal_content", "escape_sequence"]),
+  ".java": new Set(["string_fragment", "multiline_string_fragment", "escape_sequence", "string_interpolation"]),
+  ".cs": new Set([
+    "string_literal_content", "string_content", "character_literal_content", "raw_string_start",
+    "raw_string_content", "raw_string_end", "string_literal_encoding", "interpolation_start",
+    "interpolation_quote", "escape_sequence", "interpolation",
+  ]),
+};
+
+/**
+ * Every CODE_TYPES entry (or, for Python, PYTHON_CODE_TYPES entry) that
+ * `nodeTypes` says has at least one named child in `markers`, excluding
+ * any name in `deliberateExceptions` -- a type considered and kept in
+ * CODE_TYPES on purpose, not one nobody looked at. See this file's own
+ * header comment above for what counts as a marker and why the set is
+ * narrower than "any child that could be text".
+ */
+function findMisclassifiedCodeTypes(
+  nodeTypes: readonly NodeTypeEntry[],
+  codeTypes: ReadonlySet<string>,
+  markers: ReadonlySet<string>,
+  deliberateExceptions: ReadonlySet<string>,
+): string[] {
+  const flagged: string[] = [];
+  for (const entry of nodeTypes) {
+    if (entry.named !== true) continue;
+    if (entry.subtypes !== undefined) continue;
+    if (!codeTypes.has(entry.type)) continue;
+    if (deliberateExceptions.has(entry.type)) continue;
+    const childTypes = (entry.children?.types ?? []).map((c) => c.type);
+    if (childTypes.some((t) => markers.has(t))) flagged.push(entry.type);
+  }
+  return flagged.sort();
+}
+
+/**
+ * Deliberate exceptions to the correctness check, per grammar: a
+ * CODE_TYPES entry the check above would otherwise flag, kept in
+ * CODE_TYPES anyway because it is actually ordinary code and not a
+ * literal in disguise, with the reason recorded here instead of the
+ * check being silenced or its markers narrowed further. Empty for a
+ * grammar means the check finds nothing to except.
+ */
+const CORRECTNESS_EXCEPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  ".rs": new Set(),
+  ".rb": new Set(),
+  // program, PHP's own root node, is the one type this check flags that
+  // is not a literal in disguise: per tree-sitter-php's own node-types.json,
+  // `program`'s children can be `php_tag`, `statement`, or a bare `text`
+  // node directly -- so "some child is a content marker" is trivially true
+  // of the root of every PHP file that has any HTML in it at all, the same
+  // way it would be true of any container that legitimately mixes code and
+  // text as siblings instead of being a text container itself. The actual
+  // bug this pointed at was real, though: that bare `text` child (Finding
+  // 3, leading HTML before the first `<?php` tag, or a template-only file
+  // with none at all) was never masked, because nothing in literalTypes
+  // matched it and `program` itself is not a literal container to recurse
+  // out of. The fix is `text` itself joining php's literalTypes in
+  // src/tree-sitter-grammars.ts, not relabelling `program`, which stays
+  // ordinary code -- masking `program` itself would blank an entire file's
+  // real statements along with its HTML.
+  ".php": new Set(["program"]),
+  ".go": new Set(),
+  ".java": new Set(),
+  ".cs": new Set(),
+};
+const PYTHON_CORRECTNESS_EXCEPTIONS = new Set<string>();
+
+for (const [ext, spec] of Object.entries(GRAMMAR_SPECS) as Array<[string, GrammarSpec]>) {
+  test(`${ext}: no CODE_TYPES entry in this file has a child that marks it as a literal (correctness, not just completeness)`, () => {
+    const nodeTypes = loadNodeTypes(spec.packageName, NODE_TYPES_SUBPATH[ext]);
+    const flagged = findMisclassifiedCodeTypes(nodeTypes, CODE_TYPES[ext], CONTENT_SHAPED_MARKERS[ext], CORRECTNESS_EXCEPTIONS[ext]);
+    assert.deepEqual(
+      flagged,
+      [],
+      `${ext}: CODE_TYPES contains ${JSON.stringify(flagged)}, each with a named child that marks a literal container ` +
+        "(a content type or an unambiguous interpolation type). Move each one to literalTypes, or add it to this " +
+        "file's own CORRECTNESS_EXCEPTIONS with a reason if it is actually ordinary code.",
+    );
+  });
+}
+
+test(".py: no PYTHON_CODE_TYPES entry has a child that marks it as a literal (correctness, not just completeness)", () => {
+  const nodeTypes = loadNodeTypes("tree-sitter-python", NODE_TYPES_SUBPATH[".py"]);
+  const pythonMarkers = new Set(["string_content", "escape_sequence", "interpolation", "format_expression"]);
+  const flagged = findMisclassifiedCodeTypes(nodeTypes, PYTHON_CODE_TYPES, pythonMarkers, PYTHON_CORRECTNESS_EXCEPTIONS);
+  assert.deepEqual(flagged, [], `.py: PYTHON_CODE_TYPES contains ${JSON.stringify(flagged)}, each looking like a literal in disguise.`);
+});
+
+// Finding 1, reproduced directly: subshell (Ruby's backtick and %x{}
+// shell-command literal) has the identical child structure as `string`,
+// `regex`, and `delimited_symbol` -- escape_sequence, interpolation,
+// string_content -- per tree-sitter-ruby's own node-types.json. It sat in
+// CODE_TYPES, not literalTypes, and the completeness check above passed
+// anyway: CODE_TYPES is still just a set of names to that check, and
+// subshell's name was in it. Verified live before the fix: `` cmd =
+// `echo DANGEROUS_SECRET_TOKEN` `` masked to itself, unchanged. This is
+// red-before-green for the correctness check itself: run against
+// CODE_TYPES as it stood with subshell still in it, findMisclassifiedCodeTypes
+// must report subshell, unprompted, the same way the completeness check's
+// own delimited_symbol proof works above.
+test("findMisclassifiedCodeTypes reports subshell when it is left in ruby's CODE_TYPES (Finding 1, red before green)", () => {
+  const rubySpec = GRAMMAR_SPECS[".rb"];
+  const nodeTypes = loadNodeTypes(rubySpec.packageName, NODE_TYPES_SUBPATH[".rb"]);
+  const brokenCodeTypes = new Set([...CODE_TYPES[".rb"], "subshell"]);
+  const flagged = findMisclassifiedCodeTypes(nodeTypes, brokenCodeTypes, CONTENT_SHAPED_MARKERS[".rb"], CORRECTNESS_EXCEPTIONS[".rb"]);
+  assert.ok(flagged.includes("subshell"), "a literal misfiled into CODE_TYPES is reported, not silently accepted");
+});
 
 for (const [ext, rootType] of Object.entries(ROOT_LITERAL_TYPE)) {
   test(`removing the root literal type ${JSON.stringify(rootType)} from ${ext}'s config is caught (proof for all seven languages, including the case that passed silently before)`, () => {

@@ -23,6 +23,16 @@
 // identifier along with the quotes around it, which is exactly the kind of
 // live code this project exists to keep mutable and readable. Recursing
 // one level deeper, into the interpolation, keeps it code.
+//
+// The walk itself is driven by PYTHON_CONFIG below, a plain data object,
+// not a chain of `if (node.type === "...")` branches: a prior round of
+// review found tests/tree-sitter-node-types-conformance.test.ts checking
+// its own hand-typed copy of what this file's markNode did, instead of
+// checking markNode itself, and that copy went stale the moment
+// format_specifier's real handling was removed here and left untouched
+// there. PYTHON_CONFIG is exported and imported directly by that test now,
+// so there is exactly one place that says what Python's walk classifies,
+// not two that can drift apart.
 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -45,60 +55,91 @@ function fill(kinds: Uint8Array, start: number, end: number, value: number): voi
 }
 
 /**
- * Marks `node`'s span in `kinds`. Everything starts CODE (see `classify`),
- * so this only ever narrows: a `comment` or a `string` node's whole span
- * becomes LITERAL, a string's own quote punctuation becomes DELIMITER, and
- * an interpolation inside a string is reopened to CODE and walked again,
- * because it can itself contain another string, another comment is not
- * legal there but another interpolation is, and so on.
+ * Python's own answer to src/tree-sitter-grammars.ts's GrammarConfig,
+ * plus one bucket the other six grammars never need: `delimiterTypes`.
+ * Every other grammar here leaves a string's own quote anonymous (no
+ * grammar-rule name at all), so its wholesale LITERAL fill blanks the
+ * quote along with the text. tree-sitter-python instead gives the quote
+ * real named node types, `string_start` and `string_end` -- an f-string's
+ * own `f"` prefix is part of that span too -- so those two need a third
+ * outcome, visible-but-not-code, instead of being folded into either
+ * LITERAL or CODE.
+ *
+ * This exists, and is exported, so this file's own hardcoded classification
+ * is a single data object instead of a set of `if (node.type === ...)`
+ * branches scattered through markNode: tests/tree-sitter-node-types
+ * -conformance.test.ts imports PYTHON_CONFIG directly instead of keeping
+ * its own hand-typed copy, so a change here is a change to what that test
+ * checks, not two edits that can drift apart. That is the gap a prior
+ * round of review found: the test's old PYTHON_MODEL was retyped by hand
+ * from what markNode did, and a change here (removing format_specifier's
+ * handling) left that copy untouched and the test still green.
  */
-function markNode(node: TSNode, kinds: Uint8Array): void {
-  if (node.type === "comment") {
-    fill(kinds, node.startIndex, node.endIndex, LITERAL);
-    return;
-  }
-  if (node.type === "string") {
+export interface PythonGrammarConfig {
+  literalTypes: ReadonlySet<string>;
+  contentTypes: ReadonlySet<string>;
+  delimiterTypes: ReadonlySet<string>;
+}
+
+/**
+ * comment: a `#` line comment, blanked wholesale, no named children.
+ *
+ * string: covers every quoted form (`"..."`, `'''...'''`, `f"..."`,
+ * `r"..."`, `b"..."`, and combinations), all one node type in this
+ * grammar. string_content and escape_sequence, its own plain-text
+ * children, stay blanked; string_start/string_end (the quote, and any
+ * `f`/`r`/`b` prefix) go to DELIMITER instead, visible but not code; an
+ * interpolation child (an f-string's `{expr}`) is reopened as code.
+ *
+ * format_specifier: an f-string replacement field's `:...` suffix, e.g.
+ * the `>` fill character and width digits in `f"{x:>10}"`, or `.2f` in
+ * `f"{x:.2f}"`. Most of that suffix is static text tree-sitter-python
+ * does not break out into its own child node at all -- it is just part
+ * of format_specifier's own span -- so leaving it unhandled left it CODE
+ * by this walk's own generic-recursion default, and a fake format spec
+ * like `f"{x:DANGEROUS}"` read straight through the mask. The one part of
+ * a format specifier that is real code is a nested replacement field
+ * inside it, `{width}` in `f"{x:>{width}}"`, tree-sitter's own
+ * `format_expression`, reopened the same way a string's own
+ * `interpolation` child is.
+ */
+export const PYTHON_CONFIG: PythonGrammarConfig = {
+  literalTypes: new Set(["comment", "string", "format_specifier"]),
+  contentTypes: new Set(["string_content", "escape_sequence"]),
+  delimiterTypes: new Set(["string_start", "string_end"]),
+};
+
+/**
+ * Marks `node`'s span in `kinds`. Everything starts CODE (see `classify`),
+ * so this only ever narrows: a type in `config.literalTypes` gets its
+ * whole span filled LITERAL, then each of its own named children is
+ * either left LITERAL (a content type), turned DELIMITER (a delimiter
+ * type), or reopened to CODE and walked again (anything else -- an
+ * interpolation or a nested format expression, most often, which can
+ * itself contain another string, another comment is not legal there but
+ * another interpolation is, and so on). This is the same walk
+ * src/tree-sitter-language-service.ts's markNode uses for the other six
+ * grammars, generalised with the one extra DELIMITER outcome Python's own
+ * named quote-punctuation types need and the other six do not.
+ */
+function markNode(node: TSNode, kinds: Uint8Array, config: PythonGrammarConfig): void {
+  if (config.literalTypes.has(node.type)) {
     fill(kinds, node.startIndex, node.endIndex, LITERAL);
     for (const child of node.children) {
       if (!child) continue;
-      if (child.type === "interpolation") {
-        fill(kinds, child.startIndex, child.endIndex, CODE);
-        markNode(child, kinds);
-      } else if (child.type === "string_start" || child.type === "string_end") {
+      if (!child.isNamed) continue; // anonymous punctuation: stays LITERAL
+      if (config.delimiterTypes.has(child.type)) {
         fill(kinds, child.startIndex, child.endIndex, DELIMITER);
+        continue;
       }
-      // Any other child (string_content, escape_sequence) stays LITERAL,
-      // from the whole-span fill above: there is nothing to recurse into.
-    }
-    return;
-  }
-  if (node.type === "format_specifier") {
-    // An f-string replacement field's `:...` suffix, e.g. the `>` fill
-    // character and width digits in `f"{x:>10}"`, or `.2f` in `f"{x:.2f}"`.
-    // Most of that suffix is static text tree-sitter-python does not
-    // break out into its own child node at all -- it is just part of
-    // format_specifier's own span -- so leaving format_specifier
-    // unhandled here left it CODE by the same default this file's own
-    // generic recursion gives everything, and a fake format spec like
-    // `f"{x:DANGEROUS}"` read straight through the mask. The one part of
-    // a format specifier that is real code is a nested replacement field
-    // inside it, `{width}` in `f"{x:>{width}}"`, tree-sitter's own
-    // `format_expression`, which stays reopened the same way a string's
-    // own `interpolation` child does.
-    fill(kinds, node.startIndex, node.endIndex, LITERAL);
-    for (const child of node.children) {
-      if (!child) continue;
-      if (child.type === "format_expression") {
-        fill(kinds, child.startIndex, child.endIndex, CODE);
-        markNode(child, kinds);
-      }
-      // The `:` itself and any other child stay LITERAL from the
-      // whole-span fill above.
+      if (config.contentTypes.has(child.type)) continue; // plain text: stays LITERAL
+      fill(kinds, child.startIndex, child.endIndex, CODE);
+      markNode(child, kinds, config);
     }
     return;
   }
   for (const child of node.children) {
-    if (child) markNode(child, kinds);
+    if (child) markNode(child, kinds, config);
   }
 }
 
@@ -124,7 +165,7 @@ function classify(parser: Parser, text: string): Uint8Array {
     kinds.fill(LITERAL);
     return kinds;
   }
-  markNode(tree.rootNode, kinds);
+  markNode(tree.rootNode, kinds, PYTHON_CONFIG);
   return kinds;
 }
 

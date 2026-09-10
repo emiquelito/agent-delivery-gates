@@ -264,6 +264,46 @@ const cases: DifferentialCase[] = [
     endData,
     blank(endData, "\nDANGEROUS raw text here\n"),
   ),
+  disagree(
+    "a subshell literal with no interpolation, `` `echo assert_this` ``: regex reads it as a JS-style template literal, tree-sitter reads it as Ruby's own subshell",
+    // Finding 1: subshell (the backtick and `%x{}` shell-command literal)
+    // has the identical child structure as `string`, `regex`, and
+    // `delimited_symbol` -- escape_sequence, interpolation, string_content
+    // -- and was left in CODE_TYPES, ordinary code, instead of
+    // literalTypes, in the very commit that moved those three out for
+    // having those exact children. Verified live before this fix: `` cmd =
+    // `echo DANGEROUS_SECRET_TOKEN` `` masked to itself, unchanged.
+    // Regex reasoning: this project's own scanner already treats a
+    // backtick as a JS-style template literal's own delimiter (see
+    // src/code-mask.ts), so it reads this the same way it would read any
+    // JS template: the backticks stay visible as delimiters, and
+    // everything between them -- with no `${...}` for it to recognise --
+    // is blanked whole.
+    // tree-sitter reasoning, after the fix: subshell is now in
+    // literalTypes, so its whole span, both backticks included (anonymous
+    // punctuation, part of the wholesale fill), is blanked; there is no
+    // interpolation child here to reopen.
+    "cmd = `echo assert_this`\n",
+    blank("cmd = `echo assert_this`\n", "echo assert_this"),
+    blank("cmd = `echo assert_this`\n", "`echo assert_this`"),
+  ),
+  disagree(
+    "a subshell literal with an interpolation, `` `echo #{x}` ``: regex blanks the whole thing since it does not know Ruby's #{} form, tree-sitter keeps the interpolation",
+    // Same subshell fix as above, exercising the interpolation child
+    // subshell shares with `string` and `regex`: DANGEROUS stays visible
+    // as code once subshell is correctly classified.
+    // Regex reasoning: still reading this as a JS template literal, this
+    // scanner only ever recognises `${...}` as an interpolation opener,
+    // never Ruby's own `#{...}`, so `#{DANGEROUS}` is just more literal
+    // text between the backticks to it, blanked along with "echo ".
+    // tree-sitter reasoning, after the fix: `#{DANGEROUS}` is subshell's
+    // own interpolation child, reopened to code the same way it already
+    // is inside a plain `string`; "echo " (string_content) stays blanked
+    // along with both backticks.
+    "cmd = `echo #{DANGEROUS}`\n",
+    blank("cmd = `echo #{DANGEROUS}`\n", "echo #{DANGEROUS}"),
+    blank(blank("cmd = `echo #{DANGEROUS}`\n", "`echo "), "`"),
+  ),
 ];
 
 runDifferentialCorpus(
