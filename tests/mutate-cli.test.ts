@@ -943,17 +943,31 @@ test("a hung baseline run is timed out, reported plainly, and leaves no descenda
 test("a mutation that floods stdout is killed well before its timeout, not let run unbounded", () => {
   // shouldFlood(0) is false on the original `<` (0 < 0), so the baseline
   // exits at once. Mutating `<` to `<=` makes it true (0 <= 0), and the
-  // mutated run floods stdout forever, through a real `yes` subprocess so
-  // the flood is not throttled by this Node process's own event loop.
-  // With no cap that run has nothing to stop it short of the timeout;
-  // with a cap it is killed within a couple of seconds of crossing it,
-  // long before a generous timeout fires.
+  // mutated run floods stdout through a real subprocess (node itself, the
+  // same portable stand-in used elsewhere in this file, not the Unix-only
+  // `yes`) so the flood is not throttled by this Node process's own event
+  // loop and still works on Windows. That subprocess writes a single chunk
+  // well past the 64 MB cap -- large enough that even a generous margin of
+  // error in the cap still gets crossed -- and sets process.exitCode
+  // instead of calling process.exit(), so the write reaches the pipe
+  // before the process ends instead of being truncated. With no cap that
+  // run has nothing to stop it short of the timeout; with a cap it is
+  // killed within a couple of seconds of crossing it, long before a
+  // generous timeout fires. The spawnSync result is checked: a flood that
+  // never started must fail loudly, not read as a survived mutation.
   const dir = makeRepo({
     "src/gate.mjs": "export function shouldFlood(n) {\n  return n < 0;\n}\n",
     "flood-run.mjs": `import { shouldFlood } from "./src/gate.mjs";
 import { spawnSync } from "node:child_process";
 if (shouldFlood(0)) {
-  spawnSync("yes", [], { stdio: "inherit" });
+  const result = spawnSync(
+    process.execPath,
+    ["-e", "process.stdout.write('0123456789'.repeat(10_000_000)); process.exitCode = 1;"],
+    { stdio: "inherit" },
+  );
+  if (result.error) {
+    throw new Error(\`flood subprocess failed to start: \${result.error.message}\`);
+  }
 } else {
   process.exit(0);
 }
