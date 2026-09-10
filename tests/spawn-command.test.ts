@@ -23,7 +23,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { spawnCommand } from "../src/spawn-command.ts";
+import { spawnCommand, killTree } from "../src/spawn-command.ts";
 
 function isAlive(pid: number): boolean {
   try {
@@ -242,5 +242,92 @@ worker.on("exit", (code) => process.exit(code ?? 0));
 
     const survivors = await waitForNoneAlive([workerPid], 5_000);
     assert.deepEqual(survivors, [], "the worker outlived a real SIGHUP sent to this process");
+  },
+);
+
+// --- Windows silent-failure fix: the kill must report what it did --------
+
+// Three rounds of a real Windows run reporting "outlived after a real
+// SIGINT" with no error traced back to killTree's Windows branch running
+// inside a bare `catch {}` around a call whose stdio was set to "ignore".
+// Nothing could get out: not a PowerShell error (discarded by stdio), and
+// Windows PowerShell 5.1's own `-Command` mode does not reliably turn an
+// internal script error into a non-zero exit code either, so execFileSync
+// had nothing to throw on. The fix makes the script report its own
+// outcome on stdout and threads that report onto the result (`treeKill`),
+// instead of the caller having to infer success from whether processes
+// happened to die.
+//
+// This suite runs on Linux, where killTree's `win32` branch cannot be
+// exercised end-to-end -- there is no Windows process tree here to kill.
+// What these two tests can and do prove without one: (1) the POSIX
+// branch's own report structure, which the fix must not disturb, since the
+// POSIX path is unchanged by design; and (2) that when the win32 branch's
+// underlying command cannot even be launched, the failure now comes back
+// as a populated `treeKill.error` and a message on this process's own
+// stderr, instead of vanishing the way it did in production.
+
+test("a timeout on POSIX reports a tree-kill that was attempted, with no enumerated pids", { skip: process.platform === "win32" }, async () => {
+  const result = await spawnCommand("node -e \"setTimeout(() => {}, 10_000)\"", {
+    cwd: process.cwd(),
+    timeoutMs: 200,
+  });
+  assert.equal(result.timedOut, true);
+  assert.ok(result.treeKill, "expected a treeKill report once a kill was attempted");
+  assert.equal(result.treeKill?.platform, process.platform);
+  assert.equal(result.treeKill?.attempted, true);
+  assert.equal(result.treeKill?.matchedPids, null, "POSIX does not enumerate what it killed, only that it tried");
+  assert.equal(result.treeKill?.error, null, "a POSIX group kill that succeeds (or finds the group already gone) is not an error");
+});
+
+test(
+  "killTree's win32 branch reports a launch failure instead of staying silent, when powershell.exe cannot run",
+  { skip: process.platform === "win32" ? "this test forces the win32 branch on a non-Windows host on purpose" : false },
+  (t) => {
+    const realPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    t.after(() => {
+      Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+    });
+
+    // killTree's win32 branch inherits this process's own env, unmodified,
+    // for its execFileSync call. Clearing PATH for the duration of this
+    // test is what actually forces the launch to fail here: some hosts
+    // running this suite (this one included, under WSL) can reach a real
+    // powershell.exe via interop, which would make the call succeed
+    // instead of exercising the failure path this test is for.
+    const realPath = process.env.PATH;
+    process.env.PATH = "";
+    t.after(() => {
+      if (realPath === undefined) delete process.env.PATH;
+      else process.env.PATH = realPath;
+    });
+
+    const realStderrWrite = process.stderr.write.bind(process.stderr);
+    let stderrOutput = "";
+    process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      stderrOutput += chunk.toString();
+      return (realStderrWrite as (...a: unknown[]) => boolean)(chunk, ...rest);
+    }) as typeof process.stderr.write;
+    t.after(() => {
+      process.stderr.write = realStderrWrite;
+    });
+
+    // The pid itself is never used for anything but string interpolation
+    // into the script before the launch fails, so an arbitrary value is
+    // enough.
+    const report = killTree(999_999);
+
+    assert.equal(report.platform, "win32");
+    assert.equal(report.attempted, true);
+    assert.equal(report.matchedPids, null);
+    assert.ok(
+      report.error && /powershell/i.test(report.error),
+      `expected a populated error mentioning powershell, got: ${JSON.stringify(report.error)}`,
+    );
+    assert.ok(
+      /Windows process-tree kill.*did not complete cleanly/.test(stderrOutput),
+      `expected a human-readable line on stderr, got: ${JSON.stringify(stderrOutput)}`,
+    );
   },
 );

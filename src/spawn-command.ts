@@ -106,6 +106,46 @@ export interface SpawnCommandResult {
   /** Set when the command could not even be started (e.g. `cwd` does not
    * exist). Distinct from a command that started and exited non-zero. */
   spawnError?: string;
+  /** Set exactly when a tree-kill was actually attempted (timeout, output
+   * overflow, or a forwarded signal). See killTree's own doc comment for
+   * why this exists: a best-effort kill that cannot report anything is
+   * untestable and undebuggable, which is what three rounds of a silent
+   * Windows failure already cost this project. */
+  treeKill?: TreeKillReport;
+}
+
+/** What killTree actually did, so a caller -- or a test -- can tell a kill
+ * that ran and matched nothing apart from a kill that never ran at all,
+ * instead of inferring either one from whether processes happened to die.
+ *
+ * On POSIX this is almost always `{ attempted: true, matchedPids: null,
+ * error: null }`: the group kill is one syscall, it does not enumerate its
+ * members, and an error there (ESRCH because the group is already gone) is
+ * success, not a failure worth reporting -- see killTree's POSIX branch.
+ * `matchedPids` is only ever populated on win32, where the reconstruction
+ * actually knows which pids it found and targeted.
+ */
+export interface TreeKillReport {
+  platform: NodeJS.Platform;
+  /** True once the OS was actually asked to end something: a kill syscall
+   * issued on POSIX, or the PowerShell reconstruction script launched and
+   * ran to completion (successfully or not) on win32. */
+  attempted: boolean;
+  /** win32 only: the pids the reconstruction found descended from the
+   * target (including the target's own pid) and asked Stop-Process to end,
+   * once the script ran far enough to know. Null when it did not get that
+   * far (see `error`) or on POSIX, where nothing is enumerated. An empty
+   * array is a real, meaningful result: the script ran and did find no
+   * live descendants, as opposed to `null`, which means it could not find
+   * out. */
+  matchedPids: number[] | null;
+  /** Set whenever the kill could not be confirmed to have even run
+   * cleanly: powershell.exe is missing, refused the script, the script
+   * itself threw before it could report, or the 5s bound cut it off.
+   * `null` means the mechanism ran to completion and reported normally
+   * (which, on win32, still means the loop below already wrote this to
+   * stderr for a human to see even without a test watching). */
+  error: string | null;
 }
 
 /** Kills the command's whole descendant tree. `pid` is the pid handed
@@ -233,7 +273,12 @@ export interface SpawnCommandResult {
  * bounded, partial orphan cleanup, never less than doing nothing; a
  * timeout throws, which the catch below treats the same as any other
  * failure of this call. */
-function killTree(pid: number): void {
+/** Exported for tests only, so killTree's own reporting can be exercised
+ * directly (including forcing the win32 branch on a non-Windows host,
+ * where actually spawning and killing a real process tree the way
+ * spawnCommand does is not the point -- see spawn-command.test.ts).
+ * spawnCommand is still the only caller in production code. */
+export function killTree(pid: number): TreeKillReport {
   if (process.platform === "win32") {
     // One CIM snapshot of every process's id and parent id, a
     // breadth-first walk forward from `pid` through those parent ids
@@ -243,35 +288,117 @@ function killTree(pid: number): void {
     // SilentlyContinue on Stop-Process means a pid that exits between the
     // snapshot and the kill (or was never real to begin with) does not
     // abort the rest of the set.
+    //
+    // Three rounds of this failing silently on a real Windows machine
+    // turned out to have a shared root cause, and it was not the
+    // reconstruction logic: `stdio: "ignore"` discarded whatever
+    // PowerShell would have written to stderr, and Windows PowerShell
+    // 5.1's own well-documented behaviour under `-Command` made it worse
+    // -- an unhandled error inside a `-Command` script does not reliably
+    // turn into a non-zero process exit code the way it does under
+    // `-File`, so execFileSync had nothing to throw on either. Confirmed
+    // directly against a real Windows PowerShell 5.1 (via WSL interop):
+    // `Get-Process -Id <gone> -ErrorAction SilentlyContinue` -- an
+    // operation that reports no error at all -- still exits 1, the same
+    // ambiguous non-zero this module used to treat as "the kill failed."
+    // Whatever went wrong in production -- Get-CimInstance failing,
+    // Stop-Process being denied, an actual bug in the script -- had no
+    // path out of the child process at all. The fix has three parts: the
+    // script now reports its own outcome on stdout instead of relying on
+    // the exit code, the outer catch below can no longer be reached by an
+    // ordinary in-script failure (only by powershell.exe itself being
+    // unlaunchable, refused, or timing out), and a human-readable line
+    // goes to this process's own stderr whenever the report carries an
+    // error, so a real run tells you it failed instead of just leaving
+    // processes behind. See TreeKillReport for the structured half of
+    // this, which is what lets a test assert the kill actually ran and
+    // matched something instead of inferring it from whether processes
+    // happened to die.
+    //
+    // The reconstruction algorithm itself was checked directly against a
+    // real Windows PowerShell 5.1, in exactly the form production hit:
+    // a process (cmd.exe) that had already exited by the time the script
+    // ran, with two live descendants (conhost.exe and a worker) still
+    // carrying its pid as their ParentProcessId. Seeding the target set
+    // with the dead parent's pid and walking forward found both live
+    // descendants and Stop-Process ended both. The walk was not the bug.
+    //
+    // The seed key is written as `[int]${pid}` instead of a bare number.
+    // The leading hypothesis for the type-mismatch theory -- that a bare
+    // integer hashtable key comes back typed as a string while
+    // `[int]$row.ParentProcessId` is an int, so the very first lookup
+    // fails -- does not hold: also confirmed directly against real
+    // Windows PowerShell 5.1, `(@{ 424242 = $true }).Keys[0].GetType()`
+    // returns `System.Int32`, the same type `[int]` casts to. (This also
+    // matches PowerShell/PowerShell#15925, which is specifically about a
+    // bareword key that *cannot* parse as a number falling through to a
+    // parse error instead of becoming a string -- the opposite of a
+    // number silently becoming a string.) The explicit cast here is
+    // defensive, not a fix for a confirmed bug: it costs nothing and
+    // removes any doubt instead of resting on that reasoning alone.
     const script = `
-$targets = @{ ${pid} = $true }
-$rows = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId
-$changed = $true
-while ($changed) {
-  $changed = $false
-  foreach ($row in $rows) {
-    $child = [int]$row.ProcessId
-    $parent = [int]$row.ParentProcessId
-    if ($targets.ContainsKey($parent) -and -not $targets.ContainsKey($child)) {
-      $targets[$child] = $true
-      $changed = $true
+$ErrorActionPreference = 'Stop'
+try {
+  $targets = @{ [int]${pid} = $true }
+  $rows = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($row in $rows) {
+      $child = [int]$row.ProcessId
+      $parent = [int]$row.ParentProcessId
+      if ($targets.ContainsKey($parent) -and -not $targets.ContainsKey($child)) {
+        $targets[$child] = $true
+        $changed = $true
+      }
     }
   }
-}
-foreach ($id in $targets.Keys) {
-  Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+  $matched = @($targets.Keys)
+  foreach ($id in $matched) {
+    Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+  }
+  Write-Output ("ADG-KILLTREE-OK " + ($matched -join ","))
+} catch {
+  Write-Output ("ADG-KILLTREE-ERROR " + $_.Exception.Message)
 }
 `;
+    let stdout = "";
+    let launchError: string | null = null;
     try {
-      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-        stdio: "ignore",
+      stdout = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        stdio: ["ignore", "pipe", "pipe"],
         timeout: 5000,
+        encoding: "utf8",
       });
-    } catch {
-      // best effort; nothing to do if the process already exited or the
-      // call above timed out
+    } catch (err) {
+      // powershell.exe itself could not be launched, was refused (e.g. an
+      // execution policy that somehow does apply), or hit the 5s bound.
+      // Node attaches whatever the child had written before it died to
+      // the thrown error, so a script that got partway through before
+      // timing out is still visible here.
+      const asExecError = err as NodeJS.ErrnoException & { stdout?: string | Buffer; stderr?: string | Buffer };
+      if (typeof asExecError.stdout === "string") stdout = asExecError.stdout;
+      launchError = `could not run powershell.exe: ${asExecError.message}`;
     }
-    return;
+    let matchedPids: number[] | null = null;
+    let scriptError: string | null = null;
+    const ok = /ADG-KILLTREE-OK ([0-9,]*)/.exec(stdout);
+    const failed = /ADG-KILLTREE-ERROR (.*)/.exec(stdout);
+    if (ok) {
+      matchedPids = ok[1].length > 0 ? ok[1].split(",").map(Number) : [];
+    } else if (failed) {
+      scriptError = failed[1].trim();
+    } else if (launchError === null) {
+      // The process exited 0 (or execFileSync would have thrown) but
+      // wrote neither marker: exactly the silent-success failure mode
+      // that made three rounds of this so hard to debug.
+      scriptError = "the kill script produced no recognizable output";
+    }
+    const error = launchError ?? (scriptError !== null ? `the kill script reported: ${scriptError}` : null);
+    if (error !== null) {
+      process.stderr.write(`adg: Windows process-tree kill for pid ${pid} did not complete cleanly: ${error}\n`);
+    }
+    return { platform: "win32", attempted: true, matchedPids, error };
   }
   try {
     // The negative pid addresses the whole process group spawn() made
@@ -281,9 +408,12 @@ foreach ($id in $targets.Keys) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
-      // already gone
+      // already gone, which is success, not a failure worth reporting --
+      // see TreeKillReport's own doc comment for why POSIX never
+      // populates `error`.
     }
   }
+  return { platform: process.platform, attempted: true, matchedPids: null, error: null };
 }
 
 /**
@@ -331,11 +461,12 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
     // cancels the timeout timer, instead of leaving it to fire later and
     // attempt a second kill of its own.
     let killAttempted = false;
+    let treeKillReport: TreeKillReport | undefined;
     const attemptKill = (): void => {
       if (killAttempted) return;
       killAttempted = true;
       clearTimer();
-      if (child.pid !== undefined) killTree(child.pid);
+      if (child.pid !== undefined) treeKillReport = killTree(child.pid);
     };
 
     // A real Ctrl-C (or an external SIGTERM) reaches this tool's own
@@ -371,6 +502,7 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
         killedBySignal: !timedOut && !outputOverflowed ? signal : null,
       };
       if (spawnError !== undefined) result.spawnError = spawnError;
+      if (treeKillReport !== undefined) result.treeKill = treeKillReport;
       settle(result);
     };
 
