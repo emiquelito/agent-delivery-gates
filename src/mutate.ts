@@ -15,7 +15,14 @@
 // src/code-mask.ts now, because src/test-diff-separator.ts needs it too and
 // this file already imports from that one.
 
-import { languageServiceFor, warmLanguageServices, hadLanguageLoadFailure, IDENT_CHAR } from "./code-mask.ts";
+import {
+  languageServiceFor,
+  warmLanguageServices,
+  hadLanguageLoadFailure,
+  hadGrammarAbsent,
+  hadGenuineGrammarLoadFailure,
+  IDENT_CHAR,
+} from "./code-mask.ts";
 import { classifyTestPath, isCommentLine, isImportLine, type RuleSet } from "./test-diff-separator.ts";
 import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
@@ -535,6 +542,33 @@ export function grammarUnavailablePaths(paths: readonly string[]): string[] {
 }
 
 /**
+ * The subset of `grammarUnavailablePaths` whose grammar was never
+ * installed at all -- `hadGrammarAbsent` in src/code-mask.ts says which.
+ * Mutation refuses on a path here the same way it refuses on any
+ * grammar-unavailable path (there is no trustworthy mask to plan against
+ * either way), but the reason is not a defect: the devDependency simply
+ * was not installed, ordinary for an adopter who followed this project's
+ * own quickstart. Reported separately so the run's own message can say
+ * that plainly, instead of the broken-install wording that used to cover
+ * both.
+ */
+export function grammarAbsentPaths(paths: readonly string[]): string[] {
+  return paths.filter((path) => hadGrammarAbsent(extensionOf(path))).sort();
+}
+
+/**
+ * The subset of `grammarUnavailablePaths` whose grammar package resolved
+ * but the load still failed -- `hadGenuineGrammarLoadFailure` in
+ * src/code-mask.ts says which: a corrupt wasm file, an ABI mismatch, a
+ * truncated install. Unlike `grammarAbsentPaths`, this is a real problem
+ * with this environment or this gate, worth the "failed to load" wording
+ * the report keeps for exactly this case.
+ */
+export function grammarGenuineFailurePaths(paths: readonly string[]): string[] {
+  return paths.filter((path) => hadGenuineGrammarLoadFailure(extensionOf(path))).sort();
+}
+
+/**
  * Warms every mutable path's language service, then splits them into
  * `trustworthy` (safe to hand to `planMutations`) and `grammarUnavailable`
  * (must not be mutated at all: see `grammarUnavailablePaths` above). This
@@ -678,27 +712,40 @@ export interface ReportInput {
    * language this tool covers. */
   unsupportedFiles?: string[];
   /** Candidate files skipped before planning because their tree-sitter
-   * grammar was attempted and failed to load: see grammarUnavailablePaths
-   * above. This tool does have an operator table for these -- unlike
-   * `unsupportedFiles` -- but no trustworthy mask to apply it through, so
-   * mutating one would use the regex scanner's C-family assumptions on a
-   * language it was never written for. Reported by name and folded into
-   * exit 3 for the same reason unsupportedFiles is: a run over files
-   * whose grammar this process could not load must not print the same
-   * report as a run that mutated everything and found no survivors.
-   * Absent or empty when every candidate's grammar loaded, or needed
+   * grammar was attempted and its devDependency was never installed: see
+   * grammarAbsentPaths above. This tool does have an operator table for
+   * these -- unlike `unsupportedFiles` -- but no trustworthy mask to apply
+   * it through, so mutating one would use the regex scanner's C-family
+   * assumptions on a language it was never written for. Reported by name
+   * and folded into exit 3 the same way `grammarFailedFiles` is: a run
+   * over files whose grammar this process could not load must not print
+   * the same report as a run that mutated everything and found no
+   * survivors. Kept apart from `grammarFailedFiles` -- both feed the same
+   * refusal to mutate, but they are told apart in the report because they
+   * deserve different wording: this one is not a defect anywhere, just a
+   * devDependency an adopter following this project's own quickstart never
+   * installed. Absent or empty when every candidate's grammar loaded, or
+   * needed none. */
+  grammarAbsentFiles?: string[];
+  /** Candidate files skipped before planning because their tree-sitter
+   * grammar was attempted, the package resolved, and the load still
+   * failed: see grammarGenuineFailurePaths above. Unlike
+   * `grammarAbsentFiles`, this is a real problem worth being loud about --
+   * a corrupt wasm file, an ABI mismatch, a truncated install. Reported by
+   * name and folded into exit 3 for the same reason `grammarAbsentFiles`
+   * is. Absent or empty when every candidate's grammar loaded, or needed
    * none. */
-  grammarUnavailableFiles?: string[];
+  grammarFailedFiles?: string[];
   /** Candidate files skipped before planning because their extension is
    * not a language this tool has ever built a grammar or an operator
    * table for: see unrecognizedLanguagePaths above. Reported by name so
    * nothing a run was asked to consider vanishes from the report, but
-   * deliberately NOT folded into exit 3 -- unlike unsupportedFiles and
-   * grammarUnavailableFiles above, this tool never claimed it could
-   * measure these, so their presence is not a failure to measure
-   * something it should have. Absent or empty when every candidate's
-   * language was either mutable, recognised-but-unsupported, or common
-   * enough to stay quiet about entirely. */
+   * deliberately NOT folded into exit 3 -- unlike unsupportedFiles,
+   * grammarAbsentFiles, and grammarFailedFiles above, this tool never
+   * claimed it could measure these, so their presence is not a failure to
+   * measure something it should have. Absent or empty when every
+   * candidate's language was either mutable, recognised-but-unsupported,
+   * or common enough to stay quiet about entirely. */
   unrecognizedFiles?: string[];
 }
 
@@ -720,7 +767,9 @@ function joinClauses(parts: readonly string[]): string {
 export function formatReportText(input: ReportInput): string {
   const summary = summarize(input.results);
   const unsupportedFiles = input.unsupportedFiles ?? [];
-  const grammarUnavailableFiles = input.grammarUnavailableFiles ?? [];
+  const grammarAbsentFiles = input.grammarAbsentFiles ?? [];
+  const grammarFailedFiles = input.grammarFailedFiles ?? [];
+  const grammarUnavailableFiles = [...grammarAbsentFiles, ...grammarFailedFiles];
   const unrecognizedFiles = input.unrecognizedFiles ?? [];
   const lines: string[] = [];
   lines.push(`Command: ${input.command}`);
@@ -771,10 +820,16 @@ export function formatReportText(input: ReportInput): string {
     for (const path of unsupportedFiles) lines.push(`  ${path}`);
   }
 
-  if (grammarUnavailableFiles.length > 0) {
+  if (grammarAbsentFiles.length > 0) {
     lines.push("");
-    lines.push(`Grammar failed to load for these (${grammarUnavailableFiles.length}):`);
-    for (const path of grammarUnavailableFiles) lines.push(`  ${path}`);
+    lines.push(`Grammar not installed for these (${grammarAbsentFiles.length}):`);
+    for (const path of grammarAbsentFiles) lines.push(`  ${path}`);
+  }
+
+  if (grammarFailedFiles.length > 0) {
+    lines.push("");
+    lines.push(`Grammar failed to load for these (${grammarFailedFiles.length}):`);
+    for (const path of grammarFailedFiles) lines.push(`  ${path}`);
   }
 
   if (unrecognizedFiles.length > 0) {
@@ -794,7 +849,12 @@ export function formatReportText(input: ReportInput): string {
     const clauses: string[] = [];
     if (unmeasured.length > 0) clauses.push(`${unmeasured.length} never got a verdict`);
     if (unsupportedFiles.length > 0) clauses.push(`${unsupportedFiles.length} file(s) had no operator set for their language`);
-    clauses.push(`${grammarUnavailableFiles.length} file(s) could not be trusted because their grammar failed to load`);
+    if (grammarAbsentFiles.length > 0) {
+      clauses.push(`${grammarAbsentFiles.length} file(s) could not be trusted because their grammar is not installed`);
+    }
+    if (grammarFailedFiles.length > 0) {
+      clauses.push(`${grammarFailedFiles.length} file(s) could not be trusted because their grammar failed to load`);
+    }
     lines.push(`No mutation survived, but ${joinClauses(clauses)}: all of that is unmeasured (exit 3).`);
   } else if (unmeasured.length > 0 && unsupportedFiles.length > 0) {
     lines.push(
@@ -848,7 +908,8 @@ export function formatReportJson(input: ReportInput): string {
       summary: summarize(input.results),
       results: input.results,
       unsupportedFiles: input.unsupportedFiles ?? [],
-      grammarUnavailableFiles: input.grammarUnavailableFiles ?? [],
+      grammarAbsentFiles: input.grammarAbsentFiles ?? [],
+      grammarFailedFiles: input.grammarFailedFiles ?? [],
       unrecognizedFiles: input.unrecognizedFiles ?? [],
     },
     null,

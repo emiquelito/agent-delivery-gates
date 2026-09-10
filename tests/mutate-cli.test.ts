@@ -1331,11 +1331,16 @@ test("CRITICAL repro: with the Python grammar forced to fail, a Python docstring
     const report = JSON.parse(result.stdout) as {
       results: unknown[];
       planned: number;
-      grammarUnavailableFiles: string[];
+      grammarFailedFiles: string[];
+      grammarAbsentFiles: string[];
     };
     assert.deepEqual(report.results, [], "nothing was ever planned for this file, not even a survivor");
     assert.equal(report.planned, 0);
-    assert.deepEqual(report.grammarUnavailableFiles, ["lib/discount.py"]);
+    // ADG_TEST_FORCE_GRAMMAR_FAILURE forces the present-but-broken branch,
+    // never absence: see Finding 2's split of grammarUnavailableFiles into
+    // grammarAbsentFiles/grammarFailedFiles in src/mutate.ts.
+    assert.deepEqual(report.grammarFailedFiles, ["lib/discount.py"]);
+    assert.deepEqual(report.grammarAbsentFiles, []);
     assert.equal(result.status, 3, result.stdout);
     assert.equal(
       readFileSync(join(dir, "lib/discount.py"), "utf8"),
@@ -1378,8 +1383,8 @@ test("ADG_TEST_FORCE_GRAMMAR_FAILURE only forces the extensions it names: a Ruby
       ["--paths", "lib/discount.py", "lib/main.rb", "--command", "node -e 1", "--format", "json"],
       { ADG_TEST_FORCE_GRAMMAR_FAILURE: ".py" },
     );
-    const report = JSON.parse(result.stdout) as { grammarUnavailableFiles: string[]; unsupportedFiles: string[] };
-    assert.deepEqual(report.grammarUnavailableFiles, ["lib/discount.py"]);
+    const report = JSON.parse(result.stdout) as { grammarFailedFiles: string[]; unsupportedFiles: string[] };
+    assert.deepEqual(report.grammarFailedFiles, ["lib/discount.py"]);
     assert.deepEqual(report.unsupportedFiles, ["lib/main.rb"]);
   });
 });
@@ -1458,8 +1463,9 @@ test("once the grammar is back, the same file mutates only the real code, not th
   });
   withRepo(dir, () => {
     const result = runCli(dir, ["--paths", "lib/discount.py", "--command", "node -e 1", "--format", "json"]);
-    const report = JSON.parse(result.stdout) as { grammarUnavailableFiles: string[]; planned: number };
-    assert.deepEqual(report.grammarUnavailableFiles, []);
+    const report = JSON.parse(result.stdout) as { grammarAbsentFiles: string[]; grammarFailedFiles: string[]; planned: number };
+    assert.deepEqual(report.grammarAbsentFiles, []);
+    assert.deepEqual(report.grammarFailedFiles, []);
     assert.equal(report.planned, 3, "only the comparison, connective, and arithmetic in real code, not the docstring");
     assert.equal(readFileSync(join(dir, "lib/discount.py"), "utf8"), DOCSTRING_SOURCE);
   });

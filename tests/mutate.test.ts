@@ -550,7 +550,15 @@ test("a run with nothing selected and nothing to blame it on says plainly that n
   assert.doesNotMatch(report, /every break this tool made was caught/);
 });
 
-test("a grammar-unavailable file gets its own section and its own exit-3 explanation", () => {
+// Finding 2 (LOW, reviewed against commit 01b096a): `grammarUnavailableFiles`
+// used to be one undifferentiated list, and the report always said "Grammar
+// failed to load," even for a file whose grammar was simply never
+// installed -- ordinary for an adopter following this project's own
+// quickstart, not a defect. Split into `grammarAbsentFiles` and
+// `grammarFailedFiles` so the report tells a user which one actually
+// happened. The two tests below replace the old single
+// "a grammar-unavailable file gets its own section" test, one per reason.
+test("a grammar-absent file gets its own section and its own exit-3 explanation, worded as not installed", () => {
   const report = formatReportText({
     command: "npm test",
     baselineMs: 1000,
@@ -559,12 +567,31 @@ test("a grammar-unavailable file gets its own section and its own exit-3 explana
     planned: 0,
     attempted: 0,
     results: [],
-    grammarUnavailableFiles: ["lib/discount.py"],
+    grammarAbsentFiles: ["lib/discount.py"],
+  });
+  assert.match(report, /Grammar not installed for these \(1\):/);
+  assert.match(report, /lib\/discount\.py/);
+  assert.match(report, /1 file\(s\) could not be trusted because their grammar is not installed.*\(exit 3\)/);
+  assert.doesNotMatch(report, /No operator set for these/);
+  assert.doesNotMatch(report, /Grammar failed to load for these/);
+});
+
+test("a grammar-load-failed file gets its own section and its own exit-3 explanation, worded as failed to load", () => {
+  const report = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: [],
+    planned: 0,
+    attempted: 0,
+    results: [],
+    grammarFailedFiles: ["lib/discount.py"],
   });
   assert.match(report, /Grammar failed to load for these \(1\):/);
   assert.match(report, /lib\/discount\.py/);
   assert.match(report, /1 file\(s\) could not be trusted because their grammar failed to load.*\(exit 3\)/);
   assert.doesNotMatch(report, /No operator set for these/);
+  assert.doesNotMatch(report, /Grammar not installed for these/);
 });
 
 test("all three exit-3 reasons at once are joined into one sentence, and the existing two-reason wording is untouched", () => {
@@ -577,7 +604,7 @@ test("all three exit-3 reasons at once are joined into one sentence, and the exi
     attempted: 1,
     results: [resultWith("timeout")],
     unsupportedFiles: ["app/main.rb"],
-    grammarUnavailableFiles: ["lib/discount.py"],
+    grammarFailedFiles: ["lib/discount.py"],
   });
   assert.match(allThree, /No verdict on these \(1\):/);
   assert.match(allThree, /No operator set for these \(1\):/);

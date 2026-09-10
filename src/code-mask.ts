@@ -30,6 +30,9 @@
 // all they hold. For a test file where this is common, the fixture marker
 // (`adg-test-diff: fixtures`) is the answer, not this scanner.
 
+import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
 /** A character that may appear inside an identifier. */
@@ -408,18 +411,38 @@ export const regexLanguageService: LanguageService = {
 // it; every other language shares one generic loader
 // (loadTreeSitterLanguageService in src/tree-sitter-language-service.ts)
 // parameterised by that language's GrammarSpec.
-const TREE_SITTER_LOADERS: Readonly<Record<string, () => Promise<LanguageService>>> = {
-  ".py": async () => {
-    const { loadPythonLanguageService } = await import("./tree-sitter-python-service.ts");
-    return loadPythonLanguageService();
+/**
+ * One extension's loader, plus the names of every devDependency package it
+ * needs -- `web-tree-sitter`, the runtime every one of these seven
+ * languages shares, always included alongside the language's own grammar
+ * package. `isModuleAbsenceError` below resolves each of these
+ * independently of the failed import, to tell a package that was never
+ * installed at all apart from an installed one with a missing file inside
+ * it.
+ */
+interface TreeSitterLoader {
+  load: () => Promise<LanguageService>;
+  packageNames: readonly string[];
+}
+
+const TREE_SITTER_LOADERS: Readonly<Record<string, TreeSitterLoader>> = {
+  ".py": {
+    load: async () => {
+      const { loadPythonLanguageService } = await import("./tree-sitter-python-service.ts");
+      return loadPythonLanguageService();
+    },
+    packageNames: ["web-tree-sitter", "tree-sitter-python"],
   },
   ...Object.fromEntries(
     Object.entries(GRAMMAR_SPECS).map(([ext, spec]) => [
       ext,
-      async () => {
-        const { loadTreeSitterLanguageService } = await import("./tree-sitter-language-service.ts");
-        return loadTreeSitterLanguageService(spec.packageName, spec.wasmFileName, spec.config);
-      },
+      {
+        load: async () => {
+          const { loadTreeSitterLanguageService } = await import("./tree-sitter-language-service.ts");
+          return loadTreeSitterLanguageService(spec.packageName, spec.wasmFileName, spec.config);
+        },
+        packageNames: ["web-tree-sitter", spec.packageName],
+      } satisfies TreeSitterLoader,
     ]),
   ),
 };
@@ -513,22 +536,82 @@ const grammarAbsentExtensions = new Set<string>();
 const grammarGenuineFailures = new Set<string>();
 
 /**
- * True when `err` is Node's own "could not resolve this module at all"
- * error: the package a grammar loader needs (tree-sitter-python,
- * web-tree-sitter, or one of the six packages src/tree-sitter-grammars.ts
- * names) was never installed. CommonJS's `require.resolve` (used by
- * resolveWasmPath in both src/tree-sitter-python-service.ts and
- * src/tree-sitter-language-service.ts) reports this as `MODULE_NOT_FOUND`;
- * an ESM dynamic `import()` of a specifier that cannot be resolved (which
- * is what happens here when web-tree-sitter itself, imported at the top
- * of either of those files, is absent) reports `ERR_MODULE_NOT_FOUND`.
- * Anything else -- a corrupt wasm file, an ABI mismatch, a truncated
- * install -- reaches this loader with the package present and some other
- * error code (or none at all), and is a real failure, not an absence.
+ * True when `packageName`'s own package.json is actually on disk, in one of
+ * the node_modules directories Node would search from this file's
+ * location. Deliberately NOT `require.resolve(\`${packageName}/package.json\`)`
+ * -- the approach resolveWasmPath uses for a grammar package in
+ * src/tree-sitter-python-service.ts and src/tree-sitter-language-service.ts
+ * -- because that subpath resolution honours the target package's own
+ * `exports` map, and web-tree-sitter's map (checked directly against the
+ * installed package: it lists ".", "./web-tree-sitter.wasm", "./debug", and
+ * "./debug/web-tree-sitter.wasm", nothing else) does not list
+ * "./package.json" at all. `require.resolve("web-tree-sitter/package.json")`
+ * therefore throws `ERR_PACKAGE_PATH_NOT_EXPORTED` even when web-tree-sitter
+ * is installed perfectly -- caught here, that read as "not resolvable" and
+ * misclassified a perfectly good install as absent, undoing this fix while
+ * testing it against the real packed and installed package. Grammar
+ * packages happen to ship no `exports` field at all (checked: none of the
+ * seven do), so the subpath route works for them, but nothing here should
+ * lean on that continuing to be true.
+ *
+ * `require.resolve.paths(packageName)` sidesteps the whole problem: it
+ * returns the node_modules directories Node would search for this bare
+ * specifier, without ever consulting the target package's own `exports`
+ * map (that map is irrelevant to finding the directory in the first
+ * place, only to resolving a path inside it). Each candidate is checked
+ * for `<candidate>/<packageName>/package.json` directly on disk.
  */
-function isModuleAbsenceError(err: unknown): boolean {
+function isPackageManifestResolvable(packageName: string): boolean {
+  const candidates = createRequire(import.meta.url).resolve.paths(packageName);
+  if (!candidates) return false;
+  return candidates.some((dir) => existsSync(join(dir, packageName, "package.json")));
+}
+
+/**
+ * True when `err` means "a package this loader needs was never installed at
+ * all," for the given `packageNames` (see `TreeSitterLoader.packageNames`
+ * above -- always `web-tree-sitter` plus the language's own grammar
+ * package).
+ *
+ * The error code alone cannot answer this. CommonJS's `require.resolve`
+ * (used by resolveWasmPath in both src/tree-sitter-python-service.ts and
+ * src/tree-sitter-language-service.ts) reports a wholly missing package as
+ * `MODULE_NOT_FOUND`; an ESM `import()` of a specifier that cannot be
+ * resolved reports `ERR_MODULE_NOT_FOUND` -- and Node reports that exact
+ * same `ERR_MODULE_NOT_FOUND` when web-tree-sitter's package directory and
+ * manifest are both present and intact but the file its own `import`
+ * resolved to (its main entry) is missing on disk: a disk that filled
+ * mid-copy, an interrupted install, a failed postinstall. Both situations
+ * throw the identical code, so the code cannot tell "not installed" from
+ * "installed and broken" by itself. What can: whether each package this
+ * loader needs has a manifest that resolves at all, checked here
+ * independently of the failed import. A manifest that resolves means that
+ * package's directory is actually on disk, so a load that still failed is
+ * a real failure, not an absence, regardless of the error code carried in.
+ * Anything else with an unrelated code -- a corrupt wasm file, an ABI
+ * mismatch, a truncated install, a permissions error, a package throwing
+ * during initialisation -- never reaches this function's manifest check at
+ * all: the code guard below returns false first, exactly as before this
+ * fix, because none of those are module-resolution errors in the first
+ * place.
+ *
+ * Grammar packages (tree-sitter-python, and the six
+ * src/tree-sitter-grammars.ts names) never need this same manifest check
+ * for their OWN main-entry file, because they are never `import`ed as a
+ * module at all: resolveWasmPath resolves only their package.json path,
+ * then reads their wasm file straight off disk with `Language.load`, which
+ * fails with a filesystem error (ENOENT and the like), never
+ * MODULE_NOT_FOUND, when that file is missing. A grammar's manifest not
+ * resolving still means that grammar package was never installed at all,
+ * so it is included in `packageNames` and checked the same way -- there is
+ * just no "manifest present, main file missing" case a grammar package can
+ * reach
+ * that this function needs to separate out, the way web-tree-sitter's can.
+ */
+function isModuleAbsenceError(err: unknown, packageNames: readonly string[]): boolean {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
-  return code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND";
+  if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") return false;
+  return packageNames.some((packageName) => !isPackageManifestResolvable(packageName));
 }
 
 // Test-only escape hatch for reaching a real grammar-load failure without
@@ -610,22 +693,23 @@ async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
     grammarAbsentExtensions.add(ext);
   } else if (load !== undefined) {
     try {
-      service = await load();
+      service = await load.load();
     } catch (err) {
       // The package was never installed, or it is installed and
       // something about the load still went wrong (a corrupt wasm file,
-      // an ABI mismatch): either way, a file of this extension gets
-      // exactly the scanner it always got, and nothing above this catch
-      // throws. isModuleAbsenceError tells the two apart at the one
-      // point this loader is actually called, so everything downstream
-      // -- src/mutate.ts, which writes to the file this mask decides
-      // where to cut, and needs to know only "is this mask trustworthy";
-      // the four production readers of a diff's signals, which need to
-      // know which of the two this is, since only one of them deserves
-      // to block a commit -- reads a recorded fact instead of re-deriving
-      // it.
+      // an ABI mismatch, or web-tree-sitter's own installed-but-broken
+      // case this fix closes -- see isModuleAbsenceError): either way, a
+      // file of this extension gets exactly the scanner it always got,
+      // and nothing above this catch throws. isModuleAbsenceError tells
+      // the two apart at the one point this loader is actually called, so
+      // everything downstream -- src/mutate.ts, which writes to the file
+      // this mask decides where to cut, and needs to know only "is this
+      // mask trustworthy"; the four production readers of a diff's
+      // signals, which need to know which of the two this is, since only
+      // one of them deserves to block a commit -- reads a recorded fact
+      // instead of re-deriving it.
       service = regexLanguageService;
-      if (isModuleAbsenceError(err)) {
+      if (isModuleAbsenceError(err, load.packageNames)) {
         grammarAbsentExtensions.add(ext);
       } else {
         grammarGenuineFailures.add(ext);

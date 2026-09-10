@@ -44,6 +44,8 @@ import {
   exitCodeFor,
   formatReportJson,
   formatReportText,
+  grammarAbsentPaths,
+  grammarGenuineFailurePaths,
   planMutations,
   selectMutablePaths,
   unrecognizedLanguagePaths,
@@ -536,6 +538,15 @@ async function main(): Promise<void> {
   // grammarUnavailablePaths in src/mutate.ts.
   const { trustworthy: trustworthyPaths, grammarUnavailable: grammarUnavailablePaths } =
     await warmAndSplitByGrammar(mutablePaths);
+  // Split for the report's own wording, not for what gets mutated: a path
+  // is kept out of `files` below because it is in grammarUnavailablePaths
+  // at all, the union computed above, whichever of the two reasons put it
+  // there. This split only decides which sentence the report uses to say
+  // why -- "not installed" for a devDependency that simply is not there,
+  // "failed to load" for one that is there and broken -- see
+  // grammarAbsentPaths and grammarGenuineFailurePaths in src/mutate.ts.
+  const grammarAbsentFiles = grammarAbsentPaths(mutablePaths);
+  const grammarFailedFiles = grammarGenuineFailurePaths(mutablePaths);
   const files = readSourceFiles(trustworthyPaths, repoRoot);
   // Already warmed above, so this plans synchronously against whichever
   // mask each trustworthy path's extension actually resolved to.
@@ -690,7 +701,8 @@ async function main(): Promise<void> {
     attempted: attempted.length,
     results,
     unsupportedFiles: unsupportedPaths,
-    grammarUnavailableFiles: grammarUnavailablePaths,
+    grammarAbsentFiles,
+    grammarFailedFiles,
     unrecognizedFiles: unrecognizedPaths,
   };
   process.stdout.write(args.format === "json" ? formatReportJson(report) : `${formatReportText(report)}\n`);
