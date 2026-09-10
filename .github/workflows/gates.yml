@@ -25,18 +25,66 @@ jobs:
     #
     # The prose scan, the tally check, and the README tally check read
     # tracked prose and doc figures; nothing about them depends on the
-    # operating system underneath, so running them on all three legs would
-    # burn CI minutes three times over for the same single answer. They
-    # run once, gated to the ubuntu-latest leg below. Typecheck and the
-    # test suite are not given that treatment: they are the whole reason
-    # for the matrix, since they exercise process spawning, signal
-    # handling, and path behaviour that actually differs by platform, so
-    # they run on every leg in full. No leg skips them.
+    # operating system underneath, so running them on every leg would burn
+    # CI minutes for the same single answer. They run once, gated to the
+    # `primary` leg below. Typecheck and the test suite are not given that
+    # treatment: they are the whole reason for the matrix, since they
+    # exercise process spawning, signal handling, and path behaviour that
+    # actually differs by platform, so they run on every leg in full. No
+    # leg skips them.
+    #
+    # The matrix is five legs, not the six a plain os-times-node-version
+    # cross product would give: ubuntu, macos and windows each on Node 22
+    # (our documented minimum, and what every workflow tested exclusively
+    # until now), plus Node 24 on ubuntu and on windows. Node 24 is what a
+    # growing share of users actually run, and pinning every leg to 22 is
+    # exactly why nobody here saw nodejs/node#56645: Node 24 on Windows
+    # aborts mid-teardown when `process.exit()` races an async handle
+    # during cleanup ("Assertion failed:
+    # !(handle->flags & UV_HANDLE_CLOSING)", exit code 3221226505), a bug
+    # confirmed upstream as Node's own and, as of the versions in this
+    # comment, still open on every released Node 24 and even reported
+    # against early Node 26 builds (nodejs/node#56645, nodejs/node#58091).
+    # The owner measured it directly on real Windows hardware: 83 failures
+    # on Node 24.19.0, 18 of them this abort, against 53 failures and zero
+    # aborts on Node 22.18.0, same commit, same machine. Windows+24 is
+    # therefore the one combination known to matter. macOS+24 is left out:
+    # the bug reproduces only on Windows, and macOS's own divergence from
+    # Linux is already covered by the macOS+22 leg (see the note above
+    # about the macOS-only bugs that leg exists to catch), so a macOS+24
+    # leg would mostly re-answer a question the other legs already answer.
+    # Ubuntu+24 stays in because it is the cheapest possible check for any
+    # ordinary Node 24 API or behaviour change unrelated to this bug, on
+    # the platform most contributors and CI run on day to day.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            node-version: '22'
+            primary: true
+          - os: macos-latest
+            node-version: '22'
+          - os: windows-latest
+            node-version: '22'
+          - os: ubuntu-latest
+            node-version: '24'
+          - os: windows-latest
+            node-version: '24'
+            # Known-broken today: see nodejs/node#56645 above. Marked
+            # continue-on-error instead of being left off the matrix or
+            # commented out, so the run still happens, its result is still
+            # visible on every push and PR, and nobody has to remember to
+            # come back and re-add it. GitHub Actions shows this leg with
+            # a warning instead of a red X, and does not fail the workflow
+            # on its account; a red X here trains people to ignore red the
+            # way a permanently-failing leg always does. If upstream ships
+            # a fix and this leg starts passing on its own, it simply
+            # turns green: nothing else here needs to change. If it later
+            # regresses further, this is still the leg that would show it.
+            allow-failure: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.allow-failure == true }}
     # Declared, not inherited. The repository default is read only
     # today, and a job that says nothing is safe only for as long as
     # nobody changes that setting. This workflow runs on a pull
@@ -52,10 +100,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # package.json's engines field requires >=22.18; '22' resolves
-          # to the newest 22.x release on every runner, which satisfies
-          # that today and keeps doing so as 22.x moves forward.
-          node-version: '22'
+          # package.json's engines field requires >=22.18; '22' and '24'
+          # each resolve to the newest release in that line on every
+          # runner, which satisfies that today and keeps doing so as both
+          # lines move forward.
+          node-version: ${{ matrix.node-version }}
 
       - run: npm ci
 
@@ -65,18 +114,18 @@ jobs:
       - name: tests
         run: npm test
 
-      # Platform-independent checks: run once, on Linux only. See the
-      # comment above the matrix for why.
+      # Platform-independent checks: run once, on the primary leg only.
+      # See the comment above the matrix for why.
       - name: prose scan
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.primary == true
         run: node hooks/scan-prose.ts --require-rules
 
       - name: tally check
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.primary == true
         run: node scripts/tally-report.ts --check
 
       - name: README tally check
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.primary == true
         run: node scripts/refresh-readme-tally.ts --check
 
   test-diff:
