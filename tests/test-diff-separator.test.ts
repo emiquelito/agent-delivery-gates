@@ -448,6 +448,150 @@ test("a skip call reached through a computed property name on the call itself st
   assert.deepEqual(signalIds(result.signals), []);
 });
 
+// Finding 2: RSpec's modern colon-metadata spelling for disabling an
+// example or a whole group ("skip: true", "skip: \"flaky\"", "pending:
+// true") produced no signal at all before this fragment existed; only the
+// obsolete hash-rocket spelling was ever caught, and only by accident (see
+// the next test below).
+
+test("RSpec's it \"...\", skip: true do fires skip-added", () => {
+  const diff = oneFileDiff("spec/widget_spec.rb", [], ['it "adds numbers", skip: true do']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("RSpec's it \"...\", skip: \"flaky\" do (a reason, not just a boolean) fires skip-added", () => {
+  const diff = oneFileDiff("spec/widget_spec.rb", [], ['it "adds numbers", skip: "flaky" do']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("RSpec's context \"...\", skip: true do (a whole group, not just one example) fires skip-added", () => {
+  const diff = oneFileDiff("spec/widget_spec.rb", [], ['context "when discounted", skip: true do']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("RSpec's pending: true metadata fires skip-added", () => {
+  const diff = oneFileDiff("spec/widget_spec.rb", [], ['it "adds numbers", pending: true do']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("RSpec's obsolete hash-rocket spelling (:skip => true) still fires skip-added, incidentally, through the equals-value fragment", () => {
+  // Finding 2 named this as the ONLY spelling that worked before the fix:
+  // "=>" contains a literal "=", so "\\bskip\\s*=\\s*\\S" (written for
+  // xUnit's Skip = "reason") matches it by coincidence, not by design.
+  // Recorded here as a permanent regression test so this does not go
+  // unnoticed if that fragment is ever narrowed.
+  const diff = oneFileDiff("spec/widget_spec.rb", [], ['it "adds numbers", :skip => true do']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Finding 3: NUnit's and MSTest's [Ignore] attribute almost always carries
+// a reason string in real code; the bare, argument-less form the old
+// fragment required essentially never appears, so this fragment likely
+// never fired on an actual disable before this fix.
+
+test("NUnit's [Ignore(\"reason\")] (the form real code actually uses) fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Ignore("not ready yet")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("the bare NUnit/MSTest [Ignore] (no reason) still fires skip-added", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ["[Ignore]"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("MSTest's [Ignore(\"reason\")] fires skip-added -- same fragment, same fix, checked directly per the adjudication", () => {
+  const diff = oneFileDiff("MyProject.Tests/WidgetTests.cs", [], ['[Ignore("flaky on CI")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("[Ignore\\b does not widen into an unrelated [IgnoreAttribute] identifier", () => {
+  // Guards the word-boundary anchor chosen for the Finding 3 fix: a
+  // custom attribute literally named IgnoreAttribute (used with or without
+  // the "Attribute" suffix trimmed, as C# allows) is a different
+  // identifier from "Ignore", not a wider spelling of it.
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ["[IgnoreAttribute]"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), []);
+});
+
+// Finding 3's own audit, run against the gate: JUnit's @Disabled("reason")
+// and @Ignore("reason"), and xUnit's [Fact(Skip = "reason")], never had
+// this problem -- both already fire, unchanged by this fix. The
+// language-matrix cases for Java and C# above (skipLine:
+// '@Disabled("not ready")', '[Fact(Skip = "not ready")]') already exercise
+// this; these two make the audit's own finding explicit, not just implicit
+// in a shared fixture.
+
+test("JUnit's @Ignore(\"reason\") (the JUnit 4 spelling) already fires skip-added, unaffected by the NUnit/MSTest fix", () => {
+  const diff = oneFileDiff("src/test/java/com/example/WidgetTest.java", [], ['@Ignore("not ready")']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("xUnit's [Fact(Skip = \"reason\")] already fires skip-added, unaffected by the NUnit/MSTest fix", () => {
+  const diff = oneFileDiff("tests/WidgetTests.cs", [], ['[Fact(Skip = "not ready")]']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Finding 4: the code comment above "\\bskip\\s*=\\s*\\S" described the
+// accepted noise as "an assignment or a pagination call", but the same
+// fragment fires on a comparison too, since it does not distinguish one
+// "=" from a run of them. No behaviour change; this locks in the real
+// behaviour the comment now describes.
+
+test("a comparison, not an assignment, still fires skip-added (Finding 4: the comment was imprecise, not the behaviour)", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["if (skip == true) { return; }"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// --- Hunted while widening this rule: gaps found with no prior coverage -----
+
+test("Playwright's test.fixme() fires skip-added -- a real disabling call with no coverage before this fix", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["test.fixme();"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Playwright's nested test.describe.fixme(...) fires skip-added", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["test.describe.fixme('flaky group', () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Python unittest's imperative self.skipTest(...) fires skip-added -- no decorator, so the @unittest.skip fragments never saw it", () => {
+  const diff = oneFileDiff("tests/test_widget.py", [], ['        self.skipTest("not ready")']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Swift's throw XCTSkip(\"reason\") fires skip-added -- XCTest has no per-test skip attribute at all", () => {
+  const diff = oneFileDiff("Tests/WidgetTests.swift", [], ['        throw XCTSkip("not ready on this platform")']);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Elixir's @tag :skip fires skip-added", () => {
+  const diff = oneFileDiff("test/widget_test.exs", [], ["  @tag :skip"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Elixir's @moduletag :skip (the whole-file form) fires skip-added", () => {
+  const diff = oneFileDiff("test/widget_test.exs", [], ["@moduletag :skip"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
 // --- tolerance-widened ---------------------------------------------------------
 
 test("a changed tolerance line, one removed and one added, fires tolerance-widened", () => {
@@ -1555,6 +1699,96 @@ test("the region closes at its own closing brace: a later, unrelated source chan
   assert.deepEqual(result.signals, []);
 });
 
+// --- Finding 1: the skips bucket's premise (test files only) is false for Rust ---
+//
+// hasRustTestMarker fires on a test-ish token ANYWHERE in a .rs file's
+// diff, including a context line, and when it fires the WHOLE file's diff
+// runs through every check in signalsForTestFile -- not only the
+// #[cfg(test)] region. A reviewer reproduced a false skip-added on
+// production Rust code from exactly this: a .rs file classified as
+// SOURCE, carrying an ordinary Iterator::skip call, fired skip-added
+// solely because an assert! elsewhere in the same file made
+// hasRustTestMarker true. See RUST_EXCLUDED_SKIP_FRAGMENTS in
+// src/test-diff-separator.ts for the fix and its own reasoning.
+
+test("Finding 1's reproduction: an ordinary items.skip(n) in Rust source no longer fires skip-added, even though an assert! elsewhere makes the whole file's diff get scanned", () => {
+  const diff = diffWithHunk("src/pricing.rs", [
+    " fn discount(cents: i64) -> i64 {",
+    "     assert!(cents >= 0);",
+    "     cents - 10",
+    " }",
+    " ",
+    " fn first_n(items: &[i64], n: usize) -> Vec<i64> {",
+    "-    items.to_vec()",
+    "+    items.iter().skip(n).cloned().collect()",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+  assert.deepEqual(
+    result.sourceFiles.map((f) => f.path),
+    ["src/pricing.rs"],
+  );
+});
+
+test("a struct-literal 'skip:' field in Rust source no longer fires skip-added under the same whole-file scan", () => {
+  // Rust's field-init shorthand uses a bare colon, the same form RSpec's
+  // "skip: true" metadata now deliberately fires on (Finding 2) -- and
+  // this is exactly why that new fragment is excluded for .rs too, not
+  // only the pre-existing ".skip(" one.
+  const diff = diffWithHunk("src/pricing.rs", [
+    " fn discount(cents: i64) -> i64 {",
+    "     assert!(cents >= 0);",
+    "     cents - 10",
+    " }",
+    " ",
+    "+struct Query { skip: bool, limit: i64 }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("a real Rust test disable, #[ignore], still fires skip-added even under the .rs exclusion", () => {
+  // The exclusion is narrow: it removes only the two fragments proven to
+  // misfire on ordinary Rust source (see the comment on
+  // RUST_EXCLUDED_SKIP_FRAGMENTS), not the whole skips bucket. Rust's own
+  // idiom for disabling a test, #[ignore], must still fire.
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod tests {",
+    "     #[test]",
+    "+    #[ignore]",
+    "     fn applies_discount() {",
+    "         assert_eq!(discount(120), 110);",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("an ordinary .skip( call inside the #[cfg(test)] region itself is also excluded on .rs, not only outside it", () => {
+  // The exclusion applies to every .rs file, whichever path found it a
+  // test region through (the whole-file marker or the region mask), since
+  // Rust simply does not use a skip call to disable a test either way.
+  const diff = diffWithHunk("src/pricing.rs", [
+    ' #[cfg(all(test, feature = "flaky"))]',
+    " mod tests {",
+    "     fn helper(items: &[i64]) -> Vec<i64> {",
+    "-        items.to_vec()",
+    "+        items.iter().skip(1).cloned().collect()",
+    "     }",
+    " }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("the .rs exclusion does not leak into other languages: .skip( still fires skip-added everywhere else", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["it.skip('adds', () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
 
 // --- The fixtures marker ------------------------------------------------------
 //

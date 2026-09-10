@@ -210,18 +210,62 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // which nothing in this bucket does today.
     "\\.skip\\s*\\(",
     "\\.only\\b",
+    // Playwright's own "expected to fail, skip it" call, distinct from
+    // ".skip(" above (no argument, and the method name itself is
+    // "fixme"): "test.fixme()" and its "test.describe.fixme(...)" nested
+    // form. No ".rs" exclusion needed here the way ".skip(" gets one below
+    // -- "fixme" is not a word any mainstream language's standard library
+    // hangs a method off of, the way Rust's Iterator::skip does.
+    "\\.fixme\\b",
     "\\bxit\\(",
     "\\bxdescribe\\(",
     "\\btest\\.todo\\b",
     "\\bit\\.todo\\b",
     "@pytest\\.mark\\.skip",
     "@unittest\\.skip",
+    // Python unittest's imperative, mid-test skip: "self.skipTest('not
+    // ready')". Distinct from the decorator forms above (@unittest.skip,
+    // @unittest.skipIf, @unittest.skipUnless), which fire before the test
+    // body ever runs; this one is called from inside it. Never chained
+    // with a leading "." in this fragment on purpose, since "self." is
+    // only one of several ways a test case reaches its own instance
+    // (TestCase subclasses use "self", but the method itself is what
+    // matters, not its receiver -- the same reasoning ".skip\s*\(" above
+    // already applies to receivers).
+    "\\bskipTest\\(",
     "#\\[ignore\\]",
     "\\bt\\.Skip\\(",
     "\\bt\\.SkipNow\\b",
     "@Disabled",
     "@Ignore",
-    "\\[Ignore\\]",
+    // NUnit's and MSTest's [Ignore] attribute, with or without a reason:
+    // "[Ignore]" and "[Ignore(\"not ready\")]" share this one fragment.
+    // Finding 3: the exact-match form here used to require the bracket to
+    // close immediately after the word, so "[Ignore(\"not ready\")]" --
+    // the form real NUnit and MSTest code almost always uses, since a
+    // reason string is the norm, not the exception -- never matched at
+    // all. Anchored on a word boundary instead of the closing "]", so
+    // anything that can follow "Ignore" in a real attribute (a closing
+    // bracket, an opening paren for the argument list) still matches,
+    // while "[IgnoreAttribute]" -- a different identifier, not "Ignore"
+    // followed by a boundary -- still does not.
+    "\\[Ignore\\b",
+    // Swift's XCTest: no per-test skip attribute exists; a test skips
+    // itself by throwing XCTSkip, typically "throw XCTSkip(\"reason\")"
+    // from the test body or from setUpWithError(). Not reachable through
+    // any fragment above: it carries no ".skip(" (no dot precedes
+    // "Skip", and the word itself is "XCTSkip", not "skip"), and
+    // "\\bskip\\(" would not match it either, "Skip" here has no word
+    // boundary before it ("XCT" and "Skip" are one identifier).
+    "\\bXCTSkip\\b",
+    // Elixir ExUnit: a test (or a whole module of them) is excluded from
+    // a run by tagging it, most commonly with the :skip atom --
+    // "@tag :skip" on one example, "@moduletag :skip" for the whole file
+    // -- combined with an ExUnit.configure(exclude: [:skip]) elsewhere.
+    // Nothing above reaches this: it is neither a call ("skip(" or
+    // ".skip(") nor an assignment ("skip = "), and pending\s+["'] only
+    // covers the string-argument opener, not an atom after "@tag".
+    "@(?:module)?tag\\s+:skip\\b",
     "\\bmarkTestSkipped\\b",
     "\\bmarkTestIncomplete\\b",
     // Anchored to a call, never a bare word: "skip" and "pending" alone
@@ -236,6 +280,19 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // reporting the same line twice under two different fragments.
     "(?<!\\.)\\bskip\\(",
     "\\bskip\\s+[\"']",
+    // RSpec's modern metadata spelling: "skip: true", "skip: \"flaky\"",
+    // on an example ("it ... , skip: true do") or a whole group ("context
+    // ..., skip: true do"), and "pending:" the same way. Finding 2: only
+    // the obsolete hash-rocket form ("skip => true") was ever caught, and
+    // only by accident (see the note on "\\bskip\\s*=\\s*\\S" below) --
+    // this is the spelling RSpec itself has recommended since the
+    // hash-rocket syntax was dropped from idiomatic Ruby, so it is
+    // probably the single most common way a Ruby test gets disabled, and
+    // it had no coverage at all, incidental or otherwise. Same
+    // no-narrowing reasoning as every fragment in this bucket: any value
+    // after the colon counts, not just true/false or a string.
+    "\\bskip:\\s*\\S",
+    "\\bpending:\\s*\\S",
     "\\bpending\\(",
     "\\bpending\\s+[\"']",
     "\\bxcontext\\b",
@@ -247,12 +304,15 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     // happens to share the word "skip". Each version traded one gap for
     // another and a reviewer found a real xUnit form it missed every time.
     // Same reasoning as the fragment above: this bucket only ever runs
-    // against test files, where a plain "skip = ..." assignment is
-    // uncommon and, when it happens, costs one dismissible warning -- far
-    // cheaper than a disabled test this rule was supposed to catch and
-    // didn't. So: any "skip" (case-insensitive; see compileFragments
-    // below, so this covers "Skip" too) followed by "=" and at least one
-    // non-whitespace character, whatever kind of value that is.
+    // against test files, where a plain "skip = ..." assignment -- or a
+    // comparison that happens to take the same form, such as "if (skip
+    // == true)", which this fragment fires on too, since it does not
+    // distinguish a single "=" from a run of them -- is uncommon and, when
+    // it happens, costs one dismissible warning -- far cheaper than a
+    // disabled test this rule was supposed to catch and didn't. So: any
+    // "skip" (case-insensitive; see compileFragments below, so this
+    // covers "Skip" too) followed by "=" and at least one non-whitespace
+    // character, whatever kind of value or comparison that is.
     //
     // Known gap, not attempted here: when "Skip =" and its value land on
     // different diff lines -- an attribute wrapped so the "=" ends one line
@@ -1418,6 +1478,83 @@ function signalsForTestFile(file: RawFileDiff, rules: CompiledRules, ctx: FileMa
 //   treating it as a test region would misclassify code that ships in
 //   the normal build. This is not new: the marker-only check this file
 //   had before cfgTestRegionMask never caught it either.
+// - Known gap, not attempted here, and the same category of problem
+//   Finding 1 closed below for the skips bucket, just broader:
+//   RUST_TEST_MARKER_RE treats a bare `assert!`/`assert_eq!`/`assert_ne!`
+//   as proof the whole file is worth scanning as a test (see
+//   hasRustTestMarker just below), but none of those three macros is
+//   test-only in Rust the way an "assert" call is in most of the other
+//   languages this bucket covers -- they are the standard way to state a
+//   runtime invariant anywhere in ordinary Rust code, not only inside
+//   `#[cfg(test)]`. A source file that asserts an invariant once, nowhere
+//   near a test, still gets its ENTIRE diff run through every check in
+//   signalsForTestFile (assertion-removed, test-case-removed,
+//   tolerance-widened, timeout-raised -- not only skip-added), the same
+//   over-widening Finding 1 reproduced for skip-added specifically. This
+//   is not fixed here: unlike the skips bucket, which can carve out one
+//   fragment by extension, hasRustTestMarker's premise -- one match
+//   anywhere in the file authorises scanning the whole file -- is the
+//   part that is wrong, and narrowing it is a restructuring of how a .rs
+//   file is classified, not a bucket-scoped fragment change.
+
+// Finding 1: fragments in the skips bucket whose form matches ordinary,
+// idiomatic Rust source, not a disabled test, so they must never run
+// against a `.rs` file at all -- the same false-positive category the long
+// comment on the skips bucket accepts everywhere else on purpose, except
+// here the cost is not a dismissible warning in a test file: hasRustTestMarker
+// below can send a whole SOURCE file's diff through this bucket on nothing
+// more than an ordinary `assert!` call (see the known gap above), so a
+// fragment this common in production Rust reaches code no reviewer would
+// call a test at all. Rust's own idiom for disabling a test is `#[ignore]`,
+// already covered by its own fragment in this same bucket; there is no
+// Rust convention that disables a test through a skip call or a `skip:`
+// field, so both of the fragments below are excluded outright instead of
+// narrowed, the same way narrowing them for every OTHER language kept
+// losing real disabling calls to a reviewer running the actual gate.
+//   - "\\.skip\\s*\\(": Iterator::skip is a standard-library method,
+//     called constantly in ordinary Rust code ("items.iter().skip(n)"),
+//     reproduced by a reviewer running the real gate against an actual
+//     `.rs` source file.
+//   - "\\bskip:\\s*\\S": Rust's struct-literal field-init syntax uses a
+//     bare colon ("Config { skip: true, ..Default::default() }"), and a
+//     boolean or numeric field named `skip` (a pagination offset, an
+//     exclusion flag) is exactly as ordinary in Rust as the assignment
+//     form "\\bskip\\s*=\\s*\\S" already accepts as noise elsewhere in
+//     this bucket -- except, again, this is reached from source code here,
+//     not only from a test file, so the same trade is not free the way it
+//     is everywhere else this bucket runs.
+// Every other skips-bucket fragment was checked against the same question
+// (does its literal form appear in ordinary Rust source?) and found not
+// to: "#[ignore]" and the `#[...]::test` family are Rust attribute syntax
+// with no other meaning; ".only", ".fixme", "xit(", "xdescribe(",
+// "test.todo"/"it.todo", the fragments written for Python, PHP, Go, Java,
+// C#, and .NET generally, "skipTest(", "XCTSkip", and the Elixir "@tag
+// :skip" form are all tied to another language's syntax closely enough
+// that they do not occur in Rust source. The one exception is the bare,
+// unchained "(?<!\\.)\\bskip\\(" fragment (for R's testthat::skip and
+// similar): a free function literally named `skip`, called without a
+// receiver, is conceivable in Rust but negligible next to Iterator::skip
+// and struct-literal field init, both of which are idiomatic and common;
+// left in scope for `.rs` on purpose.
+const RUST_EXCLUDED_SKIP_FRAGMENTS: ReadonlySet<string> = new Set(["\\.skip\\s*\\(", "\\bskip:\\s*\\S"]);
+
+/** The skips bucket, compiled with every fragment in
+ * RUST_EXCLUDED_SKIP_FRAGMENTS left out. Used only for a `.rs` file (see
+ * the two call sites in separateTestDiffBody below); every other bucket,
+ * and every other file's skips check, keeps using the ordinary compiled
+ * rules unchanged. Built from the resolved RuleSet's own raw fragment
+ * strings, not from DEFAULT_RULES, so a config's own "add" or "replace" on
+ * the skips bucket is respected here too -- a project that replaces the
+ * skips bucket wholesale gets no built-in Rust carve-out unless its own
+ * fragments happen to equal one of the excluded strings, the same way a
+ * config that replaces testPaths gets no built-in path rules either. */
+function compileSkipsForRust(skips: string[]): RegExp {
+  return compileFragments(
+    "skips",
+    skips.filter((fragment) => !RUST_EXCLUDED_SKIP_FRAGMENTS.has(fragment)),
+  );
+}
+
 const RUST_PATH_RE = /\.rs$/;
 const RUST_TEST_MARKER_RE = /#\[cfg\(test\)\]|#\[\w+::test\]|#\[test\]|\bassert_eq!|\bassert_ne!|\bassert!/;
 
@@ -1612,6 +1749,12 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
 function separateTestDiffBody(diffText: string, options: SeparateOptions): SeparateResult {
   const ruleSet = options.rules ?? DEFAULT_RULES;
   const rules = ruleSet === DEFAULT_RULES ? DEFAULT_COMPILED : compileRuleSet(ruleSet);
+  // Finding 1: a `.rs` file runs every check with this one bucket swapped
+  // for a narrower compile that leaves out the fragments named in
+  // RUST_EXCLUDED_SKIP_FRAGMENTS above -- computed once per call, not per
+  // file, since it depends only on the resolved RuleSet's own skips
+  // fragments, the same as `rules` itself.
+  const rulesForRust: CompiledRules = { ...rules, skips: compileSkipsForRust(ruleSet.skips) };
   const files = parseDiff(diffText);
 
   const sourceFiles: FileStats[] = [];
@@ -1688,7 +1831,7 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
       if (RUST_PATH_RE.test(file.path)) {
         const rustCtx = getMaskCtx();
         if (hasRustTestMarker(file, rustCtx)) {
-          if (!skipChecks()) signals.push(...signalsForTestFile(file, rules, rustCtx));
+          if (!skipChecks()) signals.push(...signalsForTestFile(file, rulesForRust, rustCtx));
         } else {
           const mask = cfgTestRegionMask(file.lines, rustCtx);
           const regionAdded: DiffLine[] = [];
@@ -1709,7 +1852,7 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
                   lines: [],
                   hunkHeadings: [],
                 },
-                rules,
+                rulesForRust,
                 rustCtx,
               ),
             );
