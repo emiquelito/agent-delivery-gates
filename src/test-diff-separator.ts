@@ -411,8 +411,56 @@ function bucketFlags(bucket: RuleBucket): string {
   return bucket === "testPaths" ? "" : "i";
 }
 
+/** Every named capture group a fragment declares, in the order they appear.
+ * "(?<name>" opens one; "(?<=" and "(?<!" (lookbehind) share the same two
+ * characters but name nothing, and neither survives the character class
+ * below, so they need no special exclusion. */
+function namedCaptureGroupsIn(fragment: string): string[] {
+  const names: string[] = [];
+  const re = /\(\?<([A-Za-z_$][\w$]*)>/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(fragment)) !== null) names.push(match[1]);
+  return names;
+}
+
+/**
+ * Rejects a capture group name reused across two fragments in the same
+ * bucket, before they are ever joined into one regex.
+ *
+ * Each fragment here is validated alone (see validateFragments in
+ * src/test-diff-config.ts) and can compile cleanly on its own while still
+ * colliding once compileFragments joins every fragment in the bucket with
+ * "|": two named groups sharing a name is ordinarily a SyntaxError, but only
+ * across the SAME alternation, which is exactly what joining does and what
+ * validating each fragment alone never exercises. Older JS engines threw on
+ * every such collision; newer ones permit it when they judge the two
+ * branches mutually exclusive, and what counts as "mutually exclusive" has
+ * already widened once. Relying on the engine's judgment call to enforce a
+ * contract that is really ours was an accident, not a design: two fragments
+ * sharing a name means a finding's capture could be read from whichever
+ * fragment the engine happened to match, our correctness problem regardless
+ * of whether the engine throws. This check runs the same way on every Node
+ * version, so it can never again depend on that judgment call changing
+ * under it.
+ */
+function checkNoDuplicateCaptureGroups(bucket: RuleBucket, fragments: string[]): void {
+  const declaredBy = new Map<string, string>();
+  for (const fragment of fragments) {
+    for (const name of namedCaptureGroupsIn(fragment)) {
+      const earlier = declaredBy.get(name);
+      if (earlier !== undefined && earlier !== fragment) {
+        throw new Error(
+          `duplicate capture group name "${name}" in rule bucket "${bucket}": both "${earlier}" and "${fragment}" declare it, so a finding could read either fragment's capture; give one of them a distinct name`,
+        );
+      }
+      declaredBy.set(name, fragment);
+    }
+  }
+}
+
 function compileFragments(bucket: RuleBucket, fragments: string[]): RegExp {
   if (fragments.length === 0) return /(?!)/;
+  checkNoDuplicateCaptureGroups(bucket, fragments);
   const source = fragments.map((fragment) => `(?:${fragment})`).join("|");
   // testPaths is the one bucket that has to respect case. Case is the only
   // thing telling WidgetTest.java apart from Contest.java, and matching

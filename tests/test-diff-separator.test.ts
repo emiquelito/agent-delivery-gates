@@ -1280,6 +1280,51 @@ test("compileRuleSet throws on a malformed regex fragment, naming the bucket", (
   assert.throws(() => compileRuleSet(rules), /skips/);
 });
 
+// Two fragments can each be a perfectly valid regex alone -- the config
+// loader's own per-fragment validation would pass both -- and still collide
+// once compileRuleSet joins every fragment in a bucket into one alternation.
+// A JS engine's own duplicate-name rule used to be strict enough to catch
+// this by throwing; that stopped being reliable once the engine started
+// permitting a shared name across alternation branches it judges mutually
+// exclusive, and what counts as "mutually exclusive" is the engine's call,
+// not this project's. compileRuleSet now runs this check itself, ahead of
+// ever asking the engine to compile the joined pattern, so the result does
+// not depend on which engine version is running it: pinned here as a fact
+// the test can fail against, not left resting on prose alone.
+test("compileRuleSet rejects two fragments in the same bucket sharing a capture group name", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, skips: ["(?<dup>paused)", "(?<dup>halted)"] };
+  assert.throws(() => compileRuleSet(rules), /duplicate capture group name "dup"/);
+});
+
+test("the duplicate-capture-group message names the bucket and the group, not a raw engine error", () => {
+  const rules: RuleSet = { ...DEFAULT_RULES, tolerance: ["(?<reason>slower)", "(?<reason>faster)"] };
+  assert.throws(() => compileRuleSet(rules), (err: unknown) => {
+    const message = (err as Error).message;
+    assert.match(message, /"reason"/, `expected the group name in the message: ${message}`);
+    assert.match(message, /tolerance/, `expected the bucket name in the message: ${message}`);
+    assert.doesNotMatch(message, /^\s*at\s/m, `expected a message, not a stack trace: ${message}`);
+    return true;
+  });
+});
+
+test("the same capture group name in two DIFFERENT buckets is not a collision", () => {
+  // Each bucket compiles to its own separate RegExp (see compileRuleSet),
+  // so a name repeated across buckets never lands in the same alternation
+  // and never collides, however the engine treats it.
+  const rules: RuleSet = { ...DEFAULT_RULES, skips: ["(?<flag>paused)"], tolerance: ["(?<flag>loose)"] };
+  assert.doesNotThrow(() => compileRuleSet(rules));
+});
+
+test("a capture group name repeated in one fragment's own alternation is not flagged as cross-fragment", () => {
+  // (?<n>a)|(?<n>b) inside a SINGLE fragment string is already an invalid
+  // regex on its own -- the engine still throws on that, since it is not
+  // two fragments sharing a name, it is one fragment declaring the same
+  // name twice. Our own check is scoped to names reused ACROSS fragments,
+  // so this is left to the ordinary "invalid regex fragment" path below.
+  const rules: RuleSet = { ...DEFAULT_RULES, skips: ["(?<n>a)|(?<n>b)"] };
+  assert.throws(() => compileRuleSet(rules), /invalid regex fragment/);
+});
+
 test("an empty rules bucket, from replace: [], never matches anything", () => {
   const rules: RuleSet = { ...DEFAULT_RULES, skips: [] };
   const diff = oneFileDiff("tests/widget.test.ts", [], ["it.skip('x', () => {});"]);
