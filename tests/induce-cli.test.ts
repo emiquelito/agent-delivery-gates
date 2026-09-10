@@ -18,7 +18,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { nodeCommand } from "./lib/portable-command.ts";
-import { recordedPids, waitForNoneAlive, cleanupTempDir, sweepStaleTempDirs } from "./lib/process-tree.ts";
+import {
+  recordedPids,
+  waitForNoneAlive,
+  describeSurvivors,
+  cleanupTempDir,
+  sweepStaleTempDirs,
+} from "./lib/process-tree.ts";
 
 // A previous run's temp directories that this process's own kill left
 // behind because a lock had not yet let go (see cleanupTempDir in
@@ -872,7 +878,11 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     ]);
     if (exitResult === "timed-out") child.kill("SIGKILL");
     const survivors = waitForNoneAlive(pids, 5_000);
-    assert.deepEqual(survivors, [], "a process in induce's tree outlived it after a real SIGINT");
+    assert.deepEqual(
+      survivors,
+      [],
+      `a process in induce's tree outlived it after a real SIGINT: ${describeSurvivors(survivors)}`,
+    );
     // Design correction B: induce re-raises the signal with its own
     // default disposition once it has printed its message, instead of a
     // fixed exit code, so a shell or CI job can tell an interrupted run

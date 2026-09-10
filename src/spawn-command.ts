@@ -133,21 +133,30 @@ export interface SpawnCommandResult {
 function killTree(pid: number): void {
   if (process.platform === "win32") {
     try {
-      // Bounded because a taskkill that never returns would block this
-      // signal handler, and everything else Node cannot run until it
-      // returns, for as long as taskkill hangs -- and what runs immediately
-      // after this handler is the caller's own cleanup (mutate writing
-      // mutated source files back to disk; census removing its worktree),
-      // which is the part that actually matters. Every millisecond spent
-      // here is taken directly out of that cleanup's budget, and a Ctrl-C
-      // that looks frozen invites a force-kill that guarantees the cleanup
-      // never runs at all -- strictly worse than any orphan this bound
-      // might leave behind. A taskkill that hits the bound mid-walk has
-      // already killed whatever part of the tree it reached and abandons
-      // the rest, so a timeout here means bounded, partial orphan cleanup,
-      // never less than doing nothing; a timeout throws ETIMEDOUT, which
-      // the catch below treats the same as any other taskkill failure.
-      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", timeout: 1500 });
+      // Bounded, but not at 1500ms: a real Windows run proved that value
+      // wrong. execFileSync's timeout does not wait for taskkill to reach
+      // a natural stopping point -- when the bound elapses, Node sends
+      // taskkill itself a kill signal mid-walk. taskkill /t terminates the
+      // tree entry by entry as it walks it, not atomically, so cutting
+      // taskkill off does not mean "whatever it had already killed stays
+      // dead and the bound is simply exceeded" the way the 1500ms comment
+      // this replaces assumed -- it means whatever taskkill had not yet
+      // reached is abandoned alive. On a real machine that left two
+      // processes of a four-deep tree running after a real SIGINT: the
+      // exact runaway-process failure this tool exists to prevent (see the
+      // top of this file). A timeout that cuts a tree-kill short is not
+      // "bounded, partial orphan cleanup, never less than doing nothing" --
+      // it can be worse than doing nothing, since the caller's own cleanup
+      // that runs right after (mutate writing mutated files back, census
+      // removing its worktree) can then fail against a directory a
+      // surviving process still holds as its working directory. Ctrl-C
+      // responsiveness matters, but not more than that: 1500ms was chosen
+      // for a busy runner or antivirus interception, not for the ordinary
+      // case, and the ordinary case is what a shortened bound put at risk.
+      // Back to the wider bound taskkill was given before that trade was
+      // made; a timeout still throws ETIMEDOUT, caught below the same as
+      // any other taskkill failure.
+      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore", timeout: 5000 });
     } catch {
       // best effort; nothing to do if the process already exited or the
       // call above timed out
