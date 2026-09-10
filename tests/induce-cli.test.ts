@@ -12,12 +12,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { nodeCommand } from "./lib/portable-command.ts";
+import { recordedPids, waitForNoneAlive, cleanupTempDir, sweepStaleTempDirs } from "./lib/process-tree.ts";
+
+// A previous run's temp directories that this process's own kill left
+// behind because a lock had not yet let go (see cleanupTempDir in
+// tests/lib/process-tree.ts) get one more chance to come down here,
+// before anything else runs, so they do not just accumulate.
+sweepStaleTempDirs("adg-induce-");
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "induce.ts");
@@ -748,6 +755,14 @@ test("a command printing more than the read buffer holds is an overflow, not a t
 // worker sharing its own process group, and the worker ignores SIGTERM
 // and never returns.
 
+// This script and the shell it runs through both write their own pid out,
+// not just the worker they spawn to hang: its own (process.pid) and the
+// shell's (process.ppid -- spawnCommand runs this through `sh -c`/
+// `cmd.exe /c`, so the shell is this script's direct parent). Recording
+// it this way -- each process reporting its own id -- is what lets
+// recordedPids() (tests/lib/process-tree.ts) read back the whole tree
+// afterward without this test needing any platform-specific
+// process-enumeration tool.
 const LEAK_RUN_MJS = `import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -755,8 +770,10 @@ import { fileURLToPath } from "node:url";
 
 const pidDir = process.argv[2];
 const here = dirname(fileURLToPath(import.meta.url));
+writeFileSync(join(pidDir, "script-" + process.pid + ".pid"), String(process.pid));
+writeFileSync(join(pidDir, "shell-" + process.ppid + ".pid"), String(process.ppid));
 const worker = spawn(process.execPath, [join(here, "leak-worker.mjs")], { stdio: "ignore" });
-writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+writeFileSync(join(pidDir, "worker-" + worker.pid + ".pid"), String(worker.pid));
 worker.on("exit", (code) => process.exit(code ?? 0));
 `;
 
@@ -764,41 +781,7 @@ const LEAK_WORKER_MJS = `process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
 `;
 
-function recordedPids(pidDir: string): number[] {
-  return readdirSync(pidDir)
-    .filter((name) => name.endsWith(".pid"))
-    .map((name) => Number(readFileSync(join(pidDir, name), "utf8")));
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Polls for up to `budgetMs` for every pid to be gone, then force-kills
- * anything still alive so this test never leaves a process behind, red
- * run or green. Returns the pids still alive when the budget ran out,
- * which is empty exactly when the fix works. */
-function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
-  const deadline = Date.now() + budgetMs;
-  let stillAlive = pids.filter(isAlive);
-  while (stillAlive.length > 0 && Date.now() < deadline) {
-    spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { timeout: 200 });
-    stillAlive = pids.filter(isAlive);
-  }
-  for (const pid of stillAlive) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // already gone
-    }
-  }
-  return stillAlive;
-}
+// recordedPids, isAlive, and waitForNoneAlive live in tests/lib/process-tree.ts.
 
 test("a timed-out step leaves no descendant running", () => {
   const pidDir = mkdtempSync(join(tmpdir(), "adg-induce-orphan-pids-"));
@@ -874,7 +857,13 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    const pids = recordedPids(pidDir);
+    // The whole tree, not just the leaf worker: LEAK_RUN_MJS above writes
+    // out its own pid and the shell's (its ppid) as soon as it starts,
+    // and induce's own pid (child.pid) is added here, so a surviving
+    // shell or a surviving induce process -- exactly what checking only
+    // the innermost worker would miss -- fails this the same way a
+    // surviving worker does.
+    const pids = [...recordedPids(pidDir), ...(child.pid === undefined ? [] : [child.pid])];
     assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
     child.kill("SIGINT");
     const exitResult = await Promise.race([
@@ -883,7 +872,7 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     ]);
     if (exitResult === "timed-out") child.kill("SIGKILL");
     const survivors = waitForNoneAlive(pids, 5_000);
-    assert.deepEqual(survivors, [], "a worker process outlived induce after a real SIGINT");
+    assert.deepEqual(survivors, [], "a process in induce's tree outlived it after a real SIGINT");
     // Design correction B: induce re-raises the signal with its own
     // default disposition once it has printed its message, instead of a
     // fixed exit code, so a shell or CI job can tell an interrupted run
@@ -901,14 +890,12 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     // A worker just SIGINTed or SIGKILLed can still hold a Windows
     // directory handle open for a while after the OS reports the process
     // gone (every pid this test tracks is confirmed dead by
-    // waitForNoneAlive above; nothing is still running), and a bare
-    // rmSync lands inside that window often enough to fail with EBUSY.
-    // maxRetries/retryDelay give the handle time to actually let go
-    // instead of racing it once. 5 retries at 100ms (Node's own linear
-    // backoff: 100+200+300+400+500 = 1.5s) was still not enough on a
-    // real, loaded Windows runner; 10 at 300ms (up to 16.5s) gives the
-    // kernel a much longer window before this gives up for real.
-    rmSync(pidDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    // waitForNoneAlive above; nothing is still running). That is a
+    // cleanup problem, not evidence that anything survived, so it must
+    // not be able to fail this test's actual claim: cleanupTempDir
+    // retries the same way this always has, then logs a note and moves
+    // on instead of throwing.
+    cleanupTempDir(pidDir);
+    cleanupTempDir(dir);
   }
 });

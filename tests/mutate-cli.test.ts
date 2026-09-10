@@ -13,6 +13,13 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import { recordedPids, waitForNoneAlive, cleanupTempDir, sweepStaleTempDirs } from "./lib/process-tree.ts";
+
+// A previous run's temp directories that this process's own kill left
+// behind because a lock had not yet let go (see cleanupTempDir in
+// tests/lib/process-tree.ts) get one more chance to come down here,
+// before anything else runs, so they do not just accumulate.
+sweepStaleTempDirs("adg-mutate-");
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "mutate.ts");
@@ -648,41 +655,7 @@ while (shouldContinue(seen)) {
 }
 `;
 
-function recordedPids(pidDir: string): number[] {
-  return readdirSync(pidDir)
-    .filter((name) => name.endsWith(".pid"))
-    .map((name) => Number(readFileSync(join(pidDir, name), "utf8")));
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Polls for up to `budgetMs` for every pid to be gone, then force-kills
- * anything still alive so this test never leaves a process behind, red
- * run or green. Returns the pids still alive when the budget ran out,
- * which is empty exactly when the fix works. */
-function waitForNoneAlive(pids: number[], budgetMs: number): number[] {
-  const deadline = Date.now() + budgetMs;
-  let stillAlive = pids.filter(isAlive);
-  while (stillAlive.length > 0 && Date.now() < deadline) {
-    spawnSync(process.execPath, ["-e", "setTimeout(() => {}, 50)"], { timeout: 200 });
-    stillAlive = pids.filter(isAlive);
-  }
-  for (const pid of stillAlive) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // already gone
-    }
-  }
-  return stillAlive;
-}
+// recordedPids, isAlive, and waitForNoneAlive live in tests/lib/process-tree.ts.
 
 test("a timed-out mutation leaves no descendant running", () => {
   const dir = makeRepo({
@@ -724,6 +697,14 @@ test("a timed-out mutation leaves no descendant running", () => {
 // kill removes it, and a SIGINT sent to the mutate process itself, exactly
 // what a terminal's Ctrl-C sends.
 
+// This script and the shell it runs through both write their own pid out,
+// not just the worker they spawn to hang: its own (process.pid) and the
+// shell's (process.ppid -- spawnCommand runs this through `sh -c`/
+// `cmd.exe /c`, so the shell is this script's direct parent). Recording
+// it this way -- each process reporting its own id -- is what lets
+// recordedPids() (tests/lib/process-tree.ts) read back the whole tree
+// afterward without this test needing any platform-specific
+// process-enumeration tool.
 const SIGINT_LEAK_RUN_MJS = `import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -731,8 +712,10 @@ import { fileURLToPath } from "node:url";
 
 const pidDir = process.argv[2];
 const here = dirname(fileURLToPath(import.meta.url));
+writeFileSync(join(pidDir, "script-" + process.pid + ".pid"), String(process.pid));
+writeFileSync(join(pidDir, "shell-" + process.ppid + ".pid"), String(process.ppid));
 const worker = spawn(process.execPath, [join(here, "sigint-leak-worker.mjs")], { stdio: "ignore" });
-writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+writeFileSync(join(pidDir, "worker-" + worker.pid + ".pid"), String(worker.pid));
 worker.on("exit", (code) => process.exit(code ?? 0));
 `;
 
@@ -740,8 +723,7 @@ const SIGINT_LEAK_WORKER_MJS = `process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
 `;
 
-// recordedPids, isAlive, and waitForNoneAlive are already defined above for
-// the timed-out-mutation test and are reused here as-is.
+// recordedPids, isAlive, and waitForNoneAlive live in tests/lib/process-tree.ts.
 
 test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, and says it was interrupted, not that the baseline failed", async () => {
   const dir = makeRepo({
@@ -774,7 +756,13 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
     while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    const pids = recordedPids(pidDir);
+    // The whole tree, not just the leaf worker: SIGINT_LEAK_RUN_MJS above
+    // writes out its own pid and the shell's (its ppid) as soon as it
+    // starts, and mutate's own pid (child.pid) is added here, so a
+    // surviving shell or a surviving mutate process -- exactly what
+    // checking only the innermost worker would miss -- fails this the
+    // same way a surviving worker does.
+    const pids = [...recordedPids(pidDir), ...(child.pid === undefined ? [] : [child.pid])];
     assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
     child.kill("SIGINT");
     // A bounded wait, not an unconditional await: if the fix were absent
@@ -786,7 +774,7 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
     ]);
     if (exitResult === "timed-out") child.kill("SIGKILL");
     const survivors = waitForNoneAlive(pids, 5_000);
-    assert.deepEqual(survivors, [], "a worker process outlived mutate after a real SIGINT");
+    assert.deepEqual(survivors, [], "a process in mutate's tree outlived it after a real SIGINT");
     // reviewer finding 3: mutate used to register its own SIGINT/SIGTERM
     // handlers only after the baseline returned, so a Ctrl-C during the
     // baseline (this window) fell through to the "the baseline failed"
@@ -812,8 +800,13 @@ test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, a
       );
     }
   } finally {
-    rmSyncResilient(pidDir);
-    rmSyncResilient(dir);
+    // A directory rmSync cannot remove here is a cleanup problem, not
+    // evidence that anything survived -- that claim is already settled
+    // above, by waitForNoneAlive, before this ever runs. cleanupTempDir
+    // retries the same way rmSyncResilient always has, then logs a note
+    // and moves on instead of failing this test over it.
+    cleanupTempDir(pidDir);
+    cleanupTempDir(dir);
   }
 });
 
@@ -836,9 +829,14 @@ const pidDir = process.argv[2];
 if (!shouldHang(0)) {
   process.exit(0);
 }
+// Only past this point (the mutated run, never the baseline) does this
+// script's own pid and the shell's (its ppid) get written out, alongside
+// the worker's -- see the matching comment on SIGINT_LEAK_RUN_MJS above.
+writeFileSync(join(pidDir, "script-" + process.pid + ".pid"), String(process.pid));
+writeFileSync(join(pidDir, "shell-" + process.ppid + ".pid"), String(process.ppid));
 const here = dirname(fileURLToPath(import.meta.url));
 const worker = spawn(process.execPath, [join(here, "sigint-leak-worker.mjs")], { stdio: "ignore" });
-writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+writeFileSync(join(pidDir, "worker-" + worker.pid + ".pid"), String(worker.pid));
 // Never resolves on its own: only a real group kill ends this, the same
 // as the worker it spawned.
 `;
@@ -876,7 +874,9 @@ test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already r
     while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    const pids = recordedPids(pidDir);
+    // The whole tree, not just the leaf worker: see the matching comment
+    // on the SIGINT test above.
+    const pids = [...recordedPids(pidDir), ...(child.pid === undefined ? [] : [child.pid])];
     assert.ok(
       pids.length > 0,
       `expected the mutation's worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`,
@@ -891,12 +891,15 @@ test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already r
     assert.deepEqual(
       survivors,
       [],
-      "a worker process outlived mutate after a real SIGINT sent during a post-baseline mutation",
+      "a process in mutate's tree outlived it after a real SIGINT sent during a post-baseline mutation",
     );
     assert.match(stderr, /interrupted by SIGINT/);
   } finally {
-    rmSyncResilient(pidDir);
-    rmSyncResilient(dir);
+    // See the matching comment on the SIGINT test above: a locked
+    // directory here is a cleanup problem, not evidence that anything
+    // survived.
+    cleanupTempDir(pidDir);
+    cleanupTempDir(dir);
   }
 });
 
