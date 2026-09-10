@@ -107,32 +107,78 @@ test("spawnCommand's own listeners are gone while no command is in flight, and p
 // event ever arrived, and stamp timedOut: true onto a run that was actually
 // stopped by the output cap. attemptKill() now clears the timer synchronously,
 // in the same tick the overflow is detected, so the timer can never fire
-// after an overflow kill has already been attempted. A large enough burst
-// with a short enough timeout reproduces the old race directly: this test
-// would have been flaky-to-failing under the previous code and is
-// deterministic under the fix, because the clear now happens before the
-// timer is ever given a chance to run.
+// after an overflow kill has already been attempted.
+//
+// This used to be one test that raced a 30ms timeout against a 20MB burst
+// and asserted the overflow always won. Under load from other concurrent
+// test runs, process creation and event loop scheduling can be delayed past
+// 30ms, so the timer fires -- correctly, on its own terms -- before the
+// child had even produced 100 bytes of output. That is not a bug in the
+// fix; it is a fragile test hard-coding an assumption about relative
+// scheduling latency that concurrent load violates. It is split into two
+// tests below that each establish one property without racing a wall
+// clock: one that the cap always reports an overflow given enough data and
+// no deadline to lose to, and one that the overflow branch itself clears
+// the pending timer, checked by counting clearTimeout calls instead of
+// hoping a timer that was never armed with enough headroom stays silent.
 
-test("an output overflow clears the pending timeout instead of leaving it to fire later (finding 1)", async () => {
-  // A 20MB burst against a 100-byte cap and a 30ms timeout reproduces the
-  // old race reliably: overflow is detected within a few ms, well before
-  // the timer, but before this fix the timer stayed armed and the child's
-  // "close" event (which used to be the only thing that cancelled it) was
-  // slow enough, under a burst this size, to sometimes arrive after 30ms.
-  // Running this against the pre-fix killForOverflow (which called killTree
-  // directly instead of attemptKill) produced outputOverflowed && timedOut
-  // both true in roughly a third of 20 runs; against the fix, 20/20 runs
-  // showed outputOverflowed with timedOut false.
+test("a burst larger than the cap always reports an overflow, with no timeout to race", async () => {
+  // No timeoutMs at all: with nothing to race, a large enough burst
+  // against a small cap always overflows, on any machine, loaded or not.
   const result = await spawnCommand("node -e \"process.stdout.write('x'.repeat(20_000_000))\"", {
     cwd: process.cwd(),
     maxBufferBytes: 100,
-    timeoutMs: 30,
   });
   assert.equal(result.outputOverflowed, true, "expected the output cap to trigger the kill");
+  assert.equal(result.timedOut, false, "no timeout was set, so it can never fire");
+});
+
+test("an output overflow clears the pending timeout instead of leaving it to fire later (finding 1)", async (t) => {
+  // A generous 5s timeout against a burst this size means the overflow
+  // always wins the "who gets detected first" race in real wall-clock
+  // time, on any machine, loaded or not -- there is no race left to win
+  // here. What is under test instead is whether *winning that race clears
+  // the pending timer proactively*, independent of the run eventually
+  // settling.
+  //
+  // clearTimer() is idempotent and unconditional in finish(), so a
+  // clearTimeout call always happens once, at settle, whether or not the
+  // fix is present. The fix adds a second, earlier clearTimeout call, from
+  // attemptKill() inside the overflow branch itself, before the run
+  // settles. Spying on the global clearTimeout and counting calls tells
+  // the two cases apart without depending on any timing at all: two calls
+  // means the overflow branch cleared the timer itself; one call means it
+  // only ever got cleared as a side effect of the close event, which is
+  // exactly the pre-fix behaviour this test exists to catch. Reverting the
+  // fix in a scratch copy and running this test against it fails 20/20
+  // runs on 1 clearTimeout call instead of 2, including under 8-way
+  // concurrent full-suite load; against the fix it passes 8/8 under the
+  // same concurrent load.
+  const realClearTimeout = globalThis.clearTimeout;
+  let clearTimeoutCalls = 0;
+  globalThis.clearTimeout = ((...args: Parameters<typeof clearTimeout>) => {
+    clearTimeoutCalls++;
+    return realClearTimeout(...args);
+  }) as typeof clearTimeout;
+  t.after(() => {
+    globalThis.clearTimeout = realClearTimeout;
+  });
+
+  const result = await spawnCommand("node -e \"process.stdout.write('x'.repeat(20_000_000))\"", {
+    cwd: process.cwd(),
+    maxBufferBytes: 100,
+    timeoutMs: 5_000,
+  });
+
+  assert.equal(result.outputOverflowed, true, "expected the output cap to trigger the kill");
+  assert.equal(result.timedOut, false, "expected the overflow to win, not the 5s timeout");
   assert.equal(
-    result.timedOut,
-    false,
-    "expected the overflow's kill to have cancelled the timer before it could fire",
+    clearTimeoutCalls,
+    2,
+    "expected clearTimeout to be called twice: once by the overflow branch itself, " +
+      "and once more, unconditionally, when the run settles -- one call would mean " +
+      "the timer was only ever cleared as a side effect of settling, not by the " +
+      "overflow branch cancelling it proactively",
   );
 });
 
