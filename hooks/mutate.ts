@@ -36,7 +36,7 @@ import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { join, relative } from "node:path";
-import { spawnCommand } from "../src/spawn-command.ts";
+import { spawnCommand, reraiseSignal } from "../src/spawn-command.ts";
 import {
   exitCodeFor,
   formatReportJson,
@@ -140,7 +140,16 @@ Exit codes:
      failing, no command to run, nothing to mutate, a bad argument, or a
      tree left dirty afterwards
   3  nothing survived, but at least one mutation never got a verdict: it
-     timed out or was skipped, so that part of the run is unmeasured
+     timed out, printed more than this tool will hold, was killed by a
+     signal that had nothing to do with the suite, or was skipped, so that
+     part of the run is unmeasured
+
+A run stopped by SIGINT or SIGTERM does not use any of the codes above. On
+POSIX it exits with that signal's own convention instead (130 for SIGINT,
+143 for SIGTERM), the same as if this tool had never caught the signal at
+all, so a shell or CI job can tell "interrupted" apart from every other
+outcome. On Windows, which has no such convention to fall back on, it still
+exits 2.
 `;
 
 /**
@@ -428,7 +437,13 @@ function resolveCommand(args: ParsedArgs, repoRoot: string): string {
  * timed-out mutation used to leave orphaned processes running. */
 async function runCommand(command: string, repoRoot: string, timeoutMs?: number): Promise<CommandRun> {
   const result = await spawnCommand(command, { cwd: repoRoot, timeoutMs, maxBufferBytes: MAX_OUTPUT_BYTES });
-  return { status: result.status, timedOut: result.timedOut, durationMs: result.durationMs };
+  return {
+    status: result.status,
+    timedOut: result.timedOut,
+    durationMs: result.durationMs,
+    outputOverflowed: result.outputOverflowed,
+    killedBySignal: result.killedBySignal,
+  };
 }
 
 async function main(): Promise<void> {
@@ -486,33 +501,6 @@ async function main(): Promise<void> {
     );
   }
 
-  // The baseline. A suite that is already red cannot tell anyone what a
-  // mutation did, so this is a hard stop, not a warning. It needs its own
-  // timeout: the per-mutation default below is derived from how long the
-  // baseline took, so the baseline cannot use that formula, and with no
-  // timer at all nothing here would ever call the group kill if this run
-  // were killed while the baseline hung. An explicit --timeout bounds the
-  // baseline the same as every mutation; with none given,
-  // DEFAULT_BASELINE_TIMEOUT_MS stands in.
-  const baselineTimeoutMs =
-    args.timeoutSeconds !== undefined ? Math.round(args.timeoutSeconds * 1000) : DEFAULT_BASELINE_TIMEOUT_MS;
-  const baseline = await runCommand(command, repoRoot, baselineTimeoutMs);
-  if (baseline.timedOut) {
-    fail(
-      `the baseline run of '${command}' did not finish within ${baselineTimeoutMs / 1000}s, before anything was ` +
-        "mutated; a suite this tool cannot even measure once cannot judge a mutation. Pass --timeout to allow more " +
-        "time if the suite is legitimately this slow",
-    );
-  }
-  if (baseline.status !== 0) {
-    fail(
-      `the baseline run of '${command}' failed (exit ${baseline.status ?? "killed"}) before anything was mutated; ` +
-        "a suite that is already failing cannot judge a mutation",
-    );
-  }
-  const timeoutMs =
-    args.timeoutSeconds !== undefined ? Math.round(args.timeoutSeconds * 1000) : baseline.durationMs * 3 + 10_000;
-
   const originals = new Map<string, string>();
   for (const file of files) originals.set(file.path, file.text);
 
@@ -529,18 +517,66 @@ async function main(): Promise<void> {
     }
   };
 
-  // An interrupted run still has to put every file back. The handlers stay
-  // registered for the whole mutation loop; a signal that arrives while the
-  // command is running is delivered once that call returns.
-  const onSignal = (signal: string): void => {
+  // The handlers are registered here, before the baseline runs, and not
+  // after it returns. They used to be registered only once the baseline
+  // was done, which left the whole baseline as a window where this tool
+  // had no signal handler of its own at all: a real Ctrl-C during it fell
+  // through to the ordinary "the baseline failed" refusal below, telling
+  // the operator their test command was broken when they had pressed
+  // Ctrl-C themselves. Registering here means both windows report the
+  // same interrupted message, and it is also what makes the group-kill
+  // listener src/spawn-command.ts adds while a command is in flight
+  // actually get exercised against listener ordering during the baseline
+  // too, not only during a later mutation.
+  //
+  // `interrupted` guards the mutation loop below against a race that
+  // re-raising the signal (see reraiseSignal in src/spawn-command.ts)
+  // introduces: re-raising ends this process asynchronously, by handing
+  // the signal back to Node's own default handling, so JS here keeps
+  // running for a little while longer. Without the flag, a mutation
+  // already in flight when the signal arrived could finish, and the loop
+  // would go on to write and run the next one, before the re-raised
+  // signal actually lands.
+  let interrupted = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (interrupted) return;
+    interrupted = true;
     restoreAll();
     process.stderr.write(`\nmutate: interrupted by ${signal}; every mutated file was restored\n`);
-    process.exit(2);
+    reraiseSignal(signal, 2);
   };
   const onInt = (): void => onSignal("SIGINT");
   const onTerm = (): void => onSignal("SIGTERM");
   process.on("SIGINT", onInt);
   process.on("SIGTERM", onTerm);
+
+  // The baseline. A suite that is already red cannot tell anyone what a
+  // mutation did, so this is a hard stop, not a warning. It needs its own
+  // timeout: the per-mutation default below is derived from how long the
+  // baseline took, so the baseline cannot use that formula, and with no
+  // timer at all nothing here would ever call the group kill if this run
+  // were killed while the baseline hung. An explicit --timeout bounds the
+  // baseline the same as every mutation; with none given,
+  // DEFAULT_BASELINE_TIMEOUT_MS stands in.
+  const baselineTimeoutMs =
+    args.timeoutSeconds !== undefined ? Math.round(args.timeoutSeconds * 1000) : DEFAULT_BASELINE_TIMEOUT_MS;
+  const baseline = await runCommand(command, repoRoot, baselineTimeoutMs);
+  if (interrupted) return;
+  if (baseline.timedOut) {
+    fail(
+      `the baseline run of '${command}' did not finish within ${baselineTimeoutMs / 1000}s, before anything was ` +
+        "mutated; a suite this tool cannot even measure once cannot judge a mutation. Pass --timeout to allow more " +
+        "time if the suite is legitimately this slow",
+    );
+  }
+  if (baseline.status !== 0) {
+    fail(
+      `the baseline run of '${command}' failed (exit ${baseline.status ?? "killed"}) before anything was mutated; ` +
+        "a suite that is already failing cannot judge a mutation",
+    );
+  }
+  const timeoutMs =
+    args.timeoutSeconds !== undefined ? Math.round(args.timeoutSeconds * 1000) : baseline.durationMs * 3 + 10_000;
 
   const results: MutationResult[] = [];
   try {
@@ -551,6 +587,7 @@ async function main(): Promise<void> {
       // command was running would sit unhandled until the whole run had
       // finished, and the handler above would never restore anything.
       await new Promise((resolveTick) => setImmediate(resolveTick));
+      if (interrupted) break;
       const original = originals.get(mutation.file);
       if (original === undefined) fail(`internal: no original held for '${mutation.file}'`);
       results.push(
@@ -568,6 +605,13 @@ async function main(): Promise<void> {
     process.off("SIGINT", onInt);
     process.off("SIGTERM", onTerm);
   }
+
+  // The signal handler has already restored the files, printed its own
+  // message, and re-raised the signal to end this process with its own
+  // exit code (see reraiseSignal). Nothing below this point should run: no
+  // report was measured to completion, and the process is about to end on
+  // its own.
+  if (interrupted) return;
 
   const report = {
     command,

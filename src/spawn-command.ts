@@ -59,6 +59,17 @@
 // this fix. The listener added here still fires on Windows and calls
 // killTree, but killTree's own Windows branch (taskkill /t) is idempotent
 // against a process that has already received Ctrl-C the ordinary way.
+//
+// SIGHUP is forwarded the same way as SIGINT and SIGTERM, for the same
+// reason: a closed terminal sends SIGHUP to its foreground group, not to a
+// detached one, so a command in flight would otherwise be orphaned by that
+// route instead of Ctrl-C's.
+//
+// Re-raising the signal that got a run interrupted, so the tool that was
+// running exits with that signal's own code instead of a fixed one, is a
+// separate concern from the tree-killing done here and lives in
+// reraiseSignal below: this module's listener only ever kills the
+// in-flight command's group, it never decides how the caller itself ends.
 
 import { spawn, execFile } from "node:child_process";
 import process from "node:process";
@@ -164,9 +175,11 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
     };
     process.prependListener("SIGINT", onSignal);
     process.prependListener("SIGTERM", onSignal);
+    process.prependListener("SIGHUP", onSignal);
     const removeSignalListeners = (): void => {
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
+      process.off("SIGHUP", onSignal);
     };
 
     const finish = (status: number | null, signal: NodeJS.Signals | null, spawnError?: string): void => {
@@ -225,4 +238,52 @@ export function spawnCommand(command: string, options: SpawnCommandOptions): Pro
       finish(code, signal);
     });
   });
+}
+
+/**
+ * Ends this process the way it would have ended if it had never registered
+ * a signal handler at all. In Node, registering any listener for SIGINT or
+ * SIGTERM removes the default POSIX disposition, which on its own would
+ * have terminated the process with exit code 128 plus the signal number
+ * (130 for SIGINT, 143 for SIGTERM). Without this, mutate, induce, and
+ * census each exited with a fixed code of their own choosing (2) on
+ * Ctrl-C, indistinguishable to a shell or a CI job from an ordinary
+ * failure that had nothing to do with being interrupted.
+ *
+ * The fix is the one esbuild, Biome, and `foreground-child` all use: once
+ * this tool's own cleanup is done (mutate has restored its mutated files,
+ * census has removed its worktree), strip every listener still registered
+ * for the signal and re-send it to this same process. This removes every
+ * listener, not only the caller's own, because
+ * src/spawn-command.ts's own SIGINT/SIGTERM/SIGHUP listener (above) may
+ * still be attached at this point: it is only unregistered once the
+ * command it was watching actually closes, which had not necessarily
+ * happened yet by the time the caller's own handler ran. Leaving it in
+ * place would mean the signal was still "handled" from Node's point of
+ * view, and the default disposition this function exists to restore would
+ * never take over. With no listener left for the signal at all, the
+ * re-sent signal is delivered with nothing to intercept it, and the
+ * process ends exactly as if this tool had never touched the signal in
+ * the first place.
+ *
+ * Windows has no such default disposition to restore: it has no POSIX
+ * signals, and re-sending SIGINT or SIGTERM to the current process there
+ * is not guaranteed to report the signal in the exit code at all; it can
+ * exit with plain status 1 instead. Chasing that down is separate work
+ * this project is not taking on here, so Windows keeps exiting with
+ * `windowsFallbackExitCode`, the same fixed code it used before this
+ * function existed, and every other part of its behaviour is unchanged.
+ *
+ * The one hole this cannot close, on any platform: a SIGKILL cannot be
+ * intercepted at all, so a process killed with SIGKILL never runs this or
+ * any other cleanup. The only known answer to that is a watchdog child
+ * process, which this project is not taking on.
+ */
+export function reraiseSignal(signal: NodeJS.Signals, windowsFallbackExitCode: number): void {
+  if (process.platform === "win32") {
+    process.exit(windowsFallbackExitCode);
+    return;
+  }
+  process.removeAllListeners(signal);
+  process.kill(process.pid, signal);
 }

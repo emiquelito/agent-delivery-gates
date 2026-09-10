@@ -26,7 +26,7 @@ export type MutationOperator =
   | "boolean-literal"
   | "arithmetic";
 
-export type Verdict = "killed" | "survived" | "timeout" | "skipped";
+export type Verdict = "killed" | "survived" | "timeout" | "skipped" | "output-overflow" | "killed-by-signal";
 
 export interface Mutation {
   /** Path as the caller gave it, usually relative to the repository root. */
@@ -287,19 +287,46 @@ export interface RunSummary {
   survived: number;
   timeout: number;
   skipped: number;
+  /** A mutation whose run was killed for printing more than the output
+   * cap, before it could be judged. Reported apart from `killed`, the way
+   * Stryker separates "no coverage" from "killed" and PIT gives resource
+   * exhaustion its own status: neither tool folds a run nobody judged into
+   * a run the suite caught. */
+  outputOverflow: number;
+  /** A mutation whose run was killed by a signal other than the timeout or
+   * the output cap: a segfault, an out-of-memory kill, a command that
+   * signalled itself. That kill says nothing about whether the suite would
+   * have noticed the mutation either, so it is kept apart from `killed`
+   * for the same reason `outputOverflow` is. */
+  killedBySignal: number;
 }
 
 export function summarize(results: MutationResult[]): RunSummary {
-  const summary: RunSummary = { killed: 0, survived: 0, timeout: 0, skipped: 0 };
-  for (const result of results) summary[result.verdict]++;
+  const summary: RunSummary = { killed: 0, survived: 0, timeout: 0, skipped: 0, outputOverflow: 0, killedBySignal: 0 };
+  for (const result of results) {
+    if (result.verdict === "output-overflow") summary.outputOverflow++;
+    else if (result.verdict === "killed-by-signal") summary.killedBySignal++;
+    else summary[result.verdict]++;
+  }
   return summary;
 }
 
-/** A mutation the run never judged: it hung until the timeout, or it was
- * skipped before the command ever ran. Neither says anything about whether
- * the suite would have caught that break. */
+/** A mutation the run never judged: it hung until the timeout, printed
+ * more than this tool will hold, was killed by a signal that had nothing
+ * to do with the suite, or was skipped before the command ever ran. None
+ * of those says anything about whether the suite would have caught that
+ * break. An output-cap kill and a signal kill are as unmeasured as a
+ * timeout for exactly the same reason isUnmeasured already gives for a
+ * timeout: the run was cut off before it could report a verdict, so
+ * crediting it as a catch would credit the suite with a catch it never
+ * made. */
 function isUnmeasured(result: MutationResult): boolean {
-  return result.verdict === "timeout" || result.verdict === "skipped";
+  return (
+    result.verdict === "timeout" ||
+    result.verdict === "skipped" ||
+    result.verdict === "output-overflow" ||
+    result.verdict === "killed-by-signal"
+  );
 }
 
 /**
@@ -344,7 +371,8 @@ export function formatReportText(input: ReportInput): string {
   lines.push(`Mutations: ${input.planned} planned, ${input.attempted} attempted`);
   lines.push("");
   lines.push(
-    `killed ${summary.killed}, survived ${summary.survived}, timeout ${summary.timeout}, skipped ${summary.skipped}`,
+    `killed ${summary.killed}, survived ${summary.survived}, timeout ${summary.timeout}, skipped ${summary.skipped}, ` +
+      `output-overflow ${summary.outputOverflow}, killed-by-signal ${summary.killedBySignal}`,
   );
 
   if (input.attempted < input.planned) {

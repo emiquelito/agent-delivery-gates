@@ -18,6 +18,17 @@ export interface CommandRun {
   status: number | null;
   timedOut: boolean;
   durationMs: number;
+  /** True when the command printed more than the run's output cap and was
+   * killed for it, the way src/spawn-command.ts reports it. A run killed
+   * for overflowing was never judged by whatever it printed: it says
+   * nothing about whether the suite would have caught the mutation,
+   * exactly as isUnmeasured in src/mutate.ts already says about a
+   * timeout. */
+  outputOverflowed?: boolean;
+  /** The signal that killed the command, when something other than the
+   * timeout or the output cap did: a segfault, an out-of-memory kill, a
+   * command that signals itself. Null or absent when nothing did. */
+  killedBySignal?: string | null;
 }
 
 /** The two effects one mutation step has on the world outside this module.
@@ -50,8 +61,22 @@ export async function runOneMutation(
   try {
     io.writeFile(absolutePath, mutated);
     const run = await io.runCommand();
-    const verdict: Verdict = run.timedOut ? "timeout" : run.status === 0 ? "survived" : "killed";
-    return { mutation, verdict, durationMs: run.durationMs, exitCode: run.timedOut ? null : run.status };
+    // Order matters, the same way it does in src/induce.ts's outcomeFor: a
+    // run that hit the timeout is a timeout even if the kill also crossed
+    // the output cap or arrived as a signal, and an overflow kill also
+    // carries a signal (the kill itself sends one), so the signal check
+    // comes last of the three.
+    const verdict: Verdict = run.timedOut
+      ? "timeout"
+      : run.outputOverflowed === true
+        ? "output-overflow"
+        : run.killedBySignal !== undefined && run.killedBySignal !== null
+          ? "killed-by-signal"
+          : run.status === 0
+            ? "survived"
+            : "killed";
+    const unjudged = verdict === "timeout" || verdict === "output-overflow" || verdict === "killed-by-signal";
+    return { mutation, verdict, durationMs: run.durationMs, exitCode: unjudged ? null : run.status };
   } finally {
     io.writeFile(absolutePath, originalText);
   }

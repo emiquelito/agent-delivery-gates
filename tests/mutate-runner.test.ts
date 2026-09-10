@@ -116,6 +116,52 @@ test("a timed-out command is a timeout with no exit code, and the file still goe
   });
 });
 
+// reviewer finding 2: an output-cap kill and a signal kill were both being
+// folded into "killed", crediting the suite with a catch it never made. A
+// run cut off for either reason is exactly as unmeasured as a timeout, so
+// each gets its own verdict here, with no exit code, the same as a timeout.
+
+test("a run killed for overflowing the output cap is its own verdict, not a kill", async () => {
+  await withFile(async (path) => {
+    const result = await runOneMutation(firstMutation(), ORIGINAL, path, {
+      writeFile: writeToDisk,
+      runCommand: () =>
+        Promise.resolve({ status: null, timedOut: false, durationMs: 500, outputOverflowed: true }),
+    });
+    assert.equal(result.verdict, "output-overflow");
+    assert.equal(result.exitCode, null);
+    assert.equal(readFileSync(path, "utf8"), ORIGINAL);
+  });
+});
+
+test("a run killed by a signal unrelated to the timeout or the output cap is its own verdict, not a kill", async () => {
+  await withFile(async (path) => {
+    const result = await runOneMutation(firstMutation(), ORIGINAL, path, {
+      writeFile: writeToDisk,
+      runCommand: () =>
+        Promise.resolve({ status: null, timedOut: false, durationMs: 200, killedBySignal: "SIGSEGV" }),
+    });
+    assert.equal(result.verdict, "killed-by-signal");
+    assert.equal(result.exitCode, null);
+    assert.equal(readFileSync(path, "utf8"), ORIGINAL);
+  });
+});
+
+test("a timeout wins over an overflow or a signal reported on the same run", () => {
+  // Order matters the same way it does in src/induce.ts's outcomeFor: the
+  // timeout is what actually triggered the kill, so it is what the
+  // verdict names, even though the run also carries the overflow flag or
+  // a signal from that same kill.
+  return withFile(async (path) => {
+    const overflowAndTimeout = await runOneMutation(firstMutation(), ORIGINAL, path, {
+      writeFile: writeToDisk,
+      runCommand: () =>
+        Promise.resolve({ status: null, timedOut: true, durationMs: 3000, outputOverflowed: true }),
+    });
+    assert.equal(overflowAndTimeout.verdict, "timeout");
+  });
+});
+
 test("a mutation that changes nothing is skipped without writing at all", async () => {
   await withFile(async (path) => {
     const mutation = firstMutation();

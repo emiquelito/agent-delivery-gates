@@ -35,7 +35,7 @@
 
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
-import { spawnCommand } from "../src/spawn-command.ts";
+import { spawnCommand, reraiseSignal } from "../src/spawn-command.ts";
 import {
   copyFileSync,
   existsSync,
@@ -165,6 +165,13 @@ Exit codes:
      could not be compared, a test that errored against the base source, a
      result the two runs did not agree about, or a result subset that could
      not be read
+
+A run stopped by SIGINT or SIGTERM does not use any of the codes above. On
+POSIX it exits with that signal's own convention instead (130 for SIGINT,
+143 for SIGTERM), the same as if this tool had never caught the signal at
+all, so a shell or CI job can tell "interrupted" apart from every other
+outcome. On Windows, which has no such convention to fall back on, it still
+exits 2.
 `;
 
 /** Lockfiles checked for a byte-identical match between the base and HEAD.
@@ -741,10 +748,19 @@ async function main(): Promise<void> {
     cleaned = true;
     removeWorktree(repoRoot, worktree);
   };
-  const onSignal = (signal: string): void => {
+  // Set, not just read, by onSignal below: reraiseSignal ends this process
+  // asynchronously, by handing the signal back to Node's own default
+  // handling, so the steps still inside the try block below keep running
+  // for a little while longer. Without this flag one of them could reach a
+  // fail() call over output a signal-killed run never finished printing,
+  // which would exit 2 before the re-raised signal actually lands.
+  let interrupted = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (interrupted) return;
+    interrupted = true;
     cleanup();
     process.stderr.write(`\ncensus: interrupted by ${signal}; the temporary base worktree was removed\n`);
-    process.exit(2);
+    reraiseSignal(signal, 2);
   };
   const onInt = (): void => onSignal("SIGINT");
   const onTerm = (): void => onSignal("SIGTERM");
@@ -775,12 +791,14 @@ async function main(): Promise<void> {
     // this run's responsibility. Everything else here is synchronous.
     await new Promise((tick) => setImmediate(tick));
     const headRun = await runAndParse(command, repoRoot, args, timeoutMs);
+    if (interrupted) return;
     if ("error" in headRun) {
       fail(`the run at HEAD could not be read: ${headRun.error}`);
     }
 
     await new Promise((tick) => setImmediate(tick));
     const baseRun = await runAndParse(command, worktree.dir, args, timeoutMs);
+    if (interrupted) return;
     if ("error" in baseRun) {
       fail(
         `the run at the base commit could not be read: ${baseRun.error}. ` +
@@ -817,6 +835,7 @@ async function main(): Promise<void> {
       const headAgain = await runAndParse(command, repoRoot, args, timeoutMs);
       await new Promise((tick) => setImmediate(tick));
       const baseAgain = await runAndParse(command, worktree.dir, args, timeoutMs);
+      if (interrupted) return;
       runs += 2;
       if ("error" in headAgain || "error" in baseAgain) {
         notes.push(
@@ -852,6 +871,7 @@ async function main(): Promise<void> {
       copyTestFilesInto(repoRoot, worktree.dir, testFiles);
       await new Promise((tick) => setImmediate(tick));
       const redRun = await runAndParse(command, worktree.dir, args, timeoutMs);
+      if (interrupted) return;
       runs += 1;
       if ("error" in redRun) {
         notes.push(
@@ -871,6 +891,7 @@ async function main(): Promise<void> {
     if (args.rerun && redSuspects > 0 && redTests !== null) {
       await new Promise((tick) => setImmediate(tick));
       const redAgain = await runAndParse(command, worktree.dir, args, timeoutMs);
+      if (interrupted) return;
       runs += 1;
       if ("error" in redAgain) {
         notes.push(

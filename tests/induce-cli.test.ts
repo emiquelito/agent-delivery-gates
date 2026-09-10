@@ -844,8 +844,8 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    const exited = new Promise<number | null>((resolveExit) => {
-      child.on("exit", (code) => resolveExit(code));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null } | "timed-out">((resolveExit) => {
+      child.on("exit", (code, signal) => resolveExit({ code, signal }));
     });
     const recordDeadline = Date.now() + 10_000;
     while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
@@ -854,13 +854,26 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     const pids = recordedPids(pidDir);
     assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
     child.kill("SIGINT");
-    const exitCode = await Promise.race([
+    const exitResult = await Promise.race([
       exited,
       new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
     ]);
-    if (exitCode === "timed-out") child.kill("SIGKILL");
+    if (exitResult === "timed-out") child.kill("SIGKILL");
     const survivors = waitForNoneAlive(pids, 5_000);
     assert.deepEqual(survivors, [], "a worker process outlived induce after a real SIGINT");
+    // Design correction B: induce re-raises the signal with its own
+    // default disposition once it has printed its message, instead of a
+    // fixed exit code, so a shell or CI job can tell an interrupted run
+    // apart from an ordinary failure. Node reports that as a null code and
+    // the signal itself, not a translated 128+n number. Windows has no
+    // such disposition to fall back on and keeps the old fixed exit 2.
+    assert.notEqual(exitResult, "timed-out", `stdout:\n${stdout}\nstderr:\n${stderr}`);
+    if (process.platform === "win32") {
+      assert.equal((exitResult as { code: number | null }).code, 2);
+    } else {
+      assert.equal((exitResult as { code: number | null }).code, null);
+      assert.equal((exitResult as { signal: NodeJS.Signals | null }).signal, "SIGINT");
+    }
   } finally {
     rmSync(pidDir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });

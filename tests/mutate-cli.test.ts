@@ -215,13 +215,27 @@ test("a run interrupted partway restores every file it wrote to", async () => {
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    const exited = new Promise<number | null>((resolveExit) => {
-      child.on("exit", (code) => resolveExit(code));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit) => {
+      child.on("exit", (code, signal) => resolveExit({ code, signal }));
     });
     await new Promise((r) => setTimeout(r, 2500));
     child.kill("SIGINT");
-    const code = await exited;
-    assert.equal(code, 2, stderr);
+    const { code, signal } = await exited;
+    // Design correction B: mutate re-raises the signal with its own
+    // default disposition once cleanup is done, instead of exiting with a
+    // fixed code of its own choosing, so a shell or CI job can tell an
+    // interrupted run apart from an ordinary failure. Node reports a
+    // process that ended this way with a null code and the signal itself,
+    // not a translated 128+n number; that translation is done by a shell
+    // reporting $?, not by Node's own child_process events. Windows has no
+    // such default disposition to fall back on, and keeps the old fixed
+    // exit 2 there (see reraiseSignal in src/spawn-command.ts).
+    if (process.platform === "win32") {
+      assert.equal(code, 2, stderr);
+    } else {
+      assert.equal(code, null, stderr);
+      assert.equal(signal, "SIGINT", stderr);
+    }
     assert.match(stderr, /interrupted by SIGINT/);
     assert.deepEqual(readFileSync(join(dir, "src/order.mjs")), before);
     assert.equal(runGit(dir, ["status", "--porcelain"]), "", "the tree is clean again");
@@ -700,7 +714,7 @@ setInterval(() => {}, 1000);
 // recordedPids, isAlive, and waitForNoneAlive are already defined above for
 // the timed-out-mutation test and are reused here as-is.
 
-test("a real Ctrl-C (SIGINT) to the mutate process leaves no descendant running", async () => {
+test("a real Ctrl-C (SIGINT) during the baseline leaves no descendant running, and says it was interrupted, not that the baseline failed", async () => {
   const dir = makeRepo({
     "src/loop.mjs": "export function shouldContinue(seen) {\n  return seen < 1;\n}\n",
     "sigint-run.mjs": SIGINT_LEAK_RUN_MJS,
@@ -721,8 +735,8 @@ test("a real Ctrl-C (SIGINT) to the mutate process leaves no descendant running"
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    const exited = new Promise<number | null>((resolveExit) => {
-      child.on("exit", (code) => resolveExit(code));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null } | "timed-out">((resolveExit) => {
+      child.on("exit", (code, signal) => resolveExit({ code, signal }));
     });
     // The command spawns its worker unconditionally, on the very first call
     // (the baseline), so waiting for the pid file is enough: a descendant
@@ -737,13 +751,120 @@ test("a real Ctrl-C (SIGINT) to the mutate process leaves no descendant running"
     // A bounded wait, not an unconditional await: if the fix were absent
     // and mutate itself somehow never exited, this test must fail instead
     // of hanging forever.
+    const exitResult = await Promise.race([
+      exited,
+      new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
+    ]);
+    if (exitResult === "timed-out") child.kill("SIGKILL");
+    const survivors = waitForNoneAlive(pids, 5_000);
+    assert.deepEqual(survivors, [], "a worker process outlived mutate after a real SIGINT");
+    // reviewer finding 3: mutate used to register its own SIGINT/SIGTERM
+    // handlers only after the baseline returned, so a Ctrl-C during the
+    // baseline (this window) fell through to the "the baseline failed"
+    // refusal instead of the interrupted message the mutation loop always
+    // printed. Both windows have to say the same thing now.
+    assert.match(stderr, /interrupted by SIGINT/);
+    assert.doesNotMatch(stderr, /baseline run of .* failed/, "a Ctrl-C must never read as a broken baseline");
+    assert.doesNotMatch(stderr, /cannot judge a mutation/, "a Ctrl-C must never read as a broken baseline");
+    // Design correction B: re-raised with the signal's own default
+    // disposition once cleanup is done, not a fixed code mutate picked
+    // itself. Node reports a process that ended this way with a null code
+    // and the signal itself, not a translated 128+n number. Windows keeps
+    // the old fixed exit 2 (see reraiseSignal in src/spawn-command.ts).
+    assert.notEqual(exitResult, "timed-out", `stdout:\n${stdout}\nstderr:\n${stderr}`);
+    if (process.platform === "win32") {
+      assert.equal((exitResult as { code: number | null }).code, 2, `stdout:\n${stdout}\nstderr:\n${stderr}`);
+    } else {
+      assert.equal((exitResult as { code: number | null }).code, null, `stdout:\n${stdout}\nstderr:\n${stderr}`);
+      assert.equal(
+        (exitResult as { signal: NodeJS.Signals | null }).signal,
+        "SIGINT",
+        `stdout:\n${stdout}\nstderr:\n${stderr}`,
+      );
+    }
+  } finally {
+    rmSync(pidDir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A gate function whose truth mutate's one mutation flips: false at the
+// baseline (0 < 0), true once `<` becomes `<=` (0 <= 0). The command below
+// uses it to spawn its leaking worker only for the mutated run, never for
+// the baseline, so a SIGINT sent once the worker is recorded lands
+// squarely in the post-baseline mutation window: exactly the window
+// reviewer finding 1 says was never exercised, because mutate's own
+// onInt/onTerm are registered before this point now, and
+// src/spawn-command.ts's own listener for the in-flight command is the
+// only other one on the same signal.
+const GATED_SIGINT_RUN_MJS = `import { shouldHang } from "./src/loop.mjs";
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const pidDir = process.argv[2];
+if (!shouldHang(0)) {
+  process.exit(0);
+}
+const here = dirname(fileURLToPath(import.meta.url));
+const worker = spawn(process.execPath, [join(here, "sigint-leak-worker.mjs")], { stdio: "ignore" });
+writeFileSync(join(pidDir, worker.pid + ".pid"), String(worker.pid));
+// Never resolves on its own: only a real group kill ends this, the same
+// as the worker it spawned.
+`;
+
+test("a real Ctrl-C (SIGINT) during a mutation, after the baseline has already returned, leaves no descendant running (reviewer finding 1)", async () => {
+  const dir = makeRepo({
+    "src/loop.mjs": "export function shouldHang(n) {\n  return n < 0;\n}\n",
+    "gated-sigint-run.mjs": GATED_SIGINT_RUN_MJS,
+    "sigint-leak-worker.mjs": SIGINT_LEAK_WORKER_MJS,
+  });
+  const pidDir = mkdtempSync(join(tmpdir(), "adg-mutate-sigint-post-baseline-pids-"));
+  try {
+    const child = spawn(
+      "node",
+      [CLI_PATH, "--paths", "src/loop.mjs", "--command", `node gated-sigint-run.mjs ${pidDir}`],
+      { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const exited = new Promise<number | null>((resolveExit) => {
+      child.on("exit", (code) => resolveExit(code));
+    });
+    // The baseline call runs shouldHang(0) against the original `<`, which
+    // is false, so it exits at once and spawns no worker at all. Only the
+    // one mutation (`<` to `<=`) makes shouldHang(0) true, so a pid file
+    // appearing here means the baseline has already returned and mutate's
+    // own onInt/onTerm are registered.
+    const recordDeadline = Date.now() + 10_000;
+    while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const pids = recordedPids(pidDir);
+    assert.ok(
+      pids.length > 0,
+      `expected the mutation's worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`,
+    );
+    child.kill("SIGINT");
     const exitCode = await Promise.race([
       exited,
       new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
     ]);
     if (exitCode === "timed-out") child.kill("SIGKILL");
     const survivors = waitForNoneAlive(pids, 5_000);
-    assert.deepEqual(survivors, [], "a worker process outlived mutate after a real SIGINT");
+    assert.deepEqual(
+      survivors,
+      [],
+      "a worker process outlived mutate after a real SIGINT sent during a post-baseline mutation",
+    );
+    assert.match(stderr, /interrupted by SIGINT/);
   } finally {
     rmSync(pidDir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
@@ -821,14 +942,89 @@ if (shouldFlood(0)) {
       "json",
     ]);
     const report = JSON.parse(result.stdout) as {
-      results: Array<{ verdict: string; durationMs: number }>;
+      results: Array<{ verdict: string; durationMs: number; exitCode: number | null }>;
     };
     assert.equal(report.results.length, 1, result.stdout);
     const [entry] = report.results;
-    assert.equal(entry.verdict, "killed", `expected the flood to be capped, not timed out: ${result.stdout}`);
+    // reviewer finding 2: this used to assert verdict === "killed", which
+    // blessed the bug the finding is about. A run killed for overflowing
+    // the output cap never let the suite's own exit code through: nothing
+    // here says the suite noticed the mutation, only that it printed too
+    // much. Crediting that as a catch is exactly what isUnmeasured already
+    // refuses to do for a timeout, and an overflow kill is unmeasured for
+    // the same reason.
+    assert.equal(
+      entry.verdict,
+      "output-overflow",
+      `expected the flood to be capped and reported as unmeasured, not timed out or credited as a catch: ${result.stdout}`,
+    );
+    assert.equal(entry.exitCode, null, "an overflow kill has no exit code to report, the same as a timeout");
     assert.ok(
       entry.durationMs < 4000,
       `expected the output cap to kill the flood in a few seconds, not ride out the 8s timeout: took ${entry.durationMs}ms`,
     );
+    // Exit 3, not 0: nothing survived, but this one mutation was never
+    // judged. Reading this as a clean run would be the exact failure
+    // finding 2 is about.
+    assert.equal(result.status, 3, result.stdout);
+  });
+});
+
+test("a mutation whose run is killed by a signal, not by the timeout or the output cap, is its own verdict too (finding 2)", () => {
+  // Built the same way as the flood test above: the baseline runs the original
+  // `<`, which is false, and exits cleanly; the one mutation to `<=` makes
+  // the gate true and the command signals itself instead of exiting. A
+  // command killed by a signal arrives with a null status, and used to
+  // read exactly like a plain non-zero exit ("killed"), crediting the
+  // suite with a catch a segfault or an out-of-memory kill has nothing to
+  // do with.
+  //
+  // spawnCommand runs the command through a shell (`sh -c "node
+  // die-run.mjs"`), and a shell that notices its own foreground child die
+  // by a signal reports that as its OWN plain exit code (128 + the signal
+  // number), not by dying of the signal itself; `process.kill(process.pid,
+  // ...)` from inside the node process therefore never reaches
+  // spawnCommand's `close` handler as a signal at all. `process.kill(0,
+  // ...)` sends to pid 0, which POSIX defines as "every process in the
+  // caller's own process group" -- the shell included, since detached:
+  // true made it the leader of that group -- so the shell itself dies by
+  // the signal directly, which is what a real segfault or an external
+  // out-of-memory kill would also do to it.
+  const dir = makeRepo({
+    "src/gate.mjs": "export function shouldDie(n) {\n  return n < 0;\n}\n",
+    "die-run.mjs": `import { shouldDie } from "./src/gate.mjs";
+if (shouldDie(0)) {
+  process.kill(0, "SIGKILL");
+} else {
+  process.exit(0);
+}
+`,
+  });
+  withRepo(dir, () => {
+    const result = runCli(dir, [
+      "--paths",
+      "src/gate.mjs",
+      "--command",
+      "node die-run.mjs",
+      "--format",
+      "json",
+    ]);
+    const report = JSON.parse(result.stdout) as {
+      results: Array<{ verdict: string; exitCode: number | null }>;
+    };
+    assert.equal(report.results.length, 1, result.stdout);
+    const [entry] = report.results;
+    assert.equal(entry.verdict, "killed-by-signal", result.stdout);
+    assert.equal(entry.exitCode, null);
+    assert.equal(result.status, 3, "nothing survived, but the one mutation was never judged");
+    const parsed = JSON.parse(result.stdout) as { summary: Record<string, number> };
+    assert.deepEqual(parsed.summary, {
+      killed: 0,
+      survived: 0,
+      timeout: 0,
+      skipped: 0,
+      outputOverflow: 0,
+      killedBySignal: 1,
+    });
   });
 });

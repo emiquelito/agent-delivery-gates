@@ -265,16 +265,48 @@ test("exit code is 3 when nothing survived but something never got a verdict", (
   assert.equal(exitCodeFor([resultWith("killed"), resultWith("skipped")]), 3);
 });
 
+// An output-cap kill and a signal kill are unmeasured for the same reason
+// a timeout is: the run was cut off before it could report a verdict, so
+// crediting either one as a catch would credit the suite with a catch it
+// never made (reviewer finding 2). Both get the same exit 3 a timeout gets.
+test("an output-overflow kill and a killed-by-signal run are unmeasured, not credited as a catch", () => {
+  assert.equal(exitCodeFor([resultWith("output-overflow")]), 3);
+  assert.equal(exitCodeFor([resultWith("killed-by-signal")]), 3);
+  assert.equal(exitCodeFor([resultWith("killed"), resultWith("output-overflow")]), 3);
+  assert.equal(exitCodeFor([resultWith("killed"), resultWith("killed-by-signal")]), 3);
+});
+
 test("a survivor wins over a mutation that never got a verdict", () => {
   assert.equal(exitCodeFor([resultWith("survived"), resultWith("timeout")]), 1);
   assert.equal(exitCodeFor([resultWith("timeout"), resultWith("survived")]), 1);
   assert.equal(exitCodeFor([resultWith("survived"), resultWith("skipped"), resultWith("killed")]), 1);
+  assert.equal(exitCodeFor([resultWith("survived"), resultWith("output-overflow")]), 1);
+  assert.equal(exitCodeFor([resultWith("survived"), resultWith("killed-by-signal")]), 1);
 });
 
 test("a timeout is its own verdict, not a kill and not a survivor", () => {
   const results = [resultWith("timeout")];
-  assert.deepEqual(summarize(results), { killed: 0, survived: 0, timeout: 1, skipped: 0 });
+  assert.deepEqual(summarize(results), {
+    killed: 0,
+    survived: 0,
+    timeout: 1,
+    skipped: 0,
+    outputOverflow: 0,
+    killedBySignal: 0,
+  });
   assert.equal(exitCodeFor(results), 3);
+});
+
+test("an output-overflow kill and a killed-by-signal run are each counted apart from killed", () => {
+  const results = [resultWith("killed"), resultWith("output-overflow"), resultWith("killed-by-signal")];
+  assert.deepEqual(summarize(results), {
+    killed: 1,
+    survived: 0,
+    timeout: 0,
+    skipped: 0,
+    outputOverflow: 1,
+    killedBySignal: 1,
+  });
 });
 
 test("the text report names each survivor with its file, line and both texts", () => {
@@ -337,6 +369,22 @@ test("the text report names a mutation that never got a verdict", () => {
   assert.match(text, /No verdict on these \(1\):/);
   assert.match(text, /timeout\s+src\/a\.ts:1:7/);
   assert.match(text, /never got a verdict: those lines are still unmeasured \(exit 3\)/);
+});
+
+test("the text report separates an output-overflow kill and a killed-by-signal run from a plain kill", () => {
+  const text = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts"],
+    planned: 2,
+    attempted: 2,
+    results: [resultWith("output-overflow"), resultWith("killed-by-signal")],
+  });
+  assert.match(text, /killed 0, survived 0, timeout 0, skipped 0, output-overflow 1, killed-by-signal 1/);
+  assert.match(text, /No verdict on these \(2\):/);
+  assert.match(text, /output-overflow\s+src\/a\.ts:1:7/);
+  assert.match(text, /killed-by-signal\s+src\/a\.ts:1:7/);
 });
 
 test("the text report says plainly when nothing survived", () => {

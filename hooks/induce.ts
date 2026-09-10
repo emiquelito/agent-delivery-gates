@@ -26,7 +26,7 @@
 import process from "node:process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { spawnCommand } from "../src/spawn-command.ts";
+import { spawnCommand, reraiseSignal } from "../src/spawn-command.ts";
 import {
   exitCodeFor,
   formatReportJson,
@@ -154,6 +154,13 @@ Exit codes:
      or a bad argument
   3  nothing failed, but at least one spec was cut off and never measured:
      a command timed out, was killed by a signal, or printed too much
+
+A run stopped by SIGINT or SIGTERM does not use any of the codes above. On
+POSIX it exits with that signal's own convention instead (130 for SIGINT,
+143 for SIGTERM), the same as if this tool had never caught the signal at
+all, so a shell or CI job can tell "interrupted" apart from every other
+outcome. On Windows, which has no such convention to fall back on, it still
+exits 2.
 `;
 
 function fail(message: string): never {
@@ -375,16 +382,26 @@ async function runSpec(file: string, spec: InduceSpec, defaultTimeoutSeconds: nu
   return runFromSteps(file, spec.claim, steps);
 }
 
-/** Reported on SIGINT/SIGTERM. induce writes to no file and owns no
- * worktree, so unlike mutate and census it has nothing of its own to put
- * back; it only needs to stop instead of quietly running the rest of the
- * specs against a command spawnCommand already killed. spawnCommand's own
- * listener (see src/spawn-command.ts) kills the command's whole process
- * group before this one runs, because it is registered with
- * prependListener; this one is what actually ends the run. */
-function onSignal(signal: string): never {
+/** Whether a SIGINT/SIGTERM has already been handled. induce writes to no
+ * file and owns no worktree, so unlike mutate and census it has nothing of
+ * its own to put back; it only needs to stop instead of quietly running
+ * the rest of the specs against a command spawnCommand already killed.
+ * spawnCommand's own listener (see src/spawn-command.ts) kills the
+ * command's whole process group before this one runs, because it is
+ * registered with prependListener.
+ *
+ * Set, not just read, by onSignal: reraiseSignal ends this process
+ * asynchronously, by handing the signal back to Node's own default
+ * handling, so the spec loop below keeps running for a little while
+ * longer. Without this flag it could start another spec before the
+ * re-raised signal actually lands. */
+let interrupted = false;
+
+function onSignal(signal: NodeJS.Signals): void {
+  if (interrupted) return;
+  interrupted = true;
   process.stderr.write(`\ninduce: interrupted by ${signal}\n`);
-  process.exit(2);
+  reraiseSignal(signal, 2);
 }
 
 async function main(): Promise<void> {
@@ -400,6 +417,7 @@ async function main(): Promise<void> {
   const { paths, source, skipped } = resolveSpecPaths(args);
   const runs: SpecRun[] = [];
   for (const path of paths) {
+    if (interrupted) break;
     let text: string;
     try {
       text = readFileSync(path, "utf8");
@@ -414,6 +432,12 @@ async function main(): Promise<void> {
     }
     runs.push(await runSpec(path, parsed.spec, args.timeoutSeconds));
   }
+
+  // onSignal already printed its own message and re-raised the signal to
+  // end this process with its own exit code; nothing measured here is
+  // complete, so no report is printed and the process is left to end on
+  // its own.
+  if (interrupted) return;
 
   const report = { source, timeoutMs: Math.round(args.timeoutSeconds * 1000), runs, skipped };
   process.stdout.write(args.format === "json" ? formatReportJson(report) : `${formatReportText(report)}\n`);
