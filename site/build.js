@@ -895,9 +895,12 @@ git config core.hooksPath .githooks</code></pre>
         is only the path that simulates sending the signal from outside, which is
         not tested on Windows.</p>
       <p>Windows on Node 23 and 24 hits an unfixed Node bug that aborts these tools
-        on exit (nodejs/node#56645). It is merged into Node's main branch but not
-        backported to any released Node 24. Node 22 is not affected. Use Node 22 on
-        Windows until a fixed Node 24 ships.</p>
+        on exit (nodejs/node#56645). The owner reproduces this reliably on real
+        Windows hardware, and upstream reports the same split: the bug shows up on
+        physical machines and not reliably on hosted CI runners, including ours,
+        where the Windows-on-24 leg currently passes. Trust the Node version
+        guidance here, not that leg's colour: Node 22 is not affected, and Node 22
+        is what to run on Windows until a fixed Node 24 ships.</p>
     </section>
 
     <section id="rules">
