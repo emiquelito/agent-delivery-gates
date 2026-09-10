@@ -16,7 +16,8 @@ import {
   warmLanguageServices,
   hadUnwarmedLanguageAccess,
   resetUnwarmedLanguageAccess,
-  hadLanguageLoadFailure,
+  hadGenuineGrammarLoadFailure,
+  hadGrammarAbsent,
 } from "./code-mask.ts";
 
 /** Reaches the scanner chosen for `path` on every call (see
@@ -334,19 +335,41 @@ export interface SeparateResult {
   /**
    * The extensions (".py", ".rs", and so on) at least one file in this diff
    * carried whose tree-sitter grammar was attempted, through
-   * `warmLanguageServices`, and failed to load for this process: see
-   * `hadLanguageLoadFailure` in src/code-mask.ts. Distinct from
-   * `unwarmedExtensions` above -- that one means nobody asked the grammar
-   * to load yet; this one means the load was tried and did not succeed, so
-   * no later call in this process is going to fix it either. A file whose
-   * extension appears here was scanned with the regex fallback reading
-   * every string, comment, and interpolation as ordinary code, the same
-   * gap src/mutate.ts already refuses to mutate through (see
+   * `warmLanguageServices`, resolved to a package that is actually
+   * installed, and still failed to load: see `hadGenuineGrammarLoadFailure`
+   * in src/code-mask.ts. Distinct from `unwarmedExtensions` above -- that
+   * one means nobody asked the grammar to load yet; this one means the
+   * load was tried and did not succeed, so no later call in this process
+   * is going to fix it either. Also distinct from `grammarAbsentExtensions`
+   * below, which used to be folded into this same field: a real failure
+   * (a corrupt wasm file, an ABI mismatch) is a real bug in this
+   * environment or this gate, worth blocking on, where an absent package
+   * is an ordinary fact of how most adopters install this tool (see the
+   * STOP-GAP comment above grammarAbsentExtensions in src/code-mask.ts). A
+   * file whose extension appears here was scanned with the regex fallback
+   * reading every string, comment, and interpolation as ordinary code, the
+   * same gap src/mutate.ts already refuses to mutate through (see
    * grammarUnavailablePaths there). Reported unconditionally, found or
    * not, for the same reason unwarmedExtensions is: a degraded run that
    * reads like a clean one is the failure this project exists to catch.
    */
   grammarLoadFailedExtensions: readonly string[];
+  /**
+   * The extensions (".py", ".rs", and so on) at least one file in this
+   * diff carried whose tree-sitter grammar was attempted and whose
+   * package was never installed at all: see `hadGrammarAbsent` in
+   * src/code-mask.ts. This is the ordinary state for every one of the
+   * seven tree-sitter-backed languages on an adopter who installed this
+   * tool the way its own README says to, since none of those packages
+   * is a runtime dependency of this one -- not a defect in the commit
+   * being scanned, and not folded into `grammarLoadFailedExtensions`
+   * above for exactly that reason. A file whose extension appears here
+   * was still scanned with the regex fallback, and a caller should say so
+   * plainly, but must not block on it the way a real failure warrants.
+   * Reported unconditionally, found or not, for the same reason the other
+   * two extension lists on this type are.
+   */
+  grammarAbsentExtensions: readonly string[];
 }
 
 /** Renders one signal as the CLI's text-format line: `id severity file: message`. */
@@ -1333,22 +1356,23 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
     exemptFiles,
     exemptCount: exemptFiles.length,
     unwarmedExtensions: hadUnwarmedLanguageAccess(),
-    grammarLoadFailedExtensions: grammarLoadFailedExtensionsIn(files.map((file) => file.path)),
+    grammarLoadFailedExtensions: extensionsMatching(files.map((file) => file.path), hadGenuineGrammarLoadFailure),
+    grammarAbsentExtensions: extensionsMatching(files.map((file) => file.path), hadGrammarAbsent),
   };
 }
 
-/** The extensions among `paths` whose tree-sitter grammar failed to load
- * for this process: see `hadLanguageLoadFailure` in src/code-mask.ts and
- * `grammarLoadFailedExtensions` on `SeparateResult` above. Sorted and
- * deduplicated, in the same form `unwarmedExtensions` already returns, so a
- * caller can report either the same way. */
-function grammarLoadFailedExtensionsIn(paths: readonly string[]): string[] {
+/** The extensions among `paths` for which `predicate` (one of
+ * src/code-mask.ts's `hadGenuineGrammarLoadFailure` or `hadGrammarAbsent`)
+ * answers true. Sorted and deduplicated, in the same form
+ * `unwarmedExtensions` already returns, so a caller can report any of the
+ * three the same way. */
+function extensionsMatching(paths: readonly string[], predicate: (ext: string) => boolean): string[] {
   const found = new Set<string>();
   for (const path of paths) {
     const lower = path.toLowerCase();
     const dot = lower.lastIndexOf(".");
     const ext = dot === -1 ? "" : lower.slice(dot);
-    if (ext !== "" && hadLanguageLoadFailure(ext)) found.add(ext);
+    if (ext !== "" && predicate(ext)) found.add(ext);
   }
   return [...found].sort();
 }

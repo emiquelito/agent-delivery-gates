@@ -359,3 +359,38 @@ export const GRAMMAR_SPECS: Readonly<Record<string, GrammarSpec>> = {
   ".java": java,
   ".cs": csharp,
 };
+
+/**
+ * The npm devDependency each tree-sitter-backed extension needs to get a
+ * working grammar, for a user-facing message that names something they
+ * can actually do about it: `npm install --save-dev <name> web-tree-sitter`
+ * in their own project reaches these packages today, independent of
+ * whether this project's own package.json ever lists them as a runtime
+ * dependency (see src/code-mask.ts's STOP-GAP comment above
+ * grammarAbsentExtensions for why it currently does not). Derived from
+ * GRAMMAR_SPECS, plus ".py", which keeps its own bespoke loader
+ * (src/tree-sitter-python-service.ts) and so is not itself a GrammarSpec.
+ */
+export const GRAMMAR_PACKAGE_NAMES: Readonly<Record<string, string>> = {
+  ".py": "tree-sitter-python",
+  ...Object.fromEntries(Object.entries(GRAMMAR_SPECS).map(([ext, spec]) => [ext, spec.packageName])),
+};
+
+/**
+ * The `npm install` line a user can actually run today to get a working
+ * grammar for every extension in `extensions`: every package
+ * GRAMMAR_PACKAGE_NAMES names for them, deduplicated, plus web-tree-sitter
+ * itself once, since every one of these loaders needs it too. Every
+ * production consumer of `grammarAbsentExtensions` (see
+ * src/test-diff-separator.ts's SeparateResult) builds its own warning text
+ * around this one line, so the actual command stays in one place.
+ */
+export function installHintFor(extensions: readonly string[]): string {
+  const packages = new Set<string>();
+  for (const ext of extensions) {
+    const name = GRAMMAR_PACKAGE_NAMES[ext];
+    if (name !== undefined) packages.add(name);
+  }
+  packages.add("web-tree-sitter");
+  return `npm install --save-dev ${[...packages].sort().join(" ")}`;
+}

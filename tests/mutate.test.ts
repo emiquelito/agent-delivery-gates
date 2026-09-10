@@ -520,6 +520,36 @@ test("no mutable file found and every mutation killed both read differently in t
   assert.match(allKilled, /No mutation survived: every break this tool made was caught\./);
 });
 
+// Finding 4: the commit that introduced this exact verdict line
+// ("Say plainly when a mutation run attempted nothing") never asserted it.
+// The two existing planned: 0 tests above ("no mutable file found and
+// every mutation killed both read differently in the report" and "a
+// grammar-unavailable file gets its own section...") both set another
+// field (unsupportedFiles, grammarUnavailableFiles) that routes
+// formatReportText into one of the earlier branches instead, so neither
+// one exercises the actual empty-selection branch this line lives in: no
+// results, no unsupported files, no grammar-unavailable files, no
+// unrecognized files, nothing to say why planned is 0 except that nothing
+// was ever a candidate at all.
+test("a run with nothing selected and nothing to blame it on says plainly that no mutation was attempted", () => {
+  const report = formatReportText({
+    command: "npm test",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: [],
+    planned: 0,
+    attempted: 0,
+    results: [],
+  });
+  assert.match(
+    report,
+    /No mutation was attempted: this tool made no breaks, so the suite caught nothing and this run proves nothing\./,
+  );
+  assert.doesNotMatch(report, /No operator set for these/);
+  assert.doesNotMatch(report, /Grammar failed to load for these/);
+  assert.doesNotMatch(report, /every break this tool made was caught/);
+});
+
 test("a grammar-unavailable file gets its own section and its own exit-3 explanation", () => {
   const report = formatReportText({
     command: "npm test",

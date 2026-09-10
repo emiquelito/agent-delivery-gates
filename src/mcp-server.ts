@@ -25,6 +25,7 @@ import { checkPathAllowed } from "./path-allowlist.ts";
 import { validateReport, formatFindingText } from "./report-validator.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
+import { installHintFor } from "./tree-sitter-grammars.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 
@@ -176,6 +177,18 @@ interface ToolContentBlock {
 interface ToolResult {
   content: ToolContentBlock[];
   isError: boolean;
+  /**
+   * Machine-readable companion to `content`'s free text, per the Model
+   * Context Protocol's own structured-output support (PROTOCOL_VERSION
+   * above). A reviewer of separate_test_diff's grammar warnings pointed
+   * out that an agent reading a tool result often reads only the headline
+   * and skips a warning buried a few lines into free text -- this server
+   * is advisory, so nothing forces a caller to read the prose at all.
+   * Optional: present only when runSeparateTestDiff has something
+   * structured worth reporting (see its own use below), absent otherwise,
+   * so an ordinary clean result carries no empty object.
+   */
+  structuredContent?: Record<string, unknown>;
 }
 
 function textResult(text: string, isError = false): ToolResult {
@@ -321,21 +334,47 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
   // hooks/test-diff-post-tool-hook.ts now do (see Finding 2). What it can
   // still do is say when its own answer is not trustworthy, the same
   // reasoning that already applies to a summary with no gate behind it.
+  //
+  // grammarAbsentExtensions (the package was never installed -- the
+  // ordinary state for most adopters, see src/code-mask.ts's STOP-GAP
+  // comment above that name) and grammarLoadFailedExtensions (a real
+  // failure: present and still broken) get their own lines, both in the
+  // free text below and in structuredContent, per a second reviewer note:
+  // an agent reading this tool's result often reads only the headline and
+  // can miss a warning sitting a few lines into free text. structuredContent
+  // gives a caller that actually checks it something to branch on without
+  // parsing prose; a caller that does not check it still gets the same
+  // warning it always did, in the same place.
+  const structured: Record<string, unknown> = {};
+  if (result.grammarAbsentExtensions.length > 0) {
+    lines.push(
+      `Warning: this diff touches ${result.grammarAbsentExtensions.join(", ")} file(s) whose grammar is not ` +
+        "installed; those were scanned with the regex fallback and may have missed a string, a comment, or an " +
+        `interpolation. This is expected until you install it: run \`${installHintFor(result.grammarAbsentExtensions)}\` ` +
+        "in your project.",
+    );
+    structured.grammarAbsentExtensions = result.grammarAbsentExtensions;
+  }
   if (result.grammarLoadFailedExtensions.length > 0) {
     lines.push(
       `Warning: this diff touches ${result.grammarLoadFailedExtensions.join(", ")} file(s) whose grammar ` +
         "failed to load; those were scanned with the regex fallback and may have missed a string, a comment, " +
-        "or an interpolation. Treat this result as unmeasured for those files, not as clean.",
+        "or an interpolation. This is a bug in the environment or the gate, not in the commit; treat this " +
+        "result as unmeasured for those files, not as clean.",
     );
+    structured.grammarLoadFailedExtensions = result.grammarLoadFailedExtensions;
   }
   if (result.unwarmedExtensions.length > 0) {
     lines.push(
       `Warning: this diff touches ${result.unwarmedExtensions.join(", ")} file(s) masked before their language ` +
         "service warmed; this result may be less accurate than usual for those files.",
     );
+    structured.unwarmedExtensions = result.unwarmedExtensions;
   }
 
-  return textResult(lines.join("\n"), false);
+  const toolResult = textResult(lines.join("\n"), false);
+  if (Object.keys(structured).length > 0) toolResult.structuredContent = structured;
+  return toolResult;
 }
 
 // --- Method handlers ----------------------------------------------------------

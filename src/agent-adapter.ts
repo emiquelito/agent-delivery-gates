@@ -31,6 +31,7 @@ import { checkPathAllowed } from "./path-allowlist.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
 import { validateReport, formatFindingText, parsePriorFindingIds } from "./report-validator.ts";
+import { installHintFor } from "./tree-sitter-grammars.ts";
 
 export type GateName = "clean-tree" | "path-confinement" | "test-diff" | "report";
 
@@ -323,11 +324,36 @@ export async function runTestDiffGate(payload: CanonicalPayload): Promise<Adapte
   // devDependency, or ADG_TEST_FORCE_GRAMMAR_FAILURE below -- left this
   // gate silently scanning that file with the regex fallback, reading
   // every string, comment, and interpolation inside it as ordinary code,
-  // with no warning at all. result.grammarLoadFailedExtensions (see
-  // src/test-diff-separator.ts) reports the same signal mutate.ts already
-  // refuses to mutate through; checked here the same way unwarmedExtensions
-  // already is, right below, so a load failure is loud everywhere this
-  // scanner runs, not only in mutation.
+  // with no warning at all. Fixed by checking the same signal mutate.ts
+  // already refuses to mutate through, the same way unwarmedExtensions
+  // already is checked, right below, so a load failure is loud everywhere
+  // this scanner runs, not only in mutation.
+  //
+  // CRITICAL correction to that fix: this used to block on
+  // grammarLoadFailedExtensions before it was split into two fields (see
+  // src/code-mask.ts's STOP-GAP comment above grammarAbsentExtensions).
+  // The seven tree-sitter grammar packages are devDependencies of a
+  // package with no runtime `dependencies` key at all, so `npm install`
+  // (this project's own quickstart is `npm install --save-dev
+  // agent-delivery-gates`) never installs them for an adopter -- meaning
+  // grammarLoadFailedExtensions, undivided, was non-empty for any Python,
+  // Rust, Go, Java, PHP, C#, or Ruby file for every real adopter, forever,
+  // and this gate hard-blocked every one of those commits. That is worse
+  // than the hole it closed. Absence (the package was never installed) is
+  // an environment fact, not a defect in the commit, so it gets a loud
+  // warning on stderr and the commit goes through; a real failure (the
+  // package is there and something about the load still went wrong -- a
+  // corrupt install, an ABI mismatch) stays a hard block below, because
+  // that really is a bug in this environment or this gate.
+  if (result.grammarAbsentExtensions.length > 0) {
+    const languages = result.grammarAbsentExtensions.map((ext) => UNWARMED_LANGUAGE_NAMES[ext] ?? ext).join(", ");
+    process.stderr.write(
+      `test-diff: a ${languages} file in this diff was masked with the regex fallback because its tree-sitter ` +
+        "grammar is not installed for this process; the regex scanner may have missed a string, a comment, or an " +
+        `interpolation. This is expected until you install it: run \`${installHintFor(result.grammarAbsentExtensions)}\` ` +
+        "in your project. Not blocking this commit; treat this run as unmeasured for that file, not as clean.\n",
+    );
+  }
   if (result.grammarLoadFailedExtensions.length > 0) {
     const languages = result.grammarLoadFailedExtensions.map((ext) => UNWARMED_LANGUAGE_NAMES[ext] ?? ext).join(", ");
     return fail(

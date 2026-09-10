@@ -20,6 +20,7 @@ import { readSync } from "node:fs";
 import { formatSignalText, separateTestDiffWarmed, type RuleSet } from "../src/test-diff-separator.ts";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
+import { installHintFor } from "../src/tree-sitter-grammars.ts";
 
 function block(message: string): never {
   process.stderr.write(message.endsWith("\n") ? message : `${message}\n`);
@@ -127,6 +128,27 @@ async function main(): Promise<void> {
   // the same reason src/mutate.ts checks it ahead of everything else that
   // depends on the mask: it is the harder failure to recover from, since
   // no later call in this process can make the grammar load succeed.
+  //
+  // CRITICAL correction, made after this file first shipped that check: it
+  // used to block on every extension in grammarLoadFailedExtensions
+  // (before that field was split; see src/code-mask.ts's STOP-GAP comment
+  // above grammarAbsentExtensions). None of the seven tree-sitter grammar
+  // packages is a runtime dependency of this one, so an ordinary `npm
+  // install` of this tool -- this project's own quickstart -- never
+  // installs them, and this hook blocked every commit touching Python,
+  // Rust, Go, Java, PHP, C#, or Ruby for every adopter who followed the
+  // README, forever. Absence is now a loud stderr warning that lets the
+  // commit through; only a real failure (the package is present and
+  // something about the load still broke) blocks below.
+  if (result.grammarAbsentExtensions.length > 0) {
+    process.stderr.write(
+      `test-diff-post-tool-hook: a file in this diff (${result.grammarAbsentExtensions.join(", ")}) was masked ` +
+        "with the regex fallback because its tree-sitter grammar is not installed for this process; the regex " +
+        "scanner may have missed a string, a comment, or an interpolation. This is expected until you install " +
+        `it: run \`${installHintFor(result.grammarAbsentExtensions)}\` in your project. Not blocking this ` +
+        "commit; treat this run as unmeasured for that file, not as clean.\n",
+    );
+  }
   if (result.grammarLoadFailedExtensions.length > 0) {
     block(
       `test-diff-post-tool-hook: a file in this diff (${result.grammarLoadFailedExtensions.join(", ")}) was ` +

@@ -28,6 +28,7 @@ import {
   type Signal,
 } from "../src/test-diff-separator.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "../src/test-diff-config.ts";
+import { installHintFor } from "../src/tree-sitter-grammars.ts";
 
 const USAGE = `Usage: test-diff-separator [--rev REV] [--range A..B] [--staged] [--diff PATH] [--format text|json] [--config PATH]
        test-diff-separator --classify PATH... [--config PATH]
@@ -64,7 +65,12 @@ Exit codes:
   0  no test file changed, or none of the changed test files carry a signal
      (or, with --classify, the classification was printed)
   1  at least one weakening signal was found
-  2  could not run as asked, including a config that failed to load
+  2  could not run as asked, including a config that failed to load, or a
+     touched file's tree-sitter grammar being present but failing to load
+     (a corrupt install, an ABI mismatch -- a bug in this environment or
+     this gate). A grammar that was simply never installed does not count
+     here: that prints a warning naming what to run to install it, and the
+     exit code is decided by the signals found, same as any other run.
 `;
 
 function fail(message: string): never {
@@ -361,20 +367,36 @@ function signalBlock(result: SeparateResult): string[] {
   return lines;
 }
 
-/** Same reasoning as exemptBlock above, for the two ways a mask can be
- * less than fully trustworthy: see Finding 2's grammarLoadFailedExtensions
- * and unwarmedExtensions on SeparateResult. This CLI has no gate to fail
- * loudly the way src/agent-adapter.ts's runTestDiffGate and
- * hooks/test-diff-post-tool-hook.ts now do, but a clean-looking run whose
- * mask was not trustworthy for some of what it scanned must still say so,
- * not read the same as a run that scanned everything cleanly. */
+/** Same reasoning as exemptBlock above, for the three ways a mask can be
+ * less than fully trustworthy: see grammarLoadFailedExtensions,
+ * grammarAbsentExtensions, and unwarmedExtensions on SeparateResult. A
+ * clean-looking run whose mask was not trustworthy for some of what it
+ * scanned must still say so, not read the same as a run that scanned
+ * everything cleanly.
+ *
+ * grammarLoadFailedExtensions (a real failure: the package is present
+ * and something about the load still broke) is the one of the three this
+ * CLI does not leave as a plain warning: see the exit-code decision in
+ * main() below, where it now turns exit 2, the same way a git failure
+ * already does. grammarAbsentExtensions (the package was never installed
+ * -- the ordinary state for an adopter who installed this tool the way
+ * its own README says to) and unwarmedExtensions both stay warnings only,
+ * with the run's exit code left to the signals actually found. */
 function warningBlock(result: SeparateResult): string[] {
   const lines: string[] = [];
   if (result.grammarLoadFailedExtensions.length > 0) {
     lines.push(
       `Warning: grammar failed to load for ${result.grammarLoadFailedExtensions.join(", ")}; those files were ` +
-        "scanned with the regex fallback and may have missed a string, a comment, or an interpolation. Treat " +
-        "this result as unmeasured for those files, not as clean.",
+        "scanned with the regex fallback and may have missed a string, a comment, or an interpolation. This is a " +
+        "bug in the environment or the gate, not in the commit; see the exit code below.",
+    );
+  }
+  if (result.grammarAbsentExtensions.length > 0) {
+    lines.push(
+      `Warning: grammar not installed for ${result.grammarAbsentExtensions.join(", ")}; those files were scanned ` +
+        "with the regex fallback and may have missed a string, a comment, or an interpolation. This is expected " +
+        `until you install it: run \`${installHintFor(result.grammarAbsentExtensions)}\` in your project. Not ` +
+        "blocking this run; treat it as unmeasured for those files, not as clean.",
     );
   }
   if (result.unwarmedExtensions.length > 0) {
@@ -489,7 +511,21 @@ async function main(): Promise<void> {
     process.stdout.write(`${formatText(result)}\n`);
   }
 
-  process.exit(result.signals.length === 0 ? 0 : 1);
+  // A reviewer flagged that this used to leave the exit code untouched on
+  // a real grammar-load failure (the package is present and something
+  // about the load still broke): the report printed a warning, but the
+  // exit code still came only from result.signals.length, so a run that
+  // could not trust its own mask for a file could still exit 0 -- read as
+  // clean the same way `Exit codes` at the top of this file's own USAGE
+  // documents a git failure must never be allowed to. Fixed the same way:
+  // exit 2, "could not run as asked", ahead of whatever the signal count
+  // says. grammarAbsentExtensions (the package was never installed, the
+  // ordinary state for most adopters -- see warningBlock above) does NOT
+  // affect the exit code: that is not a failure to run as asked, it is an
+  // environment fact this CLI already prints a warning for, and the run
+  // itself is trusted to keep going.
+  const exitCode = result.grammarLoadFailedExtensions.length > 0 ? 2 : result.signals.length === 0 ? 0 : 1;
+  process.exit(exitCode);
 }
 
 main().catch((err) => {

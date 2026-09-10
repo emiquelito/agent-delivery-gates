@@ -438,11 +438,14 @@ const TREE_SITTER_LOADERS: Readonly<Record<string, () => Promise<LanguageService
 const resolvedServices = new Map<string, LanguageService>();
 
 // Extensions whose tree-sitter grammar was actually attempted, through
-// `warmLanguageServices`, and failed to load: the devDependency that ships
-// its grammar (tree-sitter-python, web-tree-sitter, or one of the six
-// packages src/tree-sitter-grammars.ts names) is not installed -- an
-// ordinary adopter's `npm install`, since none of those packages are a
-// runtime dependency of this one -- or the wasm file itself did not load.
+// `warmLanguageServices`, and did not resolve to a working service: the
+// devDependency that ships its grammar (tree-sitter-python,
+// web-tree-sitter, or one of the six packages src/tree-sitter-grammars.ts
+// names) is not installed -- an ordinary adopter's `npm install`, since
+// none of those packages are a runtime dependency of this one -- or it is
+// installed and something about the load still went wrong (a corrupt
+// wasm file, an ABI mismatch between web-tree-sitter and a grammar built
+// against a different version, a truncated install).
 //
 // This is a different fact from `resolvedServices` holding
 // `regexLanguageService` for that extension: that map also holds
@@ -458,11 +461,75 @@ const resolvedServices = new Map<string, LanguageService>();
 // identical to "no tree-sitter service for this extension exists," which
 // mutate.ts already knew was safe.
 //
-// Permanent for the life of the process, exactly like resolvedServices
-// above and for the same reason: the load is tried once per extension, and
-// a devDependency that failed to import once is not going to start
-// importing successfully later in the same run.
-const grammarLoadFailures = new Set<string>();
+// STOP-GAP, split in two. A CRITICAL finding on this project's own commit
+// history: every one of these packages ships as a devDependency, and this
+// package's own package.json carries no `dependencies` key at all (see
+// package.json's own header comment and the README's "zero dependencies"
+// claim), so an adopter who installs this tool the way its own quickstart
+// says to (`npm install --save-dev agent-delivery-gates`) gets every one
+// of these grammars absent, permanently, for every process this tool ever
+// runs for them. Before this split, "not installed" and "installed but
+// broken" were the same fact, `grammarLoadFailures`, and every consumer of
+// it treated both as a hard block -- which meant the majority case for a
+// real adopter (nothing installed, because npm never installs a
+// dependency's devDependencies) failed every commit touching Python,
+// Rust, Go, Java, PHP, C#, or Ruby, forever, with no escape hatch. That is
+// worse than the silent-corruption bug this project exists to catch.
+//
+// The two facts below are kept apart because they deserve different
+// reactions. `grammarAbsentExtensions` is an environment fact, true for
+// nearly every adopter today, and not a defect in anyone's commit: the
+// right response is to say so loudly and get out of the way (see each
+// consumer's own comment -- src/agent-adapter.ts's runTestDiffGate,
+// hooks/test-diff-post-tool-hook.ts, hooks/test-diff-separator.ts,
+// src/mcp-server.ts's runSeparateTestDiff -- for what "loudly" means for
+// that consumer). `grammarGenuineFailures` is a real problem: the package
+// is there and something is still wrong, which is exactly the class of
+// bug (a corrupt install, an ABI mismatch) worth blocking on the way the
+// undivided set used to block on everything.
+//
+// This split is a stop-gap, not the fix. The actual fix is shipping the
+// grammars where an ordinary `npm install` reaches them -- bundling the
+// wasm files this tool already needs, or moving the packages to
+// `optionalDependencies`, a later phase of this project with its own
+// evidence to gather (wasm file size across all seven languages,
+// optionalDependencies' own failure modes on an adopter's install). Until
+// that phase ships, `grammarAbsentExtensions` is the honest answer for
+// what every adopter following this project's own README sees today, and
+// nothing here should be read as more permanent than that.
+//
+// `hadLanguageLoadFailure` below answers the union of both sets on
+// purpose: src/mutate.ts writes to the files it masks, so it needs "is
+// this mask trustworthy at all", not which of the two reasons it is not.
+// A consumer that instead needs to tell them apart -- to warn on one and
+// block on the other -- reads `hadGrammarAbsent` and
+// `hadGenuineGrammarLoadFailure` directly.
+//
+// Both sets are permanent for the life of the process, exactly like
+// resolvedServices above and for the same reason: the load is tried once
+// per extension, and a devDependency that failed to import once is not
+// going to start importing successfully later in the same run.
+const grammarAbsentExtensions = new Set<string>();
+const grammarGenuineFailures = new Set<string>();
+
+/**
+ * True when `err` is Node's own "could not resolve this module at all"
+ * error: the package a grammar loader needs (tree-sitter-python,
+ * web-tree-sitter, or one of the six packages src/tree-sitter-grammars.ts
+ * names) was never installed. CommonJS's `require.resolve` (used by
+ * resolveWasmPath in both src/tree-sitter-python-service.ts and
+ * src/tree-sitter-language-service.ts) reports this as `MODULE_NOT_FOUND`;
+ * an ESM dynamic `import()` of a specifier that cannot be resolved (which
+ * is what happens here when web-tree-sitter itself, imported at the top
+ * of either of those files, is absent) reports `ERR_MODULE_NOT_FOUND`.
+ * Anything else -- a corrupt wasm file, an ABI mismatch, a truncated
+ * install -- reaches this loader with the package present and some other
+ * error code (or none at all), and is a real failure, not an absence.
+ */
+function isModuleAbsenceError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND";
+}
 
 // Test-only escape hatch for reaching a real grammar-load failure without
 // touching this process's real node_modules. A reviewer's first repro
@@ -485,18 +552,32 @@ const grammarLoadFailures = new Set<string>();
 // (nothing outside that one process's env is touched, so nothing needs
 // restoring and nothing else sharing the real node_modules can be
 // affected), and resolveTreeSitterService below skips the real load for
-// exactly those extensions -- the same code path a real failed import
-// takes, `grammarLoadFailures` included, just reached without deleting or
-// moving a single file. Read once at module load, the same way this
-// project already reads ADG_TEST_MCP_STALL in src/mcp-server.ts for
+// exactly those extensions -- the same code path a real, present-but-broken
+// grammar takes, `grammarGenuineFailures` included, just reached without
+// deleting or moving a single file. Read once at module load, the same way
+// this project already reads ADG_TEST_MCP_STALL in src/mcp-server.ts for
 // an identical reason: a name a real adopter is never going to set by
 // accident, doing nothing unless a test deliberately sets it. See
 // docs/test-only-env-vars.md for what an ADG_TEST_* variable is and is not
 // allowed to do; this one conforms by picking a branch the real loader
 // already has, at the one point that loader is called, with everything
 // downstream reading the same recorded failure a real one would leave.
+//
+// ADG_TEST_FORCE_GRAMMAR_ABSENT is the same idea for the other branch: a
+// test that wants to reach "the package was never installed" -- the
+// majority case for a real adopter, see grammarAbsentExtensions above --
+// without an adopter's node_modules actually missing anything, and without
+// this repository's own devDependencies (needed by every other test in
+// this suite) ever being touched.
 const FORCED_GRAMMAR_FAILURES: ReadonlySet<string> = new Set(
   (process.env.ADG_TEST_FORCE_GRAMMAR_FAILURE ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0),
+);
+
+const FORCED_GRAMMAR_ABSENT: ReadonlySet<string> = new Set(
+  (process.env.ADG_TEST_FORCE_GRAMMAR_ABSENT ?? "")
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
     .filter((entry) => entry.length > 0),
@@ -515,23 +596,40 @@ async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
   let service = regexLanguageService;
   if (load !== undefined && FORCED_GRAMMAR_FAILURES.has(ext)) {
     // See FORCED_GRAMMAR_FAILURES above: a test asked this extension's
-    // load to fail without touching node_modules. Recorded exactly like a
-    // real failure below, and the real loader is never called.
+    // load to fail (present but broken) without touching node_modules.
+    // Recorded exactly like a real, present-but-broken failure below, and the real
+    // loader is never called.
     service = regexLanguageService;
-    grammarLoadFailures.add(ext);
+    grammarGenuineFailures.add(ext);
+  } else if (load !== undefined && FORCED_GRAMMAR_ABSENT.has(ext)) {
+    // See FORCED_GRAMMAR_ABSENT above: a test asked this extension's
+    // package to read as never installed, without touching node_modules.
+    // Recorded exactly like a real absence below, and the real loader is
+    // never called.
+    service = regexLanguageService;
+    grammarAbsentExtensions.add(ext);
   } else if (load !== undefined) {
     try {
       service = await load();
-    } catch {
-      // No web-tree-sitter, no grammar package, or the wasm grammar
-      // itself failed to load: on any of those, a file of this
-      // extension gets exactly the scanner it always got, and nothing
-      // above this catch throws. Recorded in grammarLoadFailures so a
-      // caller that cares -- src/mutate.ts, which writes to the file this
-      // mask decides where to cut -- can refuse to trust this extension's
-      // mask instead of silently mutating with the wrong scanner.
+    } catch (err) {
+      // The package was never installed, or it is installed and
+      // something about the load still went wrong (a corrupt wasm file,
+      // an ABI mismatch): either way, a file of this extension gets
+      // exactly the scanner it always got, and nothing above this catch
+      // throws. isModuleAbsenceError tells the two apart at the one
+      // point this loader is actually called, so everything downstream
+      // -- src/mutate.ts, which writes to the file this mask decides
+      // where to cut, and needs to know only "is this mask trustworthy";
+      // the four production readers of a diff's signals, which need to
+      // know which of the two this is, since only one of them deserves
+      // to block a commit -- reads a recorded fact instead of re-deriving
+      // it.
       service = regexLanguageService;
-      grammarLoadFailures.add(ext);
+      if (isModuleAbsenceError(err)) {
+        grammarAbsentExtensions.add(ext);
+      } else {
+        grammarGenuineFailures.add(ext);
+      }
     }
   }
   resolvedServices.set(ext, service);
@@ -540,20 +638,58 @@ async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
 
 /**
  * True when `ext`'s tree-sitter grammar was attempted, through
- * `warmLanguageServices`, and failed to load for this process: see
- * `grammarLoadFailures` above. False both for an extension never attempted
- * yet (including one with no tree-sitter service at all, which was never
- * going to be attempted) and for one that loaded successfully -- so this
- * answers a different question than `hadUnwarmedLanguageAccess` below.
- * That one says a caller asked for a mask before warming ran at all, which
- * a later warm call can still fix. This one says warming ran, was given
- * the chance to succeed, and did not: no later call in this process is
- * going to change the answer. A caller that writes to the files it masks
- * needs to check this one, after warming, before trusting what it gets
- * back for a registered extension.
+ * `warmLanguageServices`, and did not resolve to a working service, for
+ * either reason: never installed (`grammarAbsentExtensions`) or installed
+ * and broken (`grammarGenuineFailures`). False both for an extension never
+ * attempted yet (including one with no tree-sitter service at all, which
+ * was never going to be attempted) and for one that loaded successfully --
+ * so this answers a different question than `hadUnwarmedLanguageAccess`
+ * below. That one says a caller asked for a mask before warming ran at
+ * all, which a later warm call can still fix. This one says warming ran,
+ * was given the chance to succeed, and did not: no later call in this
+ * process is going to change the answer.
+ *
+ * This is the union on purpose, kept under its original name for
+ * src/mutate.ts, its one caller: a tool that writes to the files it masks
+ * needs "is this mask trustworthy at all" and nothing more specific --
+ * mutating a file with the wrong scanner is exactly as destructive whether
+ * the grammar was never installed or was installed and broken. A caller
+ * that instead needs to tell the two reasons apart -- every consumer of a
+ * diff's signals does, see the STOP-GAP comment above
+ * grammarAbsentExtensions -- reads `hadGrammarAbsent` and
+ * `hadGenuineGrammarLoadFailure` below directly instead of this one.
  */
 export function hadLanguageLoadFailure(ext: string): boolean {
-  return grammarLoadFailures.has(ext);
+  return grammarAbsentExtensions.has(ext) || grammarGenuineFailures.has(ext);
+}
+
+/**
+ * True when `ext`'s tree-sitter grammar was attempted and the package
+ * that ships it was never installed -- the ordinary state of every one of
+ * the seven tree-sitter-backed languages for an adopter who installed
+ * this tool the way its own README says to (`npm install --save-dev
+ * agent-delivery-gates`; see the STOP-GAP comment above
+ * grammarAbsentExtensions for why that leaves every one of these packages
+ * absent). Not a defect in anyone's commit, so a caller reading this
+ * should warn, not block. False when the extension was never attempted,
+ * loaded successfully, or failed for a different reason -- see
+ * `hadGenuineGrammarLoadFailure` for that last case.
+ */
+export function hadGrammarAbsent(ext: string): boolean {
+  return grammarAbsentExtensions.has(ext);
+}
+
+/**
+ * True when `ext`'s tree-sitter grammar was attempted, the package that
+ * ships it resolved, and the load still failed: a corrupt wasm file, an
+ * ABI mismatch, a truncated install. Unlike `hadGrammarAbsent`, this is a
+ * real problem worth being loud about -- worth blocking on, in every
+ * production consumer of a diff's signals -- because it says something is
+ * actually broken in this environment or this gate, not merely that a
+ * devDependency was never installed.
+ */
+export function hadGenuineGrammarLoadFailure(ext: string): boolean {
+  return grammarGenuineFailures.has(ext);
 }
 
 // Records a fact `languageServiceFor` cannot report through its own return
