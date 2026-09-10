@@ -170,45 +170,45 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "@ParameterizedTest\\b",
   ],
   skips: [
-    // Chained off a test-declaration identifier, never a bare object: xUnit
-    // has no fluent skip call at all (it disables only through the
-    // "Skip = " attribute argument covered further down), and in every
-    // JavaScript/TypeScript framework this project has runner support for
-    // (Mocha, Jest, Vitest, Jasmine's spec runner, Cypress, Playwright,
-    // Ava), a disabling ".skip" is always chained off one of these five
-    // names, never off an arbitrary data object. Anchoring here is what
-    // drops the false positives an earlier, unanchored "\.skip\b" caught:
-    // C# LINQ's ".Skip(20)" pagination call and the JS Iterator Helpers
-    // ".skip(5)" method, both ordinary data slicing with no test-runner
-    // identifier in front of the dot. "test.describe.skip(...)"
-    // (Playwright's nested form) still matches: "describe.skip" is itself
-    // a substring of it.
+    // This bucket runs against test files only (see "Weakening signals,
+    // run against test files only" further down), which flips the cost of
+    // a false positive against the cost of a false negative. Three
+    // separate narrowings of this fragment were each defeated in turn by a
+    // reviewer running the real gate, not by reading the regex: a receiver
+    // allowlist missed a differently-named or aliased runner
+    // ("runner.skip()"), a constant used as the reason
+    // ("run.skip(FLAKY_REASON, ...)"), optional chaining on the receiver
+    // ("it?.skip('flaky')"), and a receiver reached through bracket access
+    // ("runners['custom'].skip('flaky', {})"). Every one of those still
+    // disables a test. The false positive being traded away --
+    // ".skip(...)" called on a plain data object for pagination or
+    // iterator slicing (C# LINQ's ".Skip(20)", the JS Iterator Helpers
+    // ".skip(5)") -- is uncommon inside a test file, and its cost is one
+    // warning a human dismisses in seconds. A silent miss is this
+    // product's one job failing. So: no receiver anchor, no requirement on
+    // the argument's form. Just ".skip(", optionally preceded by "?" for
+    // optional chaining -- which needs no special handling, since the "."
+    // right before "skip" is still there -- with optional whitespace
+    // before the parenthesis. This also covers Mocha's argument-less
+    // "this.skip()", xUnit alias imports ("import { test as t } ...
+    // t.skip(...)"), and Playwright's nested "test.describe.skip(...)".
     //
-    // This allowlist is confident but incomplete on its own -- a project's
-    // own runner wrapper, a helper, or a differently-aliased import never
-    // appears here, and never could: there is no way to enumerate every
-    // name a team might use. The fragment right after this one covers that
-    // gap by anchoring on the ARGUMENT instead of the receiver: any
-    // identifier at all, followed by ".skip(", whose first argument is a
-    // string. A disabling call names the test or gives a reason, so it
-    // takes a string; ".Skip(20)" and ".skip(5)" both take a plain number
-    // and so never match it. That also means this second fragment now
-    // catches a test function imported under an alias
-    // ("import { test as t } ... t.skip('reason', ...)"), a miss this
-    // allowlist fragment alone could never close. What still escapes both
-    // fragments: a receiver reached through bracket/computed access
-    // ("runners['custom'].skip('flaky', ...)"), since there is no
-    // identifier immediately before the "." there, and Mocha's dynamic
-    // "this.skip()" inside a test body, which takes no argument at all.
-    "\\b(?:it|describe|test|context|suite)\\.skip\\b",
-    // Any identifier at all, chained with ".skip(" into a string-literal
-    // first argument. See the comment on the fragment above for why the
-    // argument, not the receiver, is what tells a real disabling call
-    // apart from ordinary pagination/slicing: ".Skip(20)" and ".skip(5)"
-    // both take a number, never a string. Backtick included alongside the
-    // two quote characters since JS/TS code as often writes a skip reason
-    // as a template literal as a plain string.
-    "\\b\\w+\\.skip\\(\\s*[\"'`]",
+    // Known gap, not attempted here, found while widening this fragment:
+    // a skip call reached through a computed/bracket property name on the
+    // CALL itself, not just the receiver -- "runner['skip']('flaky')" or
+    // a template-literal key. No literal ".skip(" ever appears on such a
+    // line, so no dot-anchored fragment can see it, and a fragment
+    // matching the bracketed literal directly ("['skip'](") cannot work
+    // either: every fragment in this bucket is matched against the
+    // MASKED line (see matchingMasked below and maskNonCode in
+    // src/code-mask.ts), which blanks the contents of every string
+    // literal to spaces before any regex runs, precisely so a stray word
+    // inside an unrelated string never trips a signal. The word "skip"
+    // inside the quotes of "['skip']" is exactly that: it disappears
+    // before this fragment ever sees the line. Closing this would need a
+    // detector that reads the raw, unmasked line for this one form,
+    // which nothing in this bucket does today.
+    "\\.skip\\s*\\(",
     "\\.only\\b",
     "\\bxit\\(",
     "\\bxdescribe\\(",
@@ -224,66 +224,43 @@ export const DEFAULT_RULES: Readonly<RuleSet> = Object.freeze({
     "\\[Ignore\\]",
     "\\bmarkTestSkipped\\b",
     "\\bmarkTestIncomplete\\b",
-    // Anchored to a call or a string argument, never a bare word: "skip" and
-    // "pending" alone are ordinary English and would fire on prose and on
-    // unrelated code. Also excludes a call immediately preceded by ".",
-    // since that is the chained form the identifier-anchored fragment above
-    // already owns; without the exclusion this bare form re-admitted the
-    // same ".Skip(20)"/".skip(5)" false positives that fragment was just
-    // anchored to drop. What it keeps: a bare, unchained "skip(...)" call,
-    // such as R's testthat::skip("reason"), which is never written as a
-    // method chain in the first place.
+    // Anchored to a call, never a bare word: "skip" and "pending" alone
+    // are ordinary English and would fire on prose and on unrelated code.
+    // Excludes a call immediately preceded by ".", since the chained form
+    // is already owned by the ".skip(" fragment above -- this one is only
+    // for a bare, unchained "skip(...)" call, such as R's
+    // testthat::skip("reason"), which is never written as a method chain
+    // in the first place. The exclusion no longer does any real work
+    // toward false-positive avoidance (the fragment above now matches every
+    // chained form on purpose, pagination included); it just avoids
+    // reporting the same line twice under two different fragments.
     "(?<!\\.)\\bskip\\(",
     "\\bskip\\s+[\"']",
     "\\bpending\\(",
     "\\bpending\\s+[\"']",
     "\\bxcontext\\b",
-    // xUnit's [Fact(Skip = "reason")] / [Theory(Skip = "reason")]. The
-    // real argument's value is always one of a small set of forms: a
-    // plain string ("reason"), an interpolated or verbatim string ($"...",
-    // @"...", or the combined $@".../@$"... forms), or a bare identifier
-    // or member-access reference to a constant holding the reason
-    // (SkipReasons.Flaky). Anchoring to "Skip" followed by "=" followed by
-    // one of exactly those forms -- never a bare "skip =" assigned to
-    // something else -- keeps every spacing variant of the real attribute
-    // (Skip=, Skip =, Skip  =) while "const skip = new Set(...)" (this
-    // bucket compiles case-insensitively; see compileFragments below)
-    // still does not match: "new Set(...)" is neither a string nor a bare
-    // identifier/member-access value on its own, since the identifier
-    // alternative below is anchored at its OWN end too -- it only matches
-    // when the identifier chain is the entire value (followed by nothing
-    // but a comma, a closing paren/bracket, a semicolon, or the end of the
-    // line), so "new" alone can start the match but never finish it: what
-    // follows "new" is " Set(...)", not one of those terminators.
-    //
-    // A prior version of this fragment anchored to an unclosed "[" earlier
-    // on the same line instead. That version was checked against this same
-    // false positive and reached green, but a reviewer running the real
-    // gate -- not the regex alone -- found it missed two ordinary forms the
-    // bracket anchor was blind to: a long attribute wrapped across several
-    // lines, where the "[" and "Skip =" land on different diff lines and
-    // this bucket only ever sees one line at a time (see the per-line
-    // limit named on maskDiffLine below); and any other unrelated "]"
-    // earlier on the same line, from an array-typed argument in the same
-    // attribute list ("Data = new[] {1,2}, Skip = ..."), which closed the
-    // bracket class early and hid the real "Skip =" that followed it. A
-    // second version, anchored to a bare quote right after "=", closed
-    // those two gaps but reopened a narrower one of its own: an
-    // interpolated string, a verbatim string, or a reference to a named
-    // constant never starts with a quote at all, so all three ordinary
-    // C# forms slipped past it (a reviewer reproduced all three through
-    // the real gate). This value-form anchor closes that gap in turn,
-    // still needs no bracket, and is still checked line by line like every
-    // fragment in this bucket -- it does not depend on seeing more than
-    // the one line an attribute's "Skip =" argument sits on.
+    // xUnit's [Fact(Skip = "reason")] / [Theory(Skip = "reason")]. Earlier
+    // versions of this fragment tried to anchor on the value's own form (an
+    // unclosed "[" earlier on the line, a bare quote right after "=", a
+    // closed set of string/identifier forms) to rule out
+    // "queryOptions.skip = cursorOffset;", an ordinary assignment that
+    // happens to share the word "skip". Each version traded one gap for
+    // another and a reviewer found a real xUnit form it missed every time.
+    // Same reasoning as the fragment above: this bucket only ever runs
+    // against test files, where a plain "skip = ..." assignment is
+    // uncommon and, when it happens, costs one dismissible warning -- far
+    // cheaper than a disabled test this rule was supposed to catch and
+    // didn't. So: any "skip" (case-insensitive; see compileFragments
+    // below, so this covers "Skip" too) followed by "=" and at least one
+    // non-whitespace character, whatever kind of value that is.
     //
     // Known gap, not attempted here: when "Skip =" and its value land on
     // different diff lines -- an attribute wrapped so the "=" ends one line
     // and the value opens the next -- nothing on either line alone carries
     // both halves, so this fragment (like every fragment in this bucket)
-    // has nothing to match. This is the same per-line limit named above,
-    // not a defect specific to this fragment.
-    "\\bSkip\\s*=\\s*(?:[\"']|\\$@?\"|@\\$?\"|[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*(?=\\s*(?:,|\\)|\\]|;)|\\s*$))",
+    // has nothing to match. This is the same per-line limit named on
+    // maskDiffLine below, not a defect specific to this fragment.
+    "\\bskip\\s*=\\s*\\S",
   ],
   tolerance: [
     "\\btolerance\\b",

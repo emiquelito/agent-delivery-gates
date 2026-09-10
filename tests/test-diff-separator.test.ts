@@ -202,27 +202,31 @@ test("an ordinary added line with no skip wording does not fire skip-added", () 
   assert.deepEqual(signalIds(result.signals), []);
 });
 
-// Finding 8: "\bSkip\s*=" was written for xUnit's [Fact(Skip = "reason")],
-// but the skips bucket compiles case-insensitively (see bucketFlags in
-// src/test-diff-separator.ts), so the unanchored form also matched an
-// ordinary variable declaration -- "const skip = new Set(...)" fired a
-// high-severity skip-added on this repository's own commit. A first fix
-// anchored the fragment to an unclosed "[" earlier on the same line, since
-// the real attribute is always written inside a square-bracket attribute
-// list and a plain assignment never is. That anchor itself then missed two
-// ordinary forms a reviewer found by running the real gate (see the
-// comment on the "Skip = " fragment in src/test-diff-separator.ts): a
-// wrapped multi-line attribute, and an array-typed argument earlier in the
-// same attribute list closing the bracket class early. The fragment is now
-// anchored to the value instead of the bracket: "Skip" followed by "="
-// followed directly by a quote, which is what the real attribute's value
-// always is and a plain assignment to something else, such as "new
-// Set(...)", never is.
+// Finding 8, and every narrowing since: this rule was rewritten three times
+// to describe a disabling call precisely enough to exclude some false
+// positive ("Skip" chained to an unclosed "[", then to a bare quote, then
+// to a closed set of value forms; the receiver allowlist and the
+// string-argument requirement on the JS/TS side went through the same
+// churn). A reviewer running the real gate, not the regex, found a real
+// disabling call each narrowing missed. This bucket runs against TEST
+// FILES ONLY (see "Weakening signals, run against test files only" in
+// src/test-diff-separator.ts), which flips the calculation: a false
+// positive here costs a human one dismissible warning, while a false
+// negative is this product failing at its one job. So the fragments below
+// are deliberately wide and accept the occasional ordinary variable or
+// pagination call that happens to share the word "skip". See the ".Skip(20)
+// pagination call now fires skip-added (accepted noise)" test further down
+// for the trade recorded on purpose.
 
-test("a variable named skip does not fire skip-added", () => {
+test("a variable named skip now fires skip-added too -- accepted noise, not a bug", () => {
+  // Deliberate false positive: "skip = ..." on an ordinary variable, in a
+  // test file, is indistinguishable from xUnit's "Skip = ..." attribute
+  // value without anchoring to the value's own form, and every such anchor tried
+  // so far missed a real disabling call. This is the trade: do not narrow
+  // this back to make this case quiet again.
   const diff = oneFileDiff("tests/widget.test.ts", [], ['const skip = new Set(["a.ts", "b.ts"]);']);
   const result = separateTestDiff(diff);
-  assert.deepEqual(signalIds(result.signals), []);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
 test("an added [Fact(Skip = \"reason\")] still fires skip-added", () => {
@@ -283,25 +287,32 @@ test("a closing bracket inside an unrelated string argument does not hide a late
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
-// Finding 2: "\.skip\b" and the bare "\bskip\(" fragment were both
-// unanchored to a test-declaration identifier, so each matched a
-// non-disabling ".Skip(n)"/".skip(n)" call: C# LINQ's pagination method and
-// the JS Iterator Helpers method of the same name.
+// Finding 2, and the widening that followed: "\.skip\(" was once anchored
+// to a small allowlist of test-declaration identifiers specifically to
+// exclude C# LINQ's ".Skip(n)" pagination and the JS Iterator Helpers
+// ".skip(n)" method. That anchor, and every later one tried in its place,
+// kept getting defeated by an ordinary way of writing a disabled test (see
+// the comment above the skips bucket in src/test-diff-separator.ts). Since
+// this bucket only ever runs against test files, the two tests below now
+// record the accepted trade on purpose: pagination inside a test file is
+// uncommon, and when it happens the cost is one warning a human dismisses
+// in seconds, which is cheaper than the silent miss the old anchor kept
+// reopening. Do not narrow ".skip\(" back to make these quiet again.
 
-test("C# LINQ's .Skip(20) pagination call does not fire skip-added", () => {
+test("C# LINQ's .Skip(20) pagination call fires skip-added (accepted noise, not a bug)", () => {
   const diff = oneFileDiff(
     "tests/WidgetTests.cs",
     [],
     ["var page = items.OrderBy(x => x.Id).Skip(20).Take(10).ToList();"],
   );
   const result = separateTestDiff(diff);
-  assert.deepEqual(signalIds(result.signals), []);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
-test("the JS Iterator Helpers .skip(5) method does not fire skip-added", () => {
+test("the JS Iterator Helpers .skip(5) method fires skip-added (accepted noise, not a bug)", () => {
   const diff = oneFileDiff("tests/widget.test.ts", [], ["const rest = iter.skip(5);"]);
   const result = separateTestDiff(diff);
-  assert.deepEqual(signalIds(result.signals), []);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
 test("test.describe.skip (Playwright's nested form) still fires skip-added", () => {
@@ -349,19 +360,13 @@ test("[Fact(Skip = $@\"...\")] and [Fact(Skip = @$\"...\")], the combined interp
   }
 });
 
-test("a variable named skip still does not fire skip-added, even with the widened value forms", () => {
-  const diff = oneFileDiff("tests/widget.test.ts", [], ['const skip = new Set(["a.ts", "b.ts"]);']);
-  const result = separateTestDiff(diff);
-  assert.deepEqual(signalIds(result.signals), []);
-});
-
-// Finding 2 adjudication: keep the six-name allowlist as the confident
-// case, but also fire on any identifier chained with ".skip(" whose first
-// argument is a string -- a disabling call names the test or gives a
-// reason, so it takes a string, where ".Skip(20)"/".skip(5)" pagination
-// always takes a number. This closes the gap a reviewer reproduced: a
-// project's own runner wrapper, never one of the six allowlisted names,
-// escaped entirely before.
+// The ".skip(" fragment no longer anchors on the receiver or on the
+// argument's form at all: any identifier (or none, or a bracket-accessed
+// one) chained with ".skip(" fires, whatever the call's arguments are.
+// This closes every escape a reviewer reproduced across three rounds of
+// narrowing: a differently-named or aliased runner, a reason given as a
+// named constant instead of a string literal, optional chaining on the
+// receiver, and a receiver reached through bracket/computed access.
 
 test("a custom runner's own .skip(reason) call fires skip-added", () => {
   const diff = oneFileDiff("tests/widget.test.ts", [], ["myCustomRunner.skip('flaky', () => {});"]);
@@ -370,25 +375,9 @@ test("a custom runner's own .skip(reason) call fires skip-added", () => {
 });
 
 test("a test function imported under an alias, calling .skip(reason), fires skip-added", () => {
-  // A miss this project's own comments used to name as unclosed: "import {
-  // test as t } ... t.skip(...)" chains off "t", not one of the six
-  // allowlisted names, but the argument-anchored fragment does not care what
-  // the identifier is named.
   const diff = oneFileDiff("tests/widget.test.ts", [], ["t.skip('adds numbers', () => {});"]);
   const result = separateTestDiff(diff);
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
-});
-
-test("C# LINQ's .Skip(20) pagination still does not fire skip-added under the widened rule", () => {
-  const diff = oneFileDiff("tests/WidgetTests.cs", [], ["var page = items.Skip(20).Take(10).ToList();"]);
-  const result = separateTestDiff(diff);
-  assert.deepEqual(signalIds(result.signals), []);
-});
-
-test("the JS Iterator Helpers .skip(5) method still does not fire skip-added under the widened rule", () => {
-  const diff = oneFileDiff("tests/widget.test.ts", [], ["const rest = iter.skip(5);"]);
-  const result = separateTestDiff(diff);
-  assert.deepEqual(signalIds(result.signals), []);
 });
 
 test("a custom runner's .skip(reason) still fires when the reason is a template literal", () => {
@@ -397,12 +386,64 @@ test("a custom runner's .skip(reason) still fires when the reason is a template 
   assert.deepEqual(signalIds(result.signals), ["skip-added"]);
 });
 
-// Still escapes, named plainly instead of left to be rediscovered: a
-// receiver reached through bracket/computed access has no identifier
-// immediately before the ".", so neither the allowlist nor the
-// argument-anchored fragment sees it.
-test("a bracket-accessed runner's .skip(reason) still escapes skip-added (known gap)", () => {
+test("a bare .skip() with no argument at all fires skip-added", () => {
+  // A reviewer reproduced this against the real gate: "runner.skip();"
+  // returned exit 0 and "Signals: none found" under the old
+  // string-argument-anchored fragment, since a disabling call was assumed
+  // to always carry a reason. It does not have to.
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["runner.skip();"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("a skip reason given as a named constant, not a string literal, fires skip-added", () => {
+  // Reproduced against the real gate: "run.skip(FLAKY_REASON, () => {...})"
+  // escaped the old fragment, which required the first argument to open
+  // with a quote or backtick.
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["run.skip(FLAKY_REASON, () => { doStuff(); });"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("optional chaining on the receiver still fires skip-added", () => {
+  // Reproduced against the real gate: "it?.skip('flaky');" escaped the old
+  // receiver allowlist, since the "?" broke the adjacency the allowlist
+  // depended on even for one of its own six names.
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["it?.skip('flaky');"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("a receiver reached through bracket access now fires skip-added", () => {
+  // Reproduced against the real gate: "runners['custom'].skip('flaky',
+  // () => {});" escaped every earlier version of this fragment, since none
+  // of them required an identifier immediately before the "."; dropping
+  // the receiver anchor entirely closes this along with the others above.
   const diff = oneFileDiff("tests/widget.test.ts", [], ["runners['custom'].skip('flaky', () => {});"]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+test("Mocha's argument-less this.skip() inside a test body fires skip-added", () => {
+  const diff = oneFileDiff(
+    "tests/widget.test.ts",
+    [],
+    ['test("flaky one", function() {', "  this.skip();", "  doStuff();", "});"],
+  );
+  const result = separateTestDiff(diff);
+  assert.deepEqual(signalIds(result.signals), ["skip-added"]);
+});
+
+// Known gap, found while widening this rule and not fixed here: a skip
+// call reached through a computed/bracket property name on the CALL
+// itself, not just the receiver, still escapes. No literal ".skip(" ever
+// appears on such a line, and every fragment in this bucket runs against
+// the string-masked line (see maskNonCode in src/code-mask.ts), which
+// blanks the word "skip" along with the rest of the string literal's
+// contents before any regex here ever sees it. See the comment on the
+// ".skip(" fragment in src/test-diff-separator.ts for the full reasoning.
+test("a skip call reached through a computed property name on the call itself still escapes (known gap)", () => {
+  const diff = oneFileDiff("tests/widget.test.ts", [], ["runner['skip']('flaky');"]);
   const result = separateTestDiff(diff);
   assert.deepEqual(signalIds(result.signals), []);
 });
