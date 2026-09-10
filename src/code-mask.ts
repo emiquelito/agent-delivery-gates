@@ -516,13 +516,20 @@ const resolvedServices = new Map<string, LanguageService>();
 // mutate.ts already knew was safe.
 //
 // STOP-GAP, split in two. A CRITICAL finding on this project's own commit
-// history: every one of these packages ships as a devDependency, and this
-// package's own package.json carries no `dependencies` key at all (see
-// package.json's own header comment and the README's "zero dependencies"
-// claim), so an adopter who installs this tool the way its own quickstart
-// says to (`npm install --save-dev agent-delivery-gates`) gets every one
-// of these grammars absent, permanently, for every process this tool ever
-// runs for them. Before this split, "not installed" and "installed but
+// history: every one of these packages ships as a devDependency, and at
+// the time this split was made, this package's own package.json carried
+// no `dependencies` key at all (see package.json's own header comment and
+// the README's then-current "zero dependencies" claim), so an adopter who
+// installed this tool the way its own quickstart said to
+// (`npm install --save-dev agent-delivery-gates`) got every one of these
+// grammars absent, permanently, for every process this tool ever ran for
+// them. That specific gap is closed now -- web-tree-sitter is a real
+// dependency, and `adg lang add`/`adg init` fetch the rest into
+// `.adg/grammars/` (see tree-sitter-grammar-store.ts) -- but the
+// resolvedServices/grammarGenuineFailures split this comment introduces
+// stays: an adopter can still decline the fetch, so "absent" remains a
+// routine, non-broken state this file has to tell apart from "installed
+// but broken". Before this split, "not installed" and "installed but
 // broken" were the same fact, `grammarLoadFailures`, and every consumer of
 // it treated both as a hard block -- which meant the majority case for a
 // real adopter (nothing installed, because npm never installs a

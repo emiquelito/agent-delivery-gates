@@ -967,8 +967,12 @@ ${jsonLdText}
       <p>The one exception is explicit: <code>agent-delivery-gates lang add &lt;language&gt;</code>
         fetches that language's tree-sitter grammar, a plain <code>.wasm</code> file, from
         <code>unpkg.com</code>, and writes it into <code>.adg/grammars/</code> in your project.
-        <code>adg init</code> can do the same, but only after asking and only if you say yes.
-        Neither runs unless you invoke it; nothing else in this package ever does.</p>
+        The request refuses any redirect instead of following one, so the bytes it considers
+        always come from that host, never one a redirect substituted; and before anything is
+        written, those bytes are checked against a sha256 digest this project pinned for that
+        exact package version, so a wrong, truncated, or tampered download is rejected instead of
+        installed. <code>adg init</code> can do the same, but only after asking and only if you
+        say yes. Neither runs unless you invoke it; nothing else in this package ever does.</p>
       <p>The package has one runtime dependency, <a href="https://www.npmjs.com/package/web-tree-sitter">web-tree-sitter</a>
         (MIT licensed, zero dependencies of its own): the WebAssembly runtime that loads a
         grammar fetched the way above. A WebAssembly grammar has no capability to open a socket,

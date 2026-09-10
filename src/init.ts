@@ -509,3 +509,37 @@ export function runInit(options: InitOptions): InitOutcome {
     missingGrammarLanguages: dryRun ? [] : missingGrammarLanguages.map((entry) => entry.name),
   };
 }
+
+/**
+ * Folds whether an attempted grammar install succeeded into `init`'s own
+ * exit code. `runInit` above decides `baseExitCode` before any fetch is
+ * even considered -- writing the starter files and finding missing
+ * grammars never touches the network -- so this is the one place the two
+ * facts meet.
+ *
+ * `baseExitCode` wins whenever it is already non-zero: a setup problem
+ * (an unreadable target, a bad argument) is a different, earlier kind of
+ * failure than a grammar that could not be fetched, and should not be
+ * masked by it or vice versa.
+ *
+ * Otherwise, `grammarsOk` decides between 0 and 1. `grammarsOk` is `true`
+ * both when every attempted install succeeded and when nothing was
+ * attempted at all (declined, or nothing was missing) -- see
+ * bin/adg.ts's maybeInstallGrammars for that decision. A partial failure
+ * (one language installs, another does not) is folded into the same 1 as
+ * a total failure, not a separate code: a caller checking this exit code
+ * asked for every detected language's grammar, and "some of what was
+ * asked for did not happen" is not success, whether that is one language
+ * out of two or two out of two. The FAILED lines already printed are
+ * where the distinction actually lives, for a person reading them; the
+ * exit code only needs to answer "did everything I asked for happen,
+ * yes or no."
+ *
+ * Before this existed, `bin/adg.ts` computed `outcome.exitCode` and threw
+ * away whatever `maybeInstallGrammars` reported, so `adg init
+ * --install-grammars` exited 0 even when every fetch failed.
+ */
+export function combineInitExitCode(baseExitCode: number, grammarsOk: boolean): number {
+  if (baseExitCode !== 0) return baseExitCode;
+  return grammarsOk ? 0 : 1;
+}

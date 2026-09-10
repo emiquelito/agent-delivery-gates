@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runInit } from "../src/init.ts";
+import { runInit, combineInitExitCode } from "../src/init.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
@@ -565,4 +565,36 @@ test("init: --no-install-grammars never prompts and never installs, even for a d
     assert.match(result.stdout, /Not installing\. Run the commands above yourself when ready\./);
     assert.equal(existsSync(join(dir, ".adg", "grammars")), false);
   });
+});
+
+// combineInitExitCode: finding 5 was that bin/adg.ts computed its exit
+// code before any grammar fetch was attempted and threw away whatever
+// maybeInstallGrammars reported, so `adg init --install-grammars` exited
+// 0 even when every fetch failed. That decision is now this one pure
+// function bin/adg.ts calls; tested directly here, not only by spawning
+// the CLI, because a real failure there means a real fetch to
+// unpkg.com actually failing, which this suite does not do (see
+// tests/lang-cli.test.ts's own header comment on why real network paths
+// are exercised by hand, not in this suite).
+
+test("combineInitExitCode: 0 when nothing was missing or everything installed", () => {
+  assert.equal(combineInitExitCode(0, true), 0);
+});
+
+test("combineInitExitCode: 1 when every attempted grammar install failed", () => {
+  assert.equal(combineInitExitCode(0, false), 1);
+});
+
+test("combineInitExitCode: a partial failure gets the same 1 as a total one, not a separate code", () => {
+  // maybeInstallGrammars in bin/adg.ts only ever reports grammarsOk=true
+  // when every attempted install succeeded, so a partial failure (one
+  // language installs, another does not) already arrives here as
+  // grammarsOk=false, same as a total failure. This test pins that
+  // combineInitExitCode does not try to invent a third code for it.
+  assert.equal(combineInitExitCode(0, false), 1);
+});
+
+test("combineInitExitCode: a non-zero base exit code always wins, never masked by a grammar result", () => {
+  assert.equal(combineInitExitCode(2, true), 2);
+  assert.equal(combineInitExitCode(2, false), 2);
 });

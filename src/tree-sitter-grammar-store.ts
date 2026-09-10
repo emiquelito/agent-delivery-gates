@@ -31,6 +31,7 @@
 // `test-diff` calls on your behalf.
 
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
@@ -50,6 +51,15 @@ export interface LanguageEntry {
    * depends on, and that config was only ever checked against this version.
    */
   version: string;
+  /**
+   * The sha256 of the exact .wasm file this pinned version publishes,
+   * lowercase hex. `fetchGrammar` hashes what it downloads and refuses to
+   * install anything that does not match -- a wrong host, a redirect, a
+   * truncated body, or a byte-for-byte-plausible but subtly wrong grammar
+   * module all fail the same way. See GRAMMAR_SHA256 below for how each
+   * digest was obtained.
+   */
+  sha256: string;
 }
 
 // One version per grammar package, matching package.json's devDependencies
@@ -67,6 +77,31 @@ const GRAMMAR_VERSIONS: Readonly<Record<string, string>> = {
   "tree-sitter-c-sharp": "0.23.5",
 };
 
+// The sha256 of each package's own published .wasm file, at the exact
+// version pinned above. Each one was cross-checked three independent ways
+// before being written here, not merely copied from a single fetch:
+//   1. `npm pack <package>@<version>`, which has npm itself verify the
+//      tarball against the registry's own published integrity hash before
+//      it ever reaches disk -- so this starts from a tarball npm, not this
+//      project, already vouched for.
+//   2. This project's own devDependency copy of the same package at the
+//      same pinned version (node_modules/<package>), installed by a
+//      separate npm run at a different time.
+//   3. A direct fetch of the exact unpkg URL fetchGrammar itself requests,
+//      to confirm unpkg serves the same bytes as the registry tarball,
+//      not different ones.
+// All three agreed for all seven packages. Re-derive and re-check with:
+//   npm pack <package>@<version> && tar xzf <tarball> && sha256sum package/<file>.wasm
+const GRAMMAR_SHA256: Readonly<Record<string, string>> = {
+  "tree-sitter-python": "16108b50df4ee9a30168794252ab55e7c93bfc5765d7fa0aa3e335752c515f47",
+  "tree-sitter-rust": "f65f354215611fd94ad34134b3427eb3d58cbb745df7b6509ba722184db73d57",
+  "tree-sitter-ruby": "09a96427d7c72f0613ed470cd9812223fc4a91d6a9c025c0235cc6bd59ff96f4",
+  "tree-sitter-php": "d4df6a6ff08c87c3ec4f9cbb785fe09998a0cb570e03f57d7b19b3acfb146aa7",
+  "tree-sitter-go": "9504573f352b20be7f2f1911754d710622aedc15afff16d5ed8fb5645681aee7",
+  "tree-sitter-java": "4fdeac4ca6ca089f06c6f7e562abcac1733cd465728cc7031ebb73c2019122c4",
+  "tree-sitter-c-sharp": "6f69e1cae44e1c32c1eccc170dc5a9778fb94ff716f71113fe1f8c4299aa2f40",
+};
+
 const NAME_BY_EXT: Readonly<Record<string, string>> = {
   ".rs": "rust",
   ".rb": "ruby",
@@ -82,6 +117,7 @@ const PYTHON_ENTRY: LanguageEntry = {
   packageName: "tree-sitter-python",
   wasmFileName: "tree-sitter-python.wasm",
   version: GRAMMAR_VERSIONS["tree-sitter-python"],
+  sha256: GRAMMAR_SHA256["tree-sitter-python"],
 };
 
 /** Every language `adg lang add` can install, one table, derived from
@@ -98,6 +134,7 @@ export const LANGUAGES: readonly LanguageEntry[] = [
       packageName: spec.packageName,
       wasmFileName: spec.wasmFileName,
       version: GRAMMAR_VERSIONS[spec.packageName],
+      sha256: GRAMMAR_SHA256[spec.packageName],
     }),
   ),
 ];
@@ -134,6 +171,17 @@ export interface FetchGrammarResult {
 }
 
 /**
+ * How long `fetchGrammar` waits, from the start of the request to the last
+ * byte of the body, before giving up. A server that accepts the connection
+ * and never answers -- or answers and then stalls mid-body -- would
+ * otherwise hang the calling command forever, with nothing to kill it but
+ * an external signal. 20 seconds is generous for the largest of these
+ * files (tree-sitter-c-sharp's wasm, about 3.8MB) even on a slow link,
+ * while still being a bounded wait a script can rely on.
+ */
+const FETCH_TIMEOUT_MS = 20_000;
+
+/**
  * Fetches one language's plain .wasm grammar from unpkg's static serving of
  * the package's own published tarball -- not `npm install`, so none of that
  * package's native prebuilds or vendored copies of the other six grammars
@@ -144,24 +192,67 @@ export interface FetchGrammarResult {
  * runs (`check`, `mutate`, `census`, `induce`, `test-diff`, or any hook)
  * ever calls this.
  *
+ * Three things a hostile or merely broken server could do are refused
+ * before anything is written:
+ *   - A redirect anywhere else is refused outright (`redirect: "error"`),
+ *     not merely followed and trusted. unpkg does not redirect a request
+ *     that already names an exact version and file (verified live before
+ *     this was written), so this costs nothing in the ordinary case and
+ *     means the bytes this function considers come from the host it asked,
+ *     never a host a redirect chain quietly substituted.
+ *   - Whatever bytes do arrive are hashed and checked against `entry`'s
+ *     pinned sha256 before the write. Plain text, an empty body, a
+ *     different package's wasm, or a well-formed module implementing a
+ *     subtly wrong grammar all fail this check the same way a corrupted
+ *     download does: the digest does not match, so nothing is installed.
+ *   - The whole request, connection through last byte, is bounded by
+ *     FETCH_TIMEOUT_MS. A connection accepted and never answered, or a
+ *     body that stops arriving partway through, ends in a reported
+ *     failure instead of a hang.
+ *
+ * Both the initial connect and the read of the response body are inside
+ * the same try/catch: a connection dropped after headers arrive throws
+ * from `response.arrayBuffer()`, not from `fetch()` itself, and is caught
+ * here the same clean way as every other failure in this function instead
+ * of escaping as a raw stack trace.
+ *
  * Writes through a temp file and renames into place, so a run interrupted
  * mid-download (a killed process, a dropped connection) never leaves a
  * truncated .wasm file where the loader would find and try to parse it as
  * whole; either the rename lands and the file is complete, or nothing at
  * the final path changes at all.
  */
-export async function fetchGrammar(entry: LanguageEntry, root: string): Promise<FetchGrammarResult> {
+export async function fetchGrammar(
+  entry: LanguageEntry,
+  root: string,
+  options?: { timeoutMs?: number },
+): Promise<FetchGrammarResult> {
   const url = `https://unpkg.com/${entry.packageName}@${entry.version}/${entry.wasmFileName}`;
-  let response: Response;
+  const timeoutMs = options?.timeoutMs ?? FETCH_TIMEOUT_MS;
+  let bytes: Uint8Array;
   try {
-    response = await fetch(url);
+    const response = await fetch(url, {
+      redirect: "error",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      return { ok: false, message: `fetching ${url} failed: HTTP ${response.status}` };
+    }
+    bytes = new Uint8Array(await response.arrayBuffer());
   } catch (err) {
     return { ok: false, message: `could not reach ${url}: ${(err as Error).message}` };
   }
-  if (!response.ok) {
-    return { ok: false, message: `fetching ${url} failed: HTTP ${response.status}` };
+
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (digest !== entry.sha256) {
+    return {
+      ok: false,
+      message:
+        `downloaded ${url} (${bytes.length} bytes) but its sha256 (${digest}) does not match the ` +
+        `pinned digest for ${entry.packageName}@${entry.version} (${entry.sha256}) -- refusing to install it`,
+    };
   }
-  const bytes = new Uint8Array(await response.arrayBuffer());
+
   const dir = grammarStoreDir(root);
   mkdirSync(dir, { recursive: true });
   const finalPath = localWasmPath(root, entry.wasmFileName);

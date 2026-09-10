@@ -30,7 +30,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runInit } from "../src/init.ts";
+import { runInit, combineInitExitCode } from "../src/init.ts";
 import { createInterface } from "node:readline/promises";
 import { findLanguage, fetchGrammar } from "../src/tree-sitter-grammar-store.ts";
 
@@ -110,7 +110,10 @@ exist yet.
   --help                print this message and exit 0
 
 Exit codes:
-  0  every file was created, or already existed and was reported as such
+  0  every file was created, or already existed and was reported as such,
+     and every grammar install actually attempted (if any) succeeded
+  1  the files above were handled fine, but at least one grammar install
+     was attempted and failed -- see the FAILED lines above
   2  the run could not proceed: an unreadable target, a missing template,
      or a bad argument
 `;
@@ -219,8 +222,15 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
  * (piped, CI, a test spawning this process), the safe default is "no", and
  * the commands `runInit`'s own output already printed are left as the way
  * to do it by hand.
+ *
+ * Returns whether every language actually attempted succeeded. Declining
+ * to install (no terminal, a "no" answer, or `--no-install-grammars`)
+ * counts as success: nothing was promised and nothing failed. This is the
+ * one signal `runInitCommand` has for whether to fold a fetch failure into
+ * its own exit code -- see the comment there for why a partial failure is
+ * treated the same as a total one.
  */
-async function maybeInstallGrammars(languageNames: readonly string[], targetDir: string, args: ParsedInitArgs): Promise<void> {
+async function maybeInstallGrammars(languageNames: readonly string[], targetDir: string, args: ParsedInitArgs): Promise<boolean> {
   let install: boolean;
   if (args.installGrammars !== undefined) {
     install = args.installGrammars;
@@ -239,15 +249,18 @@ async function maybeInstallGrammars(languageNames: readonly string[], targetDir:
 
   if (!install) {
     process.stdout.write("Not installing. Run the commands above yourself when ready.\n");
-    return;
+    return true;
   }
 
+  let allOk = true;
   for (const name of languageNames) {
     const entry = findLanguage(name);
     if (entry === undefined) continue; // cannot happen: names came from the same table findLanguage reads
     const result = await fetchGrammar(entry, targetDir);
     process.stdout.write(`${result.ok ? "" : "FAILED: "}${result.message}\n`);
+    if (!result.ok) allOk = false;
   }
+  return allOk;
 }
 
 async function runInitCommand(argv: string[]): Promise<never> {
@@ -272,11 +285,12 @@ async function runInitCommand(argv: string[]): Promise<never> {
     process.stdout.write(`${line}\n`);
   }
 
+  let grammarsOk = true;
   if (!args.dryRun && outcome.missingGrammarLanguages.length > 0) {
-    await maybeInstallGrammars(outcome.missingGrammarLanguages, targetDir, args);
+    grammarsOk = await maybeInstallGrammars(outcome.missingGrammarLanguages, targetDir, args);
   }
 
-  process.exit(outcome.exitCode);
+  process.exit(combineInitExitCode(outcome.exitCode, grammarsOk));
 }
 
 function main(): void {
