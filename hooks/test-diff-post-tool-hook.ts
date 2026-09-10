@@ -174,21 +174,26 @@ async function main(): Promise<void> {
         "unmeasured, not as clean.",
     );
   }
-  // Finding 3: the whole-file reader above is safe on its own (it never
-  // misapplies one line's mask to another; see maskDiffLine's own raw-text
-  // check in src/test-diff-separator.ts), but a caller whose git plumbing
-  // is misconfigured -- a stale checkout, GIT_DIR pointing somewhere
-  // unexpected -- used to get the old, weaker per-line detection back with
-  // nothing to say the new benefit was lost. Treated the same as
-  // unwarmedExtensions just above: a bug in this gate's own environment,
-  // not in the commit, so it blocks here too, instead of passing quietly
-  // as a warning the way grammarAbsentExtensions does.
+  // Finding 3, corrected: the whole-file reader above is safe on its own
+  // (it never misapplies one line's mask to another; see maskDiffLine's
+  // own raw-text check in src/test-diff-separator.ts), it only ever
+  // detects less well. This used to block here, reasoning it alongside
+  // unwarmedExtensions as a bug in the gate's own environment. But a
+  // gitlink (a submodule pointer, added or bumped) has no blob for `git
+  // show <rev>:path` to read -- "fatal: bad object" -- which is an
+  // ordinary git state, not a misconfigured environment, and it made this
+  // hook block every commit that touched a submodule. That is the same
+  // condition grammarAbsentExtensions already warns on and does not
+  // block: an environment fact, not a defect in the commit. Warn here too,
+  // matching the standalone CLI and the MCP server, which already treat
+  // this condition as advisory.
   if (result.wholeFileMaskFallbackCount > 0) {
-    block(
+    process.stderr.write(
       `test-diff-post-tool-hook: ${result.wholeFileMaskFallbackCount} line(s) in this diff were masked one at a ` +
         "time instead of through their whole file, because the whole file's own answer for that line could not " +
-        "be trusted (a stale read, or the line was missing from it); this is a bug in the gate's own git " +
-        "plumbing, not in the commit; treat this run as unmeasured, not as clean.",
+        "be trusted (a stale read, the line was missing from it, or the path has no readable blob, such as a " +
+        "submodule pointer). Not blocking this commit; treat this run as unmeasured for those lines, not as " +
+        "clean.\n",
     );
   }
   if (result.signals.length === 0) {

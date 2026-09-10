@@ -247,20 +247,21 @@ test("Finding 2: the same commit with no forced failure is scanned normally (con
   });
 });
 
-// --- Finding 3: wholeFileMaskFallbackCount blocks here too ------------------
+// --- Finding 3, corrected: wholeFileMaskFallbackCount warns here now -------
 //
-// This hook is an enforcing gate (it exits 2 to block the commit it just
-// saw), unlike the standalone CLI, which only warns. A fake `git` that
-// answers every `git show <rev>:<path>` call -- the exact call
+// This hook used to be an enforcing gate for this condition (exit 2),
+// unlike the standalone CLI, which only warns. A fake `git` that answers
+// every `git show <rev>:<path>` call -- the exact call
 // src/git-blob-reader.ts's makeGitWholeFileReader makes -- with content the
 // diff never carries reproduces the misconfigured-git-plumbing case
 // Finding 3 names. The whole-file reader itself is safe (see maskDiffLine's
-// own raw-text check in src/test-diff-separator.ts), so this is treated the
-// same as unwarmedExtensions just above: a bug in the gate's own
-// environment, not in the commit, so it blocks.
+// own raw-text check in src/test-diff-separator.ts) -- it only ever detects
+// less well -- so this is now treated the same as grammarAbsentExtensions:
+// an environment fact, not a defect in the commit, so it warns and the
+// commit goes through, matching the standalone CLI and the MCP server.
 
 test(
-  "Finding 3: a stale whole-file reader blocks the commit here, unlike the standalone CLI's own warn-only policy",
+  "Finding 3, corrected: a stale whole-file reader warns here now, matching the standalone CLI's warn-only policy",
   {
     skip:
       process.platform === "win32"
@@ -282,7 +283,7 @@ test(
       withTempRepo((dir) => {
         // A test file edited in a way that trips no signal of its own, so
         // the only thing that could make this exit non-zero is the stale
-        // reader itself.
+        // reader itself, which it no longer does.
         commitFile(dir, "tests/widget.test.ts", "const label = 'a';\n");
         writeFileSync(join(dir, "tests/widget.test.ts"), "const label = 'b';\n");
         runGit(dir, ["add", "tests/widget.test.ts"]);
@@ -291,12 +292,76 @@ test(
         const result = runHook({ tool_name: "Bash", tool_input: { command: "git commit -m 'x'" }, cwd: dir }, dir, {
           PATH: `${binDir}:${process.env.PATH ?? ""}`,
         });
-        assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+        assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
         assert.match(result.stderr, /masked one at a time/);
-        assert.match(result.stderr, /unmeasured, not as clean/);
+        assert.match(result.stderr, /not blocking this commit/i);
       });
     } finally {
       rmSync(binDir, { recursive: true, force: true });
     }
   },
 );
+
+// --- Finding 1: a submodule pointer (a gitlink) has no blob `git show
+// <rev>:<path>` can read -- "fatal: bad object" -- which is an ordinary
+// git state (a dependency bot bumping a submodule does this routinely),
+// not a misconfigured environment. Both adding a submodule and bumping an
+// existing one must warn, not block.
+
+test("Finding 1: adding a submodule warns here, not blocks", () => {
+  withTempRepo((dir) => {
+    const subDir = mkdtempSync(join(tmpdir(), "adg-test-diff-hook-submodule-"));
+    runGit(subDir, ["init", "-q"]);
+    runGit(subDir, ["config", "user.email", "test@example.invalid"]);
+    runGit(subDir, ["config", "user.name", "Test"]);
+    writeFileSync(join(subDir, "a.txt"), "hi\n");
+    runGit(subDir, ["add", "a.txt"]);
+    runGit(subDir, ["commit", "-q", "-m", "init"]);
+    const subSha = runGit(subDir, ["rev-parse", "HEAD"]).trim();
+
+    try {
+      mkdirSync(join(dir, "tests"), { recursive: true });
+      runGit(dir, ["update-index", "--add", "--cacheinfo", `160000,${subSha},tests/sub`]);
+      runGit(dir, ["commit", "-q", "--no-verify", "-m", "add submodule"]);
+
+      const result = runHook({ tool_name: "Bash", tool_input: { command: "git commit -m 'x'" }, cwd: dir }, dir);
+      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+      assert.match(result.stderr, /masked one at a time/);
+      assert.match(result.stderr, /not blocking this commit/i);
+    } finally {
+      rmSync(subDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Finding 1: bumping an existing submodule pointer warns here, not blocks", () => {
+  withTempRepo((dir) => {
+    const subDir = mkdtempSync(join(tmpdir(), "adg-test-diff-hook-submodule-bump-"));
+    runGit(subDir, ["init", "-q"]);
+    runGit(subDir, ["config", "user.email", "test@example.invalid"]);
+    runGit(subDir, ["config", "user.name", "Test"]);
+    writeFileSync(join(subDir, "a.txt"), "hi\n");
+    runGit(subDir, ["add", "a.txt"]);
+    runGit(subDir, ["commit", "-q", "-m", "init"]);
+    const subSha1 = runGit(subDir, ["rev-parse", "HEAD"]).trim();
+    writeFileSync(join(subDir, "a.txt"), "hi again\n");
+    runGit(subDir, ["add", "a.txt"]);
+    runGit(subDir, ["commit", "-q", "-m", "second"]);
+    const subSha2 = runGit(subDir, ["rev-parse", "HEAD"]).trim();
+
+    try {
+      mkdirSync(join(dir, "tests"), { recursive: true });
+      runGit(dir, ["update-index", "--add", "--cacheinfo", `160000,${subSha1},tests/sub`]);
+      runGit(dir, ["commit", "-q", "--no-verify", "-m", "add submodule"]);
+      runGit(dir, ["update-index", "--add", "--cacheinfo", `160000,${subSha2},tests/sub`]);
+      runGit(dir, ["commit", "-q", "--no-verify", "-m", "bump submodule"]);
+
+      const result = runHook({ tool_name: "Bash", tool_input: { command: "git commit -m 'x'" }, cwd: dir }, dir);
+      assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+      assert.match(result.stderr, /masked one at a time/);
+      assert.match(result.stderr, /not blocking this commit/i);
+    } finally {
+      rmSync(subDir, { recursive: true, force: true });
+    }
+  });
+});
