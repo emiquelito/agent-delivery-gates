@@ -1701,22 +1701,30 @@ test("the region closes at its own closing brace: a later, unrelated source chan
 
 // --- Finding 1: the skips bucket's premise (test files only) is false for Rust ---
 //
-// hasRustTestMarker fires on a test-ish token ANYWHERE in a .rs file's
+// hasRustTestMarker fires on an actual test-declaring attribute
+// (#[cfg(test)], #[test], or #[whatever::test]) ANYWHERE in a .rs file's
 // diff, including a context line, and when it fires the WHOLE file's diff
 // runs through every check in signalsForTestFile -- not only the
-// #[cfg(test)] region. A reviewer reproduced a false skip-added on
-// production Rust code from exactly this: a .rs file classified as
-// SOURCE, carrying an ordinary Iterator::skip call, fired skip-added
-// solely because an assert! elsewhere in the same file made
-// hasRustTestMarker true. See RUST_EXCLUDED_SKIP_FRAGMENTS in
-// src/test-diff-separator.ts for the fix and its own reasoning.
+// #[cfg(test)] region itself. RUST_TEST_MARKER_RE used to also treat a
+// bare assert!/assert_eq!/assert_ne! call as such a marker, and a reviewer
+// reproduced a false skip-added on production Rust code from exactly
+// that: a .rs file classified as SOURCE, carrying an ordinary
+// Iterator::skip call, fired skip-added solely because an unrelated
+// assert! elsewhere in the same file made hasRustTestMarker true. That
+// specific trigger is gone now that the marker is narrowed to attribute
+// forms only (a bare assert! with no attribute marker falls through to
+// cfgTestRegionMask instead, which scans only the test module's own
+// region -- see the tests below this section). But the whole-file scan
+// itself is not gone: a real #[cfg(test)] module elsewhere in the file
+// still makes hasRustTestMarker true and still sends the WHOLE file's
+// diff through this bucket, ordinary source code included, so the
+// exclusion below still matters. See RUST_EXCLUDED_SKIP_FRAGMENTS
+// in src/test-diff-separator.ts for the fix and its own reasoning.
 
-test("Finding 1's reproduction: an ordinary items.skip(n) in Rust source no longer fires skip-added, even though an assert! elsewhere makes the whole file's diff get scanned", () => {
+test("Finding 1's reproduction: an ordinary items.skip(n) in Rust source no longer fires skip-added, even though a real #[cfg(test)] module elsewhere makes the whole file's diff get scanned", () => {
   const diff = diffWithHunk("src/pricing.rs", [
-    " fn discount(cents: i64) -> i64 {",
-    "     assert!(cents >= 0);",
-    "     cents - 10",
-    " }",
+    " #[cfg(test)]",
+    " mod other_tests {}",
     " ",
     " fn first_n(items: &[i64], n: usize) -> Vec<i64> {",
     "-    items.to_vec()",
@@ -1737,12 +1745,27 @@ test("a struct-literal 'skip:' field in Rust source no longer fires skip-added u
   // this is exactly why that new fragment is excluded for .rs too, not
   // only the pre-existing ".skip(" one.
   const diff = diffWithHunk("src/pricing.rs", [
-    " fn discount(cents: i64) -> i64 {",
-    "     assert!(cents >= 0);",
-    "     cents - 10",
-    " }",
+    " #[cfg(test)]",
+    " mod other_tests {}",
     " ",
     "+struct Query { skip: bool, limit: i64 }",
+  ]);
+  const result = separateTestDiff(diff);
+  assert.deepEqual(result.signals, []);
+});
+
+test("the assignment form 'skip = ...' in Rust source no longer fires skip-added under the same whole-file scan", () => {
+  // The half the original exclusion missed: "let skip = offset + 1;" in a
+  // pagination helper, reported skip-added with "confirm this test was not
+  // disabled to reach green" -- plainly wrong for a plain local binding.
+  const diff = diffWithHunk("src/pricing.rs", [
+    " #[cfg(test)]",
+    " mod other_tests {}",
+    " ",
+    "+fn paginate(offset: i64) -> i64 {",
+    "+    let skip = offset + 1;",
+    "+    skip",
+    "+}",
   ]);
   const result = separateTestDiff(diff);
   assert.deepEqual(result.signals, []);
