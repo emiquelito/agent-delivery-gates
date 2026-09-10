@@ -1,18 +1,22 @@
 // The tree-sitter-backed LanguageService for Python.
 //
-// web-tree-sitter and tree-sitter-python are devDependencies only: nothing
-// this package ships to a user depends on them at runtime, and the README,
-// the npm description, and the site all still say zero dependencies.
-// That claim survives this file for one reason: every import below is a
-// normal, static, top-of-file import, but this module itself is never
-// imported that way. src/code-mask.ts reaches it through a dynamic
-// `import()`, and only after deciding a `.py` file is actually in play (see
+// web-tree-sitter is a real dependency of this package (see package.json):
+// MIT licensed, zero dependencies of its own, and a wasm grammar it loads
+// has no capability to open a socket or read anything it was not handed.
+// tree-sitter-python stays a devDependency of this repository's own
+// checkout only -- an adopter gets it through `adg lang add python`
+// instead, into `.adg/grammars/` (see src/tree-sitter-grammar-store.ts),
+// never through `npm install`. Either way, every import below is a normal,
+// static, top-of-file import, but this module itself is never imported
+// that way: src/code-mask.ts reaches it through a dynamic `import()`, and
+// only after deciding a `.py` file is actually in play (see
 // `warmLanguageServices` there). A process that never touches a `.py` file
-// never evaluates this file at all, so it never touches these packages
-// either. A process that does touch a `.py` file but has neither package
-// installed hits a rejected dynamic import, which the caller in
-// code-mask.ts catches and answers by falling back to the regex scanner:
-// the same scanner every file got before this one existed.
+// never evaluates this file at all, so it never touches tree-sitter-python
+// either. A process that does touch a `.py` file but has no grammar
+// resolvable, neither through node_modules nor through the local store,
+// hits a rejected dynamic import, which the caller in code-mask.ts catches
+// and answers by falling back to the regex scanner: the same scanner every
+// file got before this one existed.
 //
 // What follows is a walk of tree-sitter's parse tree, not a line-by-line
 // scan: every string and comment node is marked as not-code, wholesale.
@@ -35,9 +39,11 @@
 // not two that can drift apart.
 
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Parser, Language, type Node as TSNode } from "web-tree-sitter";
 import type { LanguageService } from "./code-mask.ts";
+import { localWasmPath } from "./tree-sitter-grammar-store.ts";
 
 /** Inside a string or a comment. */
 const LITERAL = 0;
@@ -190,13 +196,26 @@ function makeService(parser: Parser): LanguageService {
   };
 }
 
-/** The on-disk path of tree-sitter-python's prebuilt wasm grammar, resolved
- * through the package's own package.json instead of a hardcoded relative
- * path, so this keeps working if that package ever changes its layout. */
+/** The on-disk path of tree-sitter-python's prebuilt wasm grammar. Tried
+ * first through the package's own package.json, so this keeps working if
+ * that package ever changes its layout; falls back to an adopter's local
+ * grammar store (`.adg/grammars/tree-sitter-python.wasm`, written by
+ * `adg lang add python`) when the package itself is not resolvable, the
+ * ordinary state for an adopter since npm never installs this package's
+ * own devDependencies for anyone downstream of it. See the matching
+ * comment on src/tree-sitter-language-service.ts's own resolveWasmPath for
+ * why the original resolution error is rethrown unchanged when neither is
+ * found. */
 function resolveWasmPath(): string {
   const require = createRequire(import.meta.url);
-  const packageJsonPath = require.resolve("tree-sitter-python/package.json");
-  return join(dirname(packageJsonPath), "tree-sitter-python.wasm");
+  try {
+    const packageJsonPath = require.resolve("tree-sitter-python/package.json");
+    return join(dirname(packageJsonPath), "tree-sitter-python.wasm");
+  } catch (err) {
+    const local = localWasmPath(process.cwd(), "tree-sitter-python.wasm");
+    if (existsSync(local)) return local;
+    throw err;
+  }
 }
 
 /**

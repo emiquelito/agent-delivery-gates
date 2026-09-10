@@ -484,3 +484,85 @@ test("pre-commit template passes --baseline when the baseline file exists, and n
   );
   assert.ok(withoutBaseline && withoutBaseline.length >= 2, "expected the no-baseline branch to still run the scan");
 });
+
+// --- language detection and grammar hints ------------------------------------
+
+test("init: reports a tracked language with no local grammar, and prints the exact install command", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.py"), "print('hi')\n");
+    execFileSync("git", ["add", "main.py"], { cwd: dir });
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Languages found in this repository: python\./);
+    assert.match(result.stdout, /No tree-sitter grammar resolvable yet for: python\./);
+    assert.match(result.stdout, /npx adg lang add python/);
+  });
+});
+
+test("init: reports every tracked language it recognises, and none it does not", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.rs"), "fn main() {}\n");
+    writeFileSync(join(dir, "app.rb"), "puts 'hi'\n");
+    writeFileSync(join(dir, "notes.md"), "# notes\n");
+    execFileSync("git", ["add", "main.rs", "app.rb", "notes.md"], { cwd: dir });
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    const line = result.stdout.split("\n").find((l) => l.startsWith("Languages found"));
+    assert.ok(line, "expected a 'Languages found' line");
+    for (const name of ["rust", "ruby"]) {
+      assert.ok(line!.includes(name), `expected '${name}' in: ${line}`);
+    }
+    assert.ok(!line!.includes("markdown"), `did not expect markdown to be named: ${line}`);
+  });
+});
+
+test("init: a language whose grammar is already in .adg/grammars/ is not reported as missing", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.py"), "print('hi')\n");
+    execFileSync("git", ["add", "main.py"], { cwd: dir });
+    mkdirSync(join(dir, ".adg", "grammars"), { recursive: true });
+    writeFileSync(join(dir, ".adg", "grammars", "tree-sitter-python.wasm"), "fake wasm bytes");
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Languages found in this repository: python\./);
+    assert.doesNotMatch(result.stdout, /No tree-sitter grammar resolvable/);
+  });
+});
+
+test("init: no git repository at all reports no languages, and still creates the starter files", () => {
+  withTempDir((dir) => {
+    const result = runInitCli(["--dir", dir]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /Languages found in this repository/);
+    for (const rel of CREATED_FILES) {
+      assert.ok(existsSync(join(dir, rel)), `expected ${rel} to exist`);
+    }
+  });
+});
+
+test("init: on a dry run, the missing-grammar languages are still reported but nothing is fetched", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.go"), "package main\n");
+    execFileSync("git", ["add", "main.go"], { cwd: dir });
+    const result = runInitCli(["--dir", dir, "--dry-run", "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Languages found in this repository: go\./);
+    assert.equal(existsSync(join(dir, ".adg", "grammars")), false);
+  });
+});
+
+test("init: --no-install-grammars never prompts and never installs, even for a detected language", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "main.py"), "print('hi')\n");
+    execFileSync("git", ["add", "main.py"], { cwd: dir });
+    const result = runInitCli(["--dir", dir, "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Not installing\. Run the commands above yourself when ready\./);
+    assert.equal(existsSync(join(dir, ".adg", "grammars")), false);
+  });
+});

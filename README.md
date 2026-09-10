@@ -5,15 +5,15 @@
 - ✅ Breaks your code on purpose and reports the breaks no test noticed.
 - ✅ Runs a change's new tests against the code from before it.
 - ✅ Induces the failure your report says is handled.
-- ✅ Git hook, CI step or MCP server. No API key, zero dependencies.
+- ✅ Git hook, CI step or MCP server. No API key, one sandboxed dependency that cannot open a socket.
 
 It reads what an agent writes about its own work too, and fails a claim with
 nothing behind it, against [fourteen proof obligations](#the-rules) for a
 delivery report.
 
 Gates that check the work and the account of it, on the assumption that
-neither is owed the benefit of the doubt. Nothing leaves your machine, and the
-[questions](#questions) below have the rest. Five of the obligations are
+neither is owed the benefit of the doubt. Nothing leaves your machine while a
+gate runs, and the [questions](#questions) below have the rest. Five of the obligations are
 carried by a hook on every commit, the checks run the same way in Claude Code,
 Cursor, Codex, GitHub Copilot, CI, or a plain pre-commit hook with no agent at
 all, and [the MCP server](#the-mcp-server) is there for an agent that would
@@ -246,10 +246,10 @@ Needs a human gate, meaning no script can confirm it from the outside:
 | | |
 |---|---|
 | Needs an API key | No. Nothing here calls a model. |
-| Code leaves the machine | No. No network call, no telemetry, no hosted service. |
-| Runtime dependencies | None. |
+| Code leaves the machine | Not during a gate run. `adg lang add` (and `adg init`, only with your yes) fetches a language's tree-sitter grammar at the moment you ask for it; `check`, `mutate`, `census`, `induce`, `test-diff`, and every hook never touch the network. |
+| Runtime dependencies | One: [web-tree-sitter](https://www.npmjs.com/package/web-tree-sitter), MIT licensed, zero dependencies of its own. The grammar it loads is WebAssembly, which cannot open a socket, read a file it was not handed, or make a syscall. |
 | Same input, same answer | Yes. No model call means no variance to average out. |
-| Works offline | Yes. |
+| Works offline | Yes, for every gate. Only `adg lang add` needs the network, once, to fetch a grammar. |
 | Blocks | Yes. The hooks exit non-zero and stop the tool call or the commit. |
 | Needs an agent | No. Every check is a command with an exit code. |
 | Costs tokens | Not by itself. Inside an agent session, yes: see below. |
@@ -311,6 +311,14 @@ family, and its boolean literals and connectives (`True`, `False`, `and`,
 already keeps a docstring, an f-string, and a `#` comment out of reach.
 `induce` and `validate-report` care about neither language nor runner.
 
+That tree-sitter mask needs one grammar per language, and none of the seven
+ships with the package: `npx adg lang add python` (or `rust`, `ruby`, `php`,
+`go`, `java`, `csharp`) fetches the one file it needs into `.adg/grammars/`
+in your project, once, at the moment you ask. `adg init` reports which of
+these languages it finds tracked in your repository and offers to fetch
+them; until one is installed, that file's language falls back to the regex
+scanner with a warning, not a block.
+
 **What does it cost to run?**
 Nothing, and no account. The cost is time: `mutate` and `census` run your
 suite many times over, so they belong in a pre-push hook or in CI, never on
@@ -343,7 +351,8 @@ every keystroke. The per-edit hooks are the cheap ones.
 
 ## ⚖️ Requirements and licence
 
-Node 22.18 or newer. No runtime dependencies. Run the test suite with
-`npm test`. Licensed under Apache 2.0.
+Node 22.18 or newer. One runtime dependency, web-tree-sitter (MIT, zero
+dependencies of its own). Run the test suite with `npm test`. Licensed
+under Apache 2.0.
 
 Distilled from building a cross-platform desktop application in Rust and Python.

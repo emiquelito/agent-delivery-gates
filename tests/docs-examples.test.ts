@@ -51,7 +51,13 @@ function pathsInitWouldCreate(): Set<string> {
 // this repository's own .gitignore keeps out of every checkout on purpose
 // (see CLAUDE.md and .gitignore): a real path, verified against
 // src/clean-tree-gate.ts, that can never exist as a tracked file.
-const KNOWN_LOCAL_ONLY_PATHS = new Set([".claude/adg-phase"]);
+//
+// .adg/grammars/ joins it for the same reason: it is where `adg lang add`
+// writes a fetched grammar's .wasm file, in an adopter's own project (see
+// src/tree-sitter-grammar-store.ts), never a path this repository itself
+// creates or tracks -- this repository's own grammars come from its
+// devDependencies instead, for its differential test suite.
+const KNOWN_LOCAL_ONLY_PATHS = new Set([".claude/adg-phase", ".adg/grammars/"]);
 
 /**
  * Paths belonging to the small projects the worked examples describe, which

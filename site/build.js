@@ -54,12 +54,12 @@ const HEADLINE = [
   "Breaks your code on purpose and reports the breaks no test noticed.",
   "Runs a change's new tests against the code from before it.",
   "Induces the failure your report says is handled.",
-  "Git hook, CI step or MCP server. No API key, zero dependencies.",
+  "Git hook, CI step or MCP server. No API key, one sandboxed dependency that cannot open a socket.",
 ];
 const DESCRIPTION =
   "Proof obligations for an AI coding agent's delivery report. A green test run and a green run over" +
   " checks that cannot fail look the same from outside, and only one of them means anything." +
-  " Runs as a git hook, in CI, or as a local MCP server, with no runtime dependencies.";
+  " Runs as a git hook, in CI, or as a local MCP server, with no network access during a gate run.";
 
 // GitHub's own mark, inline because this page fetches nothing from another
 // host. A logo on a button that goes to GitHub is a signpost and not
@@ -839,7 +839,8 @@ git config core.hooksPath .githooks</code></pre>
         <code>agent-delivery-gates mcp</code> starts a local MCP server on stdio: a
         client starts it, writes to its stdin and reads its stdout, and nothing about
         a project's code or reports leaves the machine.</p>
-      <p>Node 22.18 or newer. No runtime dependencies. Licensed under Apache 2.0.</p>
+      <p>Node 22.18 or newer. One runtime dependency, web-tree-sitter (MIT, zero
+        dependencies of its own). Licensed under Apache 2.0.</p>
     </section>
 
     <section id="where-it-runs">
@@ -903,9 +904,10 @@ function renderPrivacy() {
   const title = `Privacy: ${PACKAGE_NAME}`;
   const url = SITE_URL + "privacy";
   const description =
-    "agent-delivery-gates collects nothing, sends nothing, and makes no network request." +
-    " Everything runs on your machine. This page says exactly what is written where, and" +
-    " what this website itself sees.";
+    "agent-delivery-gates collects nothing and sends nothing. Every gate runs on your machine with" +
+    " no network request; the one exception, fetching a language's grammar, only ever happens when" +
+    " you explicitly ask for it. This page says exactly what is written where, and what this" +
+    " website itself sees.";
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "WebPage",
@@ -947,8 +949,9 @@ ${jsonLdText}
 <div class="wrap">
 <header>
   <h1>Privacy</h1>
-  <p class="lede">${escapeHtml(PACKAGE_NAME)} collects nothing, sends nothing, and makes no
-    network request of its own.</p>
+  <p class="lede">${escapeHtml(PACKAGE_NAME)} collects nothing and sends nothing. Every gate runs
+    with no network request; fetching a language's grammar is the one exception, and it only
+    happens when you ask for it.</p>
   <p class="cta"><a class="button" href="${SITE_URL}"><span>Back to the front page</span></a></p>
 </header>
 
@@ -956,10 +959,21 @@ ${jsonLdText}
   <article>
     <section id="what-it-sends">
       <h2>What the tools send</h2>
-      <p>Nothing. No shipped file under <code>src/</code> or <code>hooks/</code> opens a socket
-        or calls <code>fetch</code>. There is no telemetry, no analytics, no crash reporting, no
-        update check, and no API key to give it, because there is nothing to authenticate to.
-        The package has no runtime dependencies, so nothing arrives with it that could.</p>
+      <p>Nothing, during a gate run. No file under <code>src/</code> or <code>hooks/</code> that
+        <code>check</code>, <code>mutate</code>, <code>census</code>, <code>induce</code>,
+        <code>test-diff</code>, or any hook reaches opens a socket or calls <code>fetch</code>.
+        There is no telemetry, no analytics, no crash reporting, no update check, and no API key
+        to give it, because there is nothing to authenticate to.</p>
+      <p>The one exception is explicit: <code>agent-delivery-gates lang add &lt;language&gt;</code>
+        fetches that language's tree-sitter grammar, a plain <code>.wasm</code> file, from
+        <code>unpkg.com</code>, and writes it into <code>.adg/grammars/</code> in your project.
+        <code>adg init</code> can do the same, but only after asking and only if you say yes.
+        Neither runs unless you invoke it; nothing else in this package ever does.</p>
+      <p>The package has one runtime dependency, <a href="https://www.npmjs.com/package/web-tree-sitter">web-tree-sitter</a>
+        (MIT licensed, zero dependencies of its own): the WebAssembly runtime that loads a
+        grammar fetched the way above. A WebAssembly grammar has no capability to open a socket,
+        read a file it was not handed, or make a syscall, so carrying it costs one direct
+        dependency and nothing transitive.</p>
       <p>The git hooks, the command line tools and the MCP server all run as local processes on
         your machine. The MCP server speaks stdio to whatever started it and does not listen on
         a port.</p>

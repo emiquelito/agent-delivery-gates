@@ -376,21 +376,38 @@ export const GRAMMAR_PACKAGE_NAMES: Readonly<Record<string, string>> = {
   ...Object.fromEntries(Object.entries(GRAMMAR_SPECS).map(([ext, spec]) => [ext, spec.packageName])),
 };
 
+/** The `adg lang add` name for each extension -- see
+ * src/tree-sitter-grammar-store.ts's LANGUAGES for the table this mirrors.
+ * Kept as a second, small table here, not imported from that file:
+ * src/tree-sitter-grammar-store.ts itself imports GRAMMAR_SPECS from this
+ * file, so importing back from there would open the same kind of import
+ * cycle src/code-mask.ts's own file header warns against. */
+const LANGUAGE_NAMES: Readonly<Record<string, string>> = {
+  ".py": "python",
+  ".rs": "rust",
+  ".rb": "ruby",
+  ".php": "php",
+  ".go": "go",
+  ".java": "java",
+  ".cs": "csharp",
+};
+
 /**
- * The `npm install` line a user can actually run today to get a working
- * grammar for every extension in `extensions`: every package
- * GRAMMAR_PACKAGE_NAMES names for them, deduplicated, plus web-tree-sitter
- * itself once, since every one of these loaders needs it too. Every
+ * The `adg lang add` line a user can actually run today to get a working
+ * grammar for every extension in `extensions`: every language named for
+ * them, deduplicated. This fetches just the plain wasm files those
+ * languages need, not the full grammar packages `npm install` would pull
+ * in (native prebuilds and vendored duplicates included) -- see
+ * src/tree-sitter-grammar-store.ts for why that distinction matters. Every
  * production consumer of `grammarAbsentExtensions` (see
  * src/test-diff-separator.ts's SeparateResult) builds its own warning text
  * around this one line, so the actual command stays in one place.
  */
 export function installHintFor(extensions: readonly string[]): string {
-  const packages = new Set<string>();
+  const names = new Set<string>();
   for (const ext of extensions) {
-    const name = GRAMMAR_PACKAGE_NAMES[ext];
-    if (name !== undefined) packages.add(name);
+    const name = LANGUAGE_NAMES[ext];
+    if (name !== undefined) names.add(name);
   }
-  packages.add("web-tree-sitter");
-  return `npm install --save-dev ${[...packages].sort().join(" ")}`;
+  return `npx adg lang add ${[...names].sort().join(" ")}`;
 }

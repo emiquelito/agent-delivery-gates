@@ -22,6 +22,7 @@ import {
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveWithinRoot } from "./path-allowlist.ts";
+import { LANGUAGES, localWasmPath, type LanguageEntry } from "./tree-sitter-grammar-store.ts";
 
 export interface InitOptions {
   /** Directory init writes into. Must already be an absolute path. */
@@ -44,6 +45,14 @@ export interface InitOptions {
 export interface InitOutcome {
   exitCode: number;
   lines: string[];
+  /** Names (from src/tree-sitter-grammar-store.ts's LANGUAGES) of every
+   * language init found tracked files for in this repository, with no
+   * grammar resolvable for it yet -- neither in node_modules nor in this
+   * project's own `.adg/grammars/`. Empty on a dry run, since nothing
+   * checked here writes anything either way. bin/adg.ts reads this to
+   * decide whether to ask about installing them; runInit itself never
+   * downloads anything; see fetchGrammar in src/tree-sitter-grammar-store.ts. */
+  missingGrammarLanguages: string[];
 }
 
 interface TemplateAction {
@@ -136,7 +145,47 @@ function writeOrPlan(
 }
 
 function fail(message: string): InitOutcome {
-  return { exitCode: 2, lines: [`init: ${message}`] };
+  return { exitCode: 2, lines: [`init: ${message}`], missingGrammarLanguages: [] };
+}
+
+/** Every tracked file's extension in `targetDir`, matched against
+ * src/tree-sitter-grammar-store.ts's LANGUAGES table. Empty, quietly, when
+ * `targetDir` is not a git repository at all (an empty scratch directory,
+ * most commonly in this project's own tests) or `git` itself is not on
+ * PATH: init already writes useful files with no repository behind it, and
+ * a language detection step failing to find any languages is not a reason
+ * to fail the whole command. */
+function detectRepoLanguages(targetDir: string): LanguageEntry[] {
+  let result;
+  try {
+    result = spawnSync("git", ["ls-files"], { cwd: targetDir, encoding: "utf8" });
+  } catch {
+    return [];
+  }
+  if (result.error || result.status !== 0) return [];
+  const found = new Map<string, LanguageEntry>();
+  for (const line of result.stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    const lower = line.toLowerCase();
+    const dot = lower.lastIndexOf(".");
+    if (dot === -1) continue;
+    const ext = lower.slice(dot);
+    const entry = LANGUAGES.find((lang) => lang.ext === ext);
+    if (entry !== undefined) found.set(entry.name, entry);
+  }
+  return [...found.values()];
+}
+
+/** True when `entry`'s grammar is already reachable for `targetDir`: either
+ * this project's own local store already holds its wasm file, or the
+ * grammar package sits in `targetDir`'s own node_modules (an adopter who
+ * `npm install`ed it directly, or this repository's own checkout). Not a
+ * guarantee the load will actually succeed -- that is resolveWasmPath's
+ * job, at the moment a file of that language is actually scanned -- only
+ * that init has nothing useful left to offer for this language. */
+function grammarAlreadyReachable(targetDir: string, entry: LanguageEntry): boolean {
+  if (existsSync(localWasmPath(targetDir, entry.wasmFileName))) return true;
+  return existsSync(join(targetDir, "node_modules", entry.packageName));
 }
 
 /** The four hook wiring lines for the standalone `.claude/settings.json`
@@ -407,6 +456,27 @@ export function runInit(options: InitOptions): InitOutcome {
     }
   }
 
+  // Language detection and reporting only, on a dry run too, so a dry run
+  // still shows what init would tell a real run about. Nothing here
+  // downloads anything: dryRun aside, that decision belongs to bin/adg.ts,
+  // which asks before it acts (see maybeInstallGrammars there).
+  const detectedLanguages = detectRepoLanguages(targetDir);
+  const missingGrammarLanguages = detectedLanguages.filter((entry) => !grammarAlreadyReachable(targetDir, entry));
+  if (detectedLanguages.length > 0) {
+    lines.push("");
+    lines.push(`Languages found in this repository: ${detectedLanguages.map((entry) => entry.name).join(", ")}.`);
+  }
+  if (missingGrammarLanguages.length > 0) {
+    lines.push(
+      `No tree-sitter grammar resolvable yet for: ${missingGrammarLanguages.map((entry) => entry.name).join(", ")}. ` +
+        "Until one is installed, mutate and test-diff fall back to the regex scanner for these files, with a warning.",
+    );
+    lines.push("Install with:");
+    for (const entry of missingGrammarLanguages) {
+      lines.push(`  npx adg lang add ${entry.name}`);
+    }
+  }
+
   lines.push("");
   lines.push("Next steps:");
   lines.push("");
@@ -433,5 +503,9 @@ export function runInit(options: InitOptions): InitOutcome {
     lines.push(`  ${scriptLine}`);
   }
 
-  return { exitCode: 0, lines };
+  return {
+    exitCode: 0,
+    lines,
+    missingGrammarLanguages: dryRun ? [] : missingGrammarLanguages.map((entry) => entry.name),
+  };
 }

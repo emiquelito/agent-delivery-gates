@@ -145,9 +145,11 @@
 // pin this file's actual behaviour instead of an aspiration for it.
 
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Parser, Language, type Node as TSNode } from "web-tree-sitter";
 import type { LanguageService } from "./code-mask.ts";
+import { localWasmPath } from "./tree-sitter-grammar-store.ts";
 
 /** Inside a string or a comment. */
 const LITERAL = 0;
@@ -238,14 +240,29 @@ function makeService(parser: Parser, config: GrammarConfig): LanguageService {
   };
 }
 
-/** The on-disk path of a grammar package's plain wasm file, resolved
- * through the package's own package.json instead of a hardcoded relative
- * path, the same way src/tree-sitter-python-service.ts resolves
- * tree-sitter-python's. */
+/** The on-disk path of a grammar package's plain wasm file. Tried first
+ * through the package's own package.json, the same way
+ * src/tree-sitter-python-service.ts resolves tree-sitter-python's -- this
+ * is what a checkout of this repository itself, or an adopter who chose to
+ * `npm install` a grammar package directly, gets. When that resolution
+ * fails, an adopter's local grammar store (`.adg/grammars/`, written by
+ * `adg lang add`; see src/tree-sitter-grammar-store.ts) is checked next,
+ * since npm never installs this package's own devDependencies for anyone
+ * downstream of it. The original resolution error is rethrown when neither
+ * is found, unchanged: src/code-mask.ts's isModuleAbsenceError still reads
+ * that error's code and package manifests to tell "never installed" apart
+ * from "installed and broken", and nothing about that classification
+ * changes here. */
 function resolveWasmPath(packageName: string, wasmFileName: string): string {
   const require = createRequire(import.meta.url);
-  const packageJsonPath = require.resolve(`${packageName}/package.json`);
-  return join(dirname(packageJsonPath), wasmFileName);
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`);
+    return join(dirname(packageJsonPath), wasmFileName);
+  } catch (err) {
+    const local = localWasmPath(process.cwd(), wasmFileName);
+    if (existsSync(local)) return local;
+    throw err;
+  }
 }
 
 /**

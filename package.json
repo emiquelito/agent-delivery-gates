@@ -1,7 +1,7 @@
 {
   "name": "agent-delivery-gates",
   "version": "0.1.4",
-  "description": "Delivery gates for AI coding agents, because green tests are not proof. Breaks your code on purpose and reports the breaks no test noticed. Runs a change's new tests against the code from before it. Induces the failure your report says is handled. Git hook, CI step or MCP server. No API key, zero dependencies.",
+  "description": "Delivery gates for AI coding agents, because green tests are not proof. Breaks your code on purpose and reports the breaks no test noticed. Runs a change's new tests against the code from before it. Induces the failure your report says is handled. Git hook, CI step or MCP server. No API key, one sandboxed dependency that cannot open a socket.",
   "license": "Apache-2.0",
   "author": "emiquelito <contact@agentgates.dev>",
   "repository": {
@@ -52,6 +52,9 @@
     "prepack": "npm run build",
     "verify": "tsc --noEmit && node --test tests/*.test.ts && node hooks/scan-prose.ts --require-rules && node scripts/tally-report.ts --check && node scripts/refresh-readme-tally.ts --check"
   },
+  "dependencies": {
+    "web-tree-sitter": "^0.27.0"
+  },
   "devDependencies": {
     "@types/node": "^26.5.0",
     "tree-sitter-c-sharp": "^0.23.5",
@@ -61,7 +64,6 @@
     "tree-sitter-python": "^0.25.0",
     "tree-sitter-ruby": "^0.23.1",
     "tree-sitter-rust": "^0.24.0",
-    "typescript": "^5.9.3",
-    "web-tree-sitter": "^0.27.0"
+    "typescript": "^5.9.3"
   }
 }

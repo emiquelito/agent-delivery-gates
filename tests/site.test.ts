@@ -548,13 +548,25 @@ test("the site stays out of the published package and out of the typecheck", () 
       `the package files allowlist ships "${entry}", and the site is not part of the package`,
     );
   }
-  // The site has its own package with no dependencies, and the root package
-  // has none either. Nothing on the page may add one.
+  // The site has its own package with no dependencies. Nothing on the page
+  // may add one, even though the root package now carries exactly one: see
+  // the assertion below.
   const sitePkg = JSON.parse(readFileSync(join(ROOT, "site", "package.json"), "utf8"));
   assert.equal(sitePkg.dependencies, undefined, "the site package took on a dependency");
   assert.equal(sitePkg.devDependencies, undefined, "the site package took on a dev dependency");
   assert.equal(sitePkg.private, true, "the site package is not marked private");
-  assert.equal(pkg.dependencies, undefined, "the root package took on a runtime dependency");
+  // The root package's own single runtime dependency, added in the phase
+  // that made grammars for Python, Rust, Go, Java, PHP, C#, and Ruby
+  // actually installable (see src/tree-sitter-grammar-store.ts): one
+  // direct package, web-tree-sitter, MIT licensed, zero dependencies of
+  // its own. This assertion pins it to exactly that one name, so a second
+  // dependency arriving unnoticed fails loud here instead of only showing
+  // up as a bigger `npm install` nobody explained.
+  assert.deepEqual(
+    Object.keys(pkg.dependencies ?? {}),
+    ["web-tree-sitter"],
+    "the root package's runtime dependencies changed; update this assertion and the published claims (README, site/build.js, package.json's description) if that is intended",
+  );
 
   // The root typecheck lists the directories it reads, so site code cannot
   // break it. Keeping that true is the point of the assertion.
@@ -1165,7 +1177,7 @@ test("the headline says what the three commands do", () => {
     "Breaks your code on purpose and reports the breaks no test noticed.",
     "Runs a change&#39;s new tests against the code from before it.",
     "Induces the failure your report says is handled.",
-    "Git hook, CI step or MCP server. No API key, zero dependencies.",
+    "Git hook, CI step or MCP server. No API key, one sandboxed dependency that cannot open a socket.",
   ]) {
     assert.ok(html.includes(line), `the headline does not carry "${line}"`);
   }

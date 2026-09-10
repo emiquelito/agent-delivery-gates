@@ -31,6 +31,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInit } from "../src/init.ts";
+import { createInterface } from "node:readline/promises";
+import { findLanguage, fetchGrammar } from "../src/tree-sitter-grammar-store.ts";
 
 /** Walks upward from `startDir` to find the directory holding this
  * package's own package.json. Used instead of a fixed number of
@@ -45,6 +47,8 @@ const USAGE = `Usage: agent-delivery-gates <command> [options]
 
 Commands:
   init [options]           write starter files into a project
+  lang list                list the tree-sitter grammars adg can install
+  lang add <language>...   fetch one or more grammars into .adg/grammars/
   validate-report [...]    check a delivery report's claims
   test-diff [...]          separate a diff's source half from its test half
   mutate [...]             break the code in known ways and report what
@@ -81,7 +85,7 @@ wraps and exits with that tool's own exit code. Run any command with
 --help for its own usage.
 `;
 
-const INIT_USAGE = `Usage: agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--baseline] [--dir PATH]
+const INIT_USAGE = `Usage: agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--baseline] [--dir PATH] [--install-grammars | --no-install-grammars]
 
 Writes starter files into a project: a git pre-commit hook, AGENTS.md,
 and an empty gate tally log. It only ever creates a file that does not
@@ -98,6 +102,11 @@ exist yet.
                          gate on does not fail on everything it already
                          had; only does anything alongside --prose-preset
   --dir PATH            target this directory instead of the current one
+  --install-grammars    install a missing tree-sitter grammar for a
+                         language init found in this repository, without
+                         asking; --no-install-grammars declines without
+                         asking. With neither given, init asks on a real
+                         terminal and otherwise only prints the commands
   --help                print this message and exit 0
 
 Exit codes:
@@ -149,6 +158,10 @@ interface ParsedInitArgs {
   baseline: boolean;
   dir?: string;
   help: boolean;
+  /** undefined means "not decided on the command line": ask interactively
+   * when possible, otherwise default to not installing. See
+   * maybeInstallGrammars below. */
+  installGrammars?: boolean;
 }
 
 function parseInitArgs(argv: string[]): ParsedInitArgs {
@@ -168,6 +181,12 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
         break;
       case "--baseline":
         result.baseline = true;
+        break;
+      case "--install-grammars":
+        result.installGrammars = true;
+        break;
+      case "--no-install-grammars":
+        result.installGrammars = false;
         break;
       case "--prose-preset":
         result.prosePreset = argv[++i];
@@ -191,7 +210,47 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
   return result;
 }
 
-function runInitCommand(argv: string[]): never {
+/**
+ * Decides whether to fetch the grammars `runInit` found no local install
+ * for, and does it when asked. Never installs on its own say-so: with
+ * `--install-grammars` or `--no-install-grammars` given, that decision is
+ * followed exactly; with neither given and stdin/stdout both a real
+ * terminal, a person is asked directly; with neither given and no terminal
+ * (piped, CI, a test spawning this process), the safe default is "no", and
+ * the commands `runInit`'s own output already printed are left as the way
+ * to do it by hand.
+ */
+async function maybeInstallGrammars(languageNames: readonly string[], targetDir: string, args: ParsedInitArgs): Promise<void> {
+  let install: boolean;
+  if (args.installGrammars !== undefined) {
+    install = args.installGrammars;
+  } else if (process.stdin.isTTY === true && process.stdout.isTTY === true) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let answer: string;
+    try {
+      answer = await rl.question(`Install the tree-sitter grammar(s) for ${languageNames.join(", ")} now? [y/N] `);
+    } finally {
+      rl.close();
+    }
+    install = /^y(es)?$/i.test(answer.trim());
+  } else {
+    install = false;
+  }
+
+  if (!install) {
+    process.stdout.write("Not installing. Run the commands above yourself when ready.\n");
+    return;
+  }
+
+  for (const name of languageNames) {
+    const entry = findLanguage(name);
+    if (entry === undefined) continue; // cannot happen: names came from the same table findLanguage reads
+    const result = await fetchGrammar(entry, targetDir);
+    process.stdout.write(`${result.ok ? "" : "FAILED: "}${result.message}\n`);
+  }
+}
+
+async function runInitCommand(argv: string[]): Promise<never> {
   const args = parseInitArgs(argv);
   if (args.help) {
     process.stdout.write(INIT_USAGE);
@@ -212,6 +271,11 @@ function runInitCommand(argv: string[]): never {
   for (const line of outcome.lines) {
     process.stdout.write(`${line}\n`);
   }
+
+  if (!args.dryRun && outcome.missingGrammarLanguages.length > 0) {
+    await maybeInstallGrammars(outcome.missingGrammarLanguages, targetDir, args);
+  }
+
   process.exit(outcome.exitCode);
 }
 
@@ -233,7 +297,10 @@ function main(): void {
 
   switch (first) {
     case "init":
-      runInitCommand(rest);
+      void runInitCommand(rest);
+      break;
+    case "lang":
+      nodeTool("hooks/lang.ts", rest);
       break;
     case "validate-report":
       nodeTool("hooks/delivery-report-validator.ts", rest);

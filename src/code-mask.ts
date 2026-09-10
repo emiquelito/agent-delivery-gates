@@ -542,15 +542,29 @@ const resolvedServices = new Map<string, LanguageService>();
 // bug (a corrupt install, an ABI mismatch) worth blocking on the way the
 // undivided set used to block on everything.
 //
-// This split is a stop-gap, not the fix. The actual fix is shipping the
-// grammars where an ordinary `npm install` reaches them -- bundling the
-// wasm files this tool already needs, or moving the packages to
-// `optionalDependencies`, a later phase of this project with its own
-// evidence to gather (wasm file size across all seven languages,
-// optionalDependencies' own failure modes on an adopter's install). Until
-// that phase ships, `grammarAbsentExtensions` is the honest answer for
-// what every adopter following this project's own README sees today, and
-// nothing here should be read as more permanent than that.
+// This split was a stop-gap, not the fix, when it was written. The actual
+// fix has since shipped: web-tree-sitter is now a real dependency of this
+// package (see package.json), not a devDependency, so it reaches every
+// adopter's `npm install` the way this comment once said it did not.
+// Deliberately NOT the same move for the seven grammar packages
+// themselves -- shipping all of them as dependencies would cost about
+// 180MB even though the plain wasm file each carries is small, because
+// each package vendors copies of the other six and ships native prebuilds
+// for platforms this project's WASM-only loader never touches. Instead,
+// `adg lang add <language>` (src/tree-sitter-grammar-store.ts) fetches
+// just the one wasm file a repository actually needs, at explicit install
+// time, into `.adg/grammars/`, and the two loaders below (and
+// src/tree-sitter-python-service.ts's) look there once node_modules
+// resolution fails. `adg init` reports which languages it finds and offers
+// to run that fetch, asking first.
+//
+// `grammarAbsentExtensions` is therefore no longer "the ordinary state of
+// nearly every adopter" -- it is now specifically "this language's grammar
+// was never fetched for this repository", true until someone runs
+// `adg lang add` or answers yes to `adg init`. The reaction this comment
+// asked for throughout -- warn, do not block -- is still exactly right:
+// the fix for a real adopter is one command away, not a defect in their
+// commit.
 //
 // `hadLanguageLoadFailure` below answers the union of both sets on
 // purpose: src/mutate.ts writes to the files it masks, so it needs "is

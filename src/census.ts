@@ -306,9 +306,11 @@ export function resultsLookComplete(text: string, format: ResultFormat): boolean
 /**
  * Parses the JUnit XML that pytest --junitxml, jest-junit,
  * go-junit-report, and the Maven surefire reports all write. Hand rolled,
- * because this package carries no runtime dependency and never will: it
- * looks for testcase elements, reads their attributes, and reads the one
- * child element that decides the outcome.
+ * not built on an XML library: this package's own one runtime dependency
+ * (web-tree-sitter, for masking source code) stays that, with no general
+ * parser added for something this small. It looks for testcase elements,
+ * reads their attributes, and reads the one child element that decides
+ * the outcome.
  *
  * Comments and CDATA sections are cut out first, so a failure message that
  * quotes XML cannot invent a testcase. Any other text is escaped by the
