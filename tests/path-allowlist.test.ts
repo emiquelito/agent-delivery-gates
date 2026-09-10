@@ -29,6 +29,12 @@ function p(...segments: string[]): string {
   return root + segments.join(sep);
 }
 
+/** Escapes `text` so it can be dropped into a `RegExp` and match only
+ * itself, backslashes (win32's path separator) included. */
+function reEscape(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Builds a resolver from a map of path -> real path. Any path not present
  * in the map "does not exist": the resolver throws, the same contract as
@@ -158,9 +164,11 @@ test("a path containing .. that escapes the root is denied", () => {
 test("a denied result names the candidate, real path, and roots in its message", () => {
   const resolver = fakeResolver({ [p("repo")]: p("repo"), [p("etc", "passwd")]: p("etc", "passwd") });
   const result = checkPathAllowed(p("etc", "passwd"), [p("repo")], resolver, CWD);
-  assert.match(result.message, /etc/);
-  assert.match(result.message, /passwd/);
-  assert.match(result.message, /repo/);
+  // Each path must appear whole, not as three fragments a message could
+  // satisfy without ever printing the path itself (e.g. "etc ... passwd
+  // ... repo" split across unrelated words).
+  assert.match(result.message, new RegExp(reEscape(p("etc", "passwd"))));
+  assert.match(result.message, new RegExp(reEscape(p("repo"))));
 });
 
 test("a root that fails to resolve is left out, and the check still returns a decision", () => {
@@ -174,13 +182,29 @@ test("a root that fails to resolve is left out, and the check still returns a de
 // The injected resolver proves the logic. This proves the logic against a
 // real filesystem, with a real symlink, because a confinement check that only
 // ever meets a fake resolver has never met the case it exists for.
-test("a real symlink out of the only allowed root is denied", () => {
+test("a real symlink out of the only allowed root is denied", (t) => {
   const outside = mkdtempSync(join(tmpdir(), "adg-outside-"));
   const root = mkdtempSync(join(tmpdir(), "adg-root-"));
   const link = join(root, "escape");
   try {
     writeFileSync(join(outside, "secret.txt"), "x");
-    symlinkSync(outside, link);
+    try {
+      symlinkSync(outside, link);
+    } catch (err) {
+      // Creating a symlink on Windows needs either Administrator
+      // privilege or Developer Mode; a runner with neither throws EPERM
+      // here, before this test has anything to do with the allowlist
+      // logic itself. This is skipped instead of worked around, because
+      // there is no portable way to create a real symlink, and a fake one
+      // would stop
+      // this from being the real-filesystem case the comment above says
+      // it exists for.
+      if (process.platform === "win32" && (err as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("creating a symlink needs Administrator privilege or Developer Mode on Windows");
+        return;
+      }
+      throw err;
+    }
     const resolver: PathResolver = (p) => realpathSync(p);
     const inside = checkPathAllowed(join(root, "ok.txt"), [root], resolver, root);
     assert.equal(inside.allowed, true);

@@ -424,7 +424,7 @@ test("--max takes the first N in order, and the report says a later file was nev
       "src/a_big.mjs",
       "src/z_small.mjs",
       "--command",
-      "node -e ''",
+      "node -e \"\"",
       "--max",
       "2",
     ]);

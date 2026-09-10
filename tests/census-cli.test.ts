@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import { nodeCommand, existsExpr, writeExpr, runAndExit, bumpCounter } from "./lib/portable-command.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "census.ts");
@@ -74,11 +75,37 @@ function makeRepo(base: Record<string, string>, head: Record<string, string | nu
   return dir;
 }
 
-/** Every temporary directory this command could have left behind. */
-function leftoverWorktrees(): string[] {
-  return readdirSync(tmpdir()).filter(
+/** Every `adg-census-*` directory under `root` (the system temp directory
+ * by default). A run only ever leaves one of these behind if it fails to
+ * clean up its own worktree, but scanning the whole system temp directory
+ * also catches every *other* census run's worktree that merely happens to
+ * be in flight at the same moment: a reviewer ran 24 iterations of the
+ * SIGINT test below in overlapping batches and saw 17 failures naming
+ * other runs' worktrees, all cleaned up correctly moments later. Nothing
+ * was actually leaked; the check was just watching a directory it did not
+ * own. Passing a private `root` (see `withPrivateTmpRoot` below) scopes
+ * this to only what one run could have created, which fixes the class of
+ * bug instead of only narrowing the prefix filter, which would not. */
+function leftoverWorktrees(root: string = tmpdir()): string[] {
+  return readdirSync(root).filter(
     (entry) => entry.startsWith("adg-census-") && !entry.includes("cli-test") && !entry.includes("flake"),
   );
+}
+
+/** Runs `fn` with a temp directory that is this run's alone: `fn` gets an
+ * env override that points every TMPDIR/TMP/TEMP-reading call inside the
+ * spawned CLI (including `os.tmpdir()`, which census's own worktree uses)
+ * at a fresh directory nothing else on the machine shares, so
+ * `leftoverWorktrees(root)` after the run reports only what this run
+ * itself left behind, concurrent or not. The directory is removed
+ * afterward either way. */
+async function withPrivateTmpRoot<T>(fn: (root: string, env: Record<string, string>) => T | Promise<T>): Promise<T> {
+  const root = mkdtempSync(join(tmpdir(), "adg-census-cli-test-tmproot-"));
+  try {
+    return await fn(root, { TMPDIR: root, TMP: root, TEMP: root });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 const HEADER = `import { test } from "node:test";
@@ -337,7 +364,9 @@ test("a base run holding no tests is unmeasured, not every test disappearing", (
   });
   // The command prints an empty but readable TAP plan anywhere the marker
   // file is missing, which is only ever the base worktree.
-  const command = `if [ -f marker ]; then ${SUITE}; else printf 'TAP version 13\\n1..0\\n'; fi`;
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${runAndExit(SUITE)}}else{${writeExpr("TAP version 13\n1..0\n")}}`,
+  );
   writeFileSync(join(dir, "marker"), "head only\n");
   runGit(dir, ["add", "marker"]);
   runGit(dir, ["commit", "-q", "-m", "marker"]);
@@ -365,9 +394,10 @@ test("a base run that printed fewer results than its plan is exit 2, not a small
   });
   // The base worktree has no marker, so it takes the truncated branch: a
   // plan promising six results and two printed before the crash.
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
-    "else printf '1..6\\nok 1 - alpha\\nok 2 - beta\\n'; exit 1; fi";
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${writeExpr("TAP version 13\nok 1 - alpha\nok 2 - beta\n1..2\n")}}` +
+      `else{${writeExpr("1..6\nok 1 - alpha\nok 2 - beta\n")};process.exit(1)}`,
+  );
   const result = runCli(dir, ["--command", command]);
   assert.equal(result.status, 2, result.stdout + result.stderr);
   assert.match(result.stderr, /the run at the base commit could not be read/);
@@ -381,9 +411,10 @@ test("a base run that died before printing a plan or a summary is exit 2", () =>
   const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
     marker: "head only\n",
   });
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
-    "else printf 'TAP version 13\\nok 1 - alpha\\n'; exit 1; fi";
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${writeExpr("TAP version 13\nok 1 - alpha\nok 2 - beta\n1..2\n")}}` +
+      `else{${writeExpr("TAP version 13\nok 1 - alpha\n")};process.exit(1)}`,
+  );
   const result = runCli(dir, ["--command", command]);
   assert.equal(result.status, 2, result.stdout + result.stderr);
   assert.match(result.stderr, /without printing a plan or a summary/);
@@ -395,23 +426,37 @@ test("a base run that died before printing a plan or a summary is exit 2", () =>
 // timed-out one is: spawnSync reports how it ended, and what was printed
 // before it ended is part of a census and not a census. A maxBuffer overflow
 // arrives the same way, as an ENOBUFS on the same field.
-test("a base run killed part way through is exit 2, not a smaller suite", () => {
-  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
-    marker: "head only\n",
-  });
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
-    "else printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; kill -9 $$; fi";
-  // The base prints a whole plan and is then killed, so nothing in the text
-  // says anything is wrong with it. How the run ended is the only thing left
-  // that does, and without it this reads as a clean exit 0.
-  const result = runCli(dir, ["--command", command]);
-  assert.equal(result.status, 2, result.stdout + result.stderr);
-  assert.match(result.stderr, /the run at the base commit could not be read/);
-  assert.match(result.stderr, /killed by SIGKILL/);
-  assert.doesNotMatch(result.stdout + result.stderr, /disappeared/);
-  rmSync(dir, { recursive: true, force: true });
-});
+//
+// `kill -9 $$` stays a raw shell command instead of a `node -e` rewrite: a
+// `node -e` script is a grandchild of the shell spawnCommand actually
+// watches, so a signal it sends to its own pid kills only itself; the
+// shell then reports a plain exit code (verified locally: `sh -c "node -e
+// \"process.kill(process.pid,'SIGKILL')\""` closes with code 137, signal
+// null, not the other way around). Only the shell itself dying by signal
+// produces the `killedBySignal` this test is asserting on, and `kill` is a
+// POSIX shell builtin with no cmd.exe counterpart, so this one stays
+// POSIX-only and is skipped on Windows instead of rewritten.
+test(
+  "a base run killed part way through is exit 2, not a smaller suite",
+  { skip: process.platform === "win32" ? "kill -9 $$ has no cmd.exe equivalent; see the comment above" : false },
+  () => {
+    const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+      marker: "head only\n",
+    });
+    const command =
+      "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
+      "else printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; kill -9 $$; fi";
+    // The base prints a whole plan and is then killed, so nothing in the
+    // text says anything is wrong with it. How the run ended is the only
+    // thing left that does, and without it this reads as a clean exit 0.
+    const result = runCli(dir, ["--command", command]);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stderr, /the run at the base commit could not be read/);
+    assert.match(result.stderr, /killed by SIGKILL/);
+    assert.doesNotMatch(result.stdout + result.stderr, /disappeared/);
+    rmSync(dir, { recursive: true, force: true });
+  },
+);
 
 // The other half of the same rule: a suite that fails is not a suite that
 // crashed. A failing run exits non-zero and still prints its plan, and
@@ -420,9 +465,10 @@ test("a base run that failed but finished printing is still compared", () => {
   const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
     marker: "head only\n",
   });
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
-    "else printf 'TAP version 13\\nnot ok 1 - alpha\\nok 2 - beta\\n1..2\\n'; exit 1; fi";
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${writeExpr("TAP version 13\nok 1 - alpha\nok 2 - beta\n1..2\n")}}` +
+      `else{${writeExpr("TAP version 13\nnot ok 1 - alpha\nok 2 - beta\n1..2\n")};process.exit(1)}`,
+  );
   const result = runCli(dir, ["--command", command]);
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /flipped/);
@@ -446,11 +492,12 @@ test("a base re-run that collected nothing is unreadable, never evidence of flak
   });
   // HEAD holds one test. The base holds two on its first run and none on its
   // second, which is a base that did not really run the second time.
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - alpha\\n1..1\\n'; else " +
-    'n=$(cat "$ADG_BASE_STATE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ADG_BASE_STATE"; ' +
-    "if [ \"$n\" = 1 ]; then printf 'TAP version 13\\nok 1 - alpha\\nok 2 - beta\\n1..2\\n'; " +
-    "else printf 'TAP version 13\\n1..0\\n'; fi; fi";
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${writeExpr("TAP version 13\nok 1 - alpha\n1..1\n")}}else{` +
+      `${bumpCounter("ADG_BASE_STATE")}` +
+      `if(n===1){${writeExpr("TAP version 13\nok 1 - alpha\nok 2 - beta\n1..2\n")}}` +
+      `else{${writeExpr("TAP version 13\n1..0\n")}}}`,
+  );
   const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /disappeared: a test stopped running/);
@@ -488,12 +535,12 @@ test("two red runs that answer the same question two ways measure nothing", () =
   // In the base worktree: the census run holds only "old"; the first red run
   // reports "added" as never having run; the re-run reports it passing, which
   // is a finding and must not be lost for having been found second.
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; else " +
-    'n=$(cat "$ADG_BASE_STATE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ADG_BASE_STATE"; ' +
-    "if [ \"$n\" = 1 ]; then printf 'TAP version 13\\nok 1 - old\\n1..1\\n'; " +
-    "elif [ \"$n\" = 2 ]; then printf 'TAP version 13\\nok 1 - old\\n1..1\\n'; " +
-    "else printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; fi; fi";
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${writeExpr("TAP version 13\nok 1 - old\nok 2 - added\n1..2\n")}}else{` +
+      `${bumpCounter("ADG_BASE_STATE")}` +
+      `if(n===1||n===2){${writeExpr("TAP version 13\nok 1 - old\n1..1\n")}}` +
+      `else{${writeExpr("TAP version 13\nok 1 - old\nok 2 - added\n1..2\n")}}}`,
+  );
   const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
   assert.equal(result.status, 3, result.stdout + result.stderr);
   assert.match(result.stdout, /did-not-settle/);
@@ -525,12 +572,13 @@ test("a real finding beside an unsettled result is exit 1, and both are reported
   // its census runs, so "gone" disappeared and stays a finding. The two runs
   // against the base source then disagree about "added": passing on the
   // first, failing on the second.
-  const command =
-    "if [ -f marker ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; else " +
-    'n=$(cat "$ADG_BASE_STATE" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ADG_BASE_STATE"; ' +
-    "if [ \"$n\" -le 2 ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - gone\\n1..2\\n'; " +
-    "elif [ \"$n\" = 3 ]; then printf 'TAP version 13\\nok 1 - old\\nok 2 - added\\n1..2\\n'; " +
-    "else printf 'TAP version 13\\nok 1 - old\\nnot ok 2 - added\\n1..2\\n'; fi; fi";
+  const command = nodeCommand(
+    `if(${existsExpr("marker")}){${writeExpr("TAP version 13\nok 1 - old\nok 2 - added\n1..2\n")}}else{` +
+      `${bumpCounter("ADG_BASE_STATE")}` +
+      `if(n<=2){${writeExpr("TAP version 13\nok 1 - old\nok 2 - gone\n1..2\n")}}` +
+      `else if(n===3){${writeExpr("TAP version 13\nok 1 - old\nok 2 - added\n1..2\n")}}` +
+      `else{${writeExpr("TAP version 13\nok 1 - old\nnot ok 2 - added\n1..2\n")}}}`,
+  );
   const result = runCli(dir, ["--command", command], { ADG_BASE_STATE: state });
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(result.stdout, /disappeared: a test stopped running/);
@@ -598,34 +646,36 @@ test("a JUnit testcase with no name is exit 2, never a census", () => {
 
 // --- the worktree ------------------------------------------------------------------
 
-test("the temporary worktree is removed even when the command fails", () => {
-  const before = leftoverWorktrees();
-  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
-    "tests/b.test.mjs": `${HEADER}test("b", () => {});\n`,
+test("the temporary worktree is removed even when the command fails", async () => {
+  await withPrivateTmpRoot((root, env) => {
+    const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+      "tests/b.test.mjs": `${HEADER}test("b", () => {});\n`,
+    });
+    // A command that prints nothing readable is exit 2, and exit 2 is
+    // taken by calling process.exit, which skips a finally block. The
+    // worktree has to be gone anyway.
+    const result = runCli(dir, ["--command", "exit 7"], env);
+    assert.equal(result.status, 2);
+    assert.deepEqual(leftoverWorktrees(root), []);
+    assert.equal(runGit(dir, ["worktree", "list"]).trim().split("\n").length, 1);
+    assert.equal(runGit(dir, ["status", "--porcelain"]), "");
+    rmSync(dir, { recursive: true, force: true });
   });
-  // A command that prints nothing readable is exit 2, and exit 2 is taken
-  // by calling process.exit, which skips a finally block. The worktree has
-  // to be gone anyway.
-  const result = runCli(dir, ["--command", "exit 7"]);
-  assert.equal(result.status, 2);
-  assert.deepEqual(leftoverWorktrees(), before);
-  assert.equal(runGit(dir, ["worktree", "list"]).trim().split("\n").length, 1);
-  assert.equal(runGit(dir, ["status", "--porcelain"]), "");
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("the temporary worktree is removed after a run that found something", () => {
-  const before = leftoverWorktrees();
-  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\ntest("b", () => {});\n` }, {
-    "tests/a.test.mjs": `${HEADER}test("a", () => {});\n`,
+test("the temporary worktree is removed after a run that found something", async () => {
+  await withPrivateTmpRoot((root, env) => {
+    const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\ntest("b", () => {});\n` }, {
+      "tests/a.test.mjs": `${HEADER}test("a", () => {});\n`,
+    });
+    const result = runCli(dir, ["--command", SUITE], env);
+    assert.equal(result.status, 1);
+    assert.deepEqual(leftoverWorktrees(root), []);
+    assert.equal(runGit(dir, ["worktree", "list"]).trim().split("\n").length, 1);
+    assert.equal(runGit(dir, ["status", "--porcelain"]), "");
+    assert.ok(!existsSync(join(dir, "node_modules")));
+    rmSync(dir, { recursive: true, force: true });
   });
-  const result = runCli(dir, ["--command", SUITE]);
-  assert.equal(result.status, 1);
-  assert.deepEqual(leftoverWorktrees(), before);
-  assert.equal(runGit(dir, ["worktree", "list"]).trim().split("\n").length, 1);
-  assert.equal(runGit(dir, ["status", "--porcelain"]), "");
-  assert.ok(!existsSync(join(dir, "node_modules")));
-  rmSync(dir, { recursive: true, force: true });
 });
 
 // --- JUnit XML end to end -------------------------------------------------------
@@ -812,62 +862,66 @@ test("a timed-out run leaves no descendant running", () => {
 // SIGINT (and this fix) ever stops the hung run.
 
 test("a real Ctrl-C (SIGINT) to the census process leaves no descendant running", async () => {
-  const dir = makeRepo({
-    "leak-run.mjs": LEAK_RUN_MJS,
-    "leak-worker.mjs": LEAK_WORKER_MJS,
-    "README.md": "first\n",
+  await withPrivateTmpRoot(async (root, tmpEnv) => {
+    const dir = makeRepo({
+      "leak-run.mjs": LEAK_RUN_MJS,
+      "leak-worker.mjs": LEAK_WORKER_MJS,
+      "README.md": "first\n",
+    });
+    const base = runGit(dir, ["rev-parse", "HEAD"]).trim();
+    writeFileSync(join(dir, "README.md"), "second\n");
+    runGit(dir, ["add", "."]);
+    runGit(dir, ["commit", "-q", "-m", "second"]);
+    const pidDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-sigint-pids-"));
+    try {
+      const child = spawn(
+        "node",
+        [CLI_PATH, "--base", base, "--command", `node leak-run.mjs ${pidDir}`, "--no-rerun"],
+        { cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...tmpEnv } },
+      );
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null } | "timed-out">(
+        (resolveExit) => {
+          child.on("exit", (code, signal) => resolveExit({ code, signal }));
+        },
+      );
+      const recordDeadline = Date.now() + 15_000;
+      while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const pids = recordedPids(pidDir);
+      assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
+      child.kill("SIGINT");
+      const exitResult = await Promise.race([
+        exited,
+        new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
+      ]);
+      if (exitResult === "timed-out") child.kill("SIGKILL");
+      const survivors = waitForNoneAlive(pids, 5_000);
+      assert.deepEqual(survivors, [], "a worker process outlived census after a real SIGINT");
+      assert.deepEqual(leftoverWorktrees(root), [], "the temporary base worktree was not removed after the interrupt");
+      // Design correction B: census re-raises the signal with its own
+      // default disposition once the worktree is removed, instead of a
+      // fixed exit code, so a shell or CI job can tell an interrupted run
+      // apart from an ordinary failure. Node reports that as a null code
+      // and the signal itself. Windows keeps the old fixed exit 2.
+      assert.notEqual(exitResult, "timed-out", `stdout:\n${stdout}\nstderr:\n${stderr}`);
+      if (process.platform === "win32") {
+        assert.equal((exitResult as { code: number | null }).code, 2);
+      } else {
+        assert.equal((exitResult as { code: number | null }).code, null);
+        assert.equal((exitResult as { signal: NodeJS.Signals | null }).signal, "SIGINT");
+      }
+    } finally {
+      rmSync(pidDir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
-  const base = runGit(dir, ["rev-parse", "HEAD"]).trim();
-  writeFileSync(join(dir, "README.md"), "second\n");
-  runGit(dir, ["add", "."]);
-  runGit(dir, ["commit", "-q", "-m", "second"]);
-  const pidDir = mkdtempSync(join(tmpdir(), "adg-census-cli-test-sigint-pids-"));
-  try {
-    const child = spawn(
-      "node",
-      [CLI_PATH, "--base", base, "--command", `node leak-run.mjs ${pidDir}`, "--no-rerun"],
-      { cwd: dir, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null } | "timed-out">((resolveExit) => {
-      child.on("exit", (code, signal) => resolveExit({ code, signal }));
-    });
-    const recordDeadline = Date.now() + 15_000;
-    while (recordedPids(pidDir).length === 0 && Date.now() < recordDeadline) {
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    const pids = recordedPids(pidDir);
-    assert.ok(pids.length > 0, `expected a worker to be recorded before the interrupt; got:\n${stdout}\n${stderr}`);
-    child.kill("SIGINT");
-    const exitResult = await Promise.race([
-      exited,
-      new Promise<"timed-out">((r) => setTimeout(() => r("timed-out"), 10_000)),
-    ]);
-    if (exitResult === "timed-out") child.kill("SIGKILL");
-    const survivors = waitForNoneAlive(pids, 5_000);
-    assert.deepEqual(survivors, [], "a worker process outlived census after a real SIGINT");
-    assert.deepEqual(leftoverWorktrees(), [], "the temporary base worktree was not removed after the interrupt");
-    // Design correction B: census re-raises the signal with its own
-    // default disposition once the worktree is removed, instead of a
-    // fixed exit code, so a shell or CI job can tell an interrupted run
-    // apart from an ordinary failure. Node reports that as a null code
-    // and the signal itself. Windows keeps the old fixed exit 2.
-    assert.notEqual(exitResult, "timed-out", `stdout:\n${stdout}\nstderr:\n${stderr}`);
-    if (process.platform === "win32") {
-      assert.equal((exitResult as { code: number | null }).code, 2);
-    } else {
-      assert.equal((exitResult as { code: number | null }).code, null);
-      assert.equal((exitResult as { signal: NodeJS.Signals | null }).signal, "SIGINT");
-    }
-  } finally {
-    rmSync(pidDir, { recursive: true, force: true });
-    rmSync(dir, { recursive: true, force: true });
-  }
 });

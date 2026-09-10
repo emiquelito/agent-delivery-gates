@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+import { nodeCommand } from "./lib/portable-command.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "induce.ts");
@@ -320,7 +321,7 @@ test("a passing baseline runs first and does not change a proven verdict", () =>
 
 test("a failing baseline stops the run: exit 2, and the later steps never ran", () => {
   const dir = makeProject({
-    "retry.json": { ...PROVEN_SPEC, baseline: "node -e 'process.exit(1)'" },
+    "retry.json": { ...PROVEN_SPEC, baseline: nodeCommand("process.exit(1)") },
   });
   withProject(dir, () => {
     const result = runCli(dir, []);
@@ -337,8 +338,8 @@ test("a command that hits the timeout gets its own outcome and exit 3, never a f
   const dir = makeProject({
     "slow.json": {
       claim: "A slow check is not a failed check.",
-      inject: "node -e 'setTimeout(() => {}, 10000)'",
-      neutralize: "node -e 'process.exit(1)'",
+      inject: nodeCommand("setTimeout(() => {}, 10000)"),
+      neutralize: nodeCommand("process.exit(1)"),
     },
   });
   withProject(dir, () => {
@@ -355,8 +356,8 @@ test("a spec's own timeout overrides the default", () => {
   const dir = makeProject({
     "slow.json": {
       claim: "A slow check is not a failed check.",
-      inject: "node -e 'setTimeout(() => {}, 10000)'",
-      neutralize: "node -e 'process.exit(1)'",
+      inject: nodeCommand("setTimeout(() => {}, 10000)"),
+      neutralize: nodeCommand("process.exit(1)"),
       timeout: 1,
     },
   });
@@ -390,8 +391,8 @@ test("a proven spec beside a timed-out one is exit 3, not exit 0", () => {
     "a-retry.json": PROVEN_SPEC,
     "b-slow.json": {
       claim: "A slow check is not a failed check.",
-      inject: "node -e 'setTimeout(() => {}, 10000)'",
-      neutralize: "node -e 'process.exit(1)'",
+      inject: nodeCommand("setTimeout(() => {}, 10000)"),
+      neutralize: nodeCommand("process.exit(1)"),
       timeout: 1,
     },
   });
@@ -408,8 +409,8 @@ test("a finding beside a timed-out spec is exit 1: the finding wins", () => {
     "a-weak.json": NOT_MEASURING_SPEC,
     "b-slow.json": {
       claim: "A slow check is not a failed check.",
-      inject: "node -e 'setTimeout(() => {}, 10000)'",
-      neutralize: "node -e 'process.exit(1)'",
+      inject: nodeCommand("setTimeout(() => {}, 10000)"),
+      neutralize: nodeCommand("process.exit(1)"),
       timeout: 1,
     },
   });
@@ -457,8 +458,8 @@ test("a spec's cwd is where its commands run", () => {
     {
       "nested.json": {
         claim: "The commands run where the spec says.",
-        inject: "node -e 'process.exit(require(\"node:fs\").existsSync(\"marker.txt\") ? 0 : 1)'",
-        neutralize: "node -e 'process.exit(1)'",
+        inject: nodeCommand("process.exit(require('node:fs').existsSync('marker.txt') ? 0 : 1)"),
+        neutralize: nodeCommand("process.exit(1)"),
         cwd: "nested",
       },
     },
@@ -540,8 +541,8 @@ test("a proven spec whose neutralize command printed nothing says so, and never 
   const dir = makeProject({
     "quiet.json": {
       claim: "A control that says nothing is still shown as saying nothing.",
-      inject: "node -e 'process.exit(0)'",
-      neutralize: "node -e 'process.exit(1)'",
+      inject: nodeCommand("process.exit(0)"),
+      neutralize: nodeCommand("process.exit(1)"),
     },
   });
   withProject(dir, () => {
@@ -557,8 +558,8 @@ test("a command printing more than 1 MB is run to the end, not killed and called
   const dir = makeProject({
     "loud.json": {
       claim: "A loud check is not a check that ran out of time.",
-      inject: "node -e 'process.stdout.write(\"x\".repeat(3000000)); process.exit(0)'",
-      neutralize: "node -e 'process.stdout.write(\"y\".repeat(3000000)); process.exit(1)'",
+      inject: nodeCommand("process.stdout.write('x'.repeat(3000000)); process.exit(0)"),
+      neutralize: nodeCommand("process.stdout.write('y'.repeat(3000000)); process.exit(1)"),
     },
   });
   withProject(dir, () => {
@@ -570,33 +571,48 @@ test("a command printing more than 1 MB is run to the end, not killed and called
   });
 });
 
-test("a command killed by a signal is reported as killed and names the signal, never as a timeout", () => {
-  const dir = makeProject({
-    "killed.json": {
-      claim: "A killed check is not a check that ran out of time.",
-      inject: "node -e 'process.exit(0)'",
-      neutralize: "kill -9 $$",
-    },
-  });
-  withProject(dir, () => {
-    const result = runCli(dir, ["--timeout", "120"]);
-    assert.equal(result.status, 3, result.stdout);
-    assert.match(result.stdout, /killed \(killed by SIGKILL before it finished/);
-    assert.match(result.stdout, /Verdict: could-not-run/);
-    assert.match(result.stdout, /killed by a signal before it finished/);
-    assert.doesNotMatch(result.stdout, /timed-out/);
-    assert.doesNotMatch(result.stdout, /hit the timeout/);
-    // A control that was killed is never a control that worked.
-    assert.doesNotMatch(result.stdout, /Verdict: proven/);
-  });
-});
+// `kill -9 $$` stays a raw shell command instead of a `node -e` rewrite:
+// spawnCommand runs this through a shell, so the shell's own pid, not
+// node's, is the process it is watching for a signal. A `node -e` script
+// that signals its own pid is a grandchild of that shell and only kills
+// itself; the shell then reports a plain exit code, not a signal
+// (verified locally: `sh -c "node -e \"process.kill(process.pid,
+// 'SIGKILL')\""` closes with code 137 and signal null). Only the shell
+// itself dying by signal produces the killedBySignal this test asserts
+// on, and `kill` is a POSIX shell builtin with no cmd.exe counterpart, so
+// this one stays POSIX-only and is skipped on Windows instead of
+// rewritten.
+test(
+  "a command killed by a signal is reported as killed and names the signal, never as a timeout",
+  { skip: process.platform === "win32" ? "kill -9 $$ has no cmd.exe equivalent; see the comment above" : false },
+  () => {
+    const dir = makeProject({
+      "killed.json": {
+        claim: "A killed check is not a check that ran out of time.",
+        inject: nodeCommand("process.exit(0)"),
+        neutralize: "kill -9 $$",
+      },
+    });
+    withProject(dir, () => {
+      const result = runCli(dir, ["--timeout", "120"]);
+      assert.equal(result.status, 3, result.stdout);
+      assert.match(result.stdout, /killed \(killed by SIGKILL before it finished/);
+      assert.match(result.stdout, /Verdict: could-not-run/);
+      assert.match(result.stdout, /killed by a signal before it finished/);
+      assert.doesNotMatch(result.stdout, /timed-out/);
+      assert.doesNotMatch(result.stdout, /hit the timeout/);
+      // A control that was killed is never a control that worked.
+      assert.doesNotMatch(result.stdout, /Verdict: proven/);
+    });
+  },
+);
 
 test("a command that hits the timeout still reports the timeout, not a signal kill", () => {
   const dir = makeProject({
     "slow.json": {
       claim: "A check that ran out of time is not a killed check.",
-      inject: "node -e 'setTimeout(() => {}, 10000)'",
-      neutralize: "node -e 'process.exit(1)'",
+      inject: nodeCommand("setTimeout(() => {}, 10000)"),
+      neutralize: nodeCommand("process.exit(1)"),
       timeout: 1,
     },
   });
@@ -701,8 +717,15 @@ test("a command printing more than the read buffer holds is an overflow, not a t
   const dir = makeProject({
     "flood.json": {
       claim: "A check that prints without end is never judged.",
-      inject: "node -e 'process.exit(0)'",
-      neutralize: "yes 0123456789012345678901234567890123456789 | head -c 70000000; exit 1",
+      inject: nodeCommand("process.exit(0)"),
+      // process.exitCode, not process.exit: a synchronous process.exit()
+      // can end the process before a large stdout write has actually
+      // drained through the OS pipe, truncating what the parent reads
+      // (verified locally: process.exit(1) right after this write let
+      // only one pipe buffer's worth, 65536 bytes, through). Setting
+      // exitCode instead lets the event loop wait for the write to
+      // finish, the same way the shell pipeline it replaces did.
+      neutralize: nodeCommand("process.stdout.write('0123456789'.repeat(7000000)); process.exitCode = 1"),
     },
   });
   withProject(dir, () => {
@@ -784,7 +807,7 @@ test("a timed-out step leaves no descendant running", () => {
       "leak.json": {
         claim: "test fixture: a step whose command spawns a worker that never returns",
         inject: `node leak-run.mjs ${pidDir}`,
-        neutralize: "node -e \"process.exit(1)\"",
+        neutralize: nodeCommand("process.exit(1)"),
         timeout: 1,
       },
     },
@@ -826,7 +849,7 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
       "leak.json": {
         claim: "test fixture: a step whose command spawns a worker that never returns",
         inject: `node leak-run.mjs ${pidDir}`,
-        neutralize: "node -e \"process.exit(1)\"",
+        neutralize: nodeCommand("process.exit(1)"),
       },
     },
     {
