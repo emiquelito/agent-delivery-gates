@@ -1723,3 +1723,30 @@ test("a throw between reset and read closes the batch instead of poisoning every
   const after2 = separateTestDiff(diff);
   assert.equal(Array.isArray(after2.unwarmedExtensions), true, "still not poisoned on a second call after that");
 });
+
+// --- reviewer finding: a PHP documentation line must never gate-block on its own -----
+//
+// A round that pulled PHP's `text` node (raw HTML outside `<?php ... ?>`)
+// out of masking entirely, to stop it hiding an assertion inside an inline
+// <script> block, traded that defect for a different one: an ordinary
+// documentation line sitting in template HTML, quoting an assertion's own
+// call form as prose, read as live code once `text` stopped being masked.
+// A reviewer built exactly this file and ran the real gate; changing only
+// the status-code numeral produced a HIGH assertion-weakened signal on a
+// one-character literal edit in a comment, with no reviewer necessarily in
+// the loop before CI acted on the exit code. This is that reproduction,
+// verbatim, run through the same warmed pipeline the gate itself uses.
+//
+// The raw-line pre-filter buys nothing here either: matching() (see
+// src/test-diff-separator.ts) tests the MASKED line, and once `text` goes
+// unmasked the masked line is identical to the raw one -- there was never
+// a second layer of defense underneath the mask.
+test("reviewer finding: an ordinary PHP documentation line naming an assertion's call form produces no signal when only its literal changes", async () => {
+  const diff = oneFileDiff(
+    "tests/LoginTest.php",
+    ["        Usage: assert.strictEqual(response.code, 200); matches the API docs."],
+    ["        Usage: assert.strictEqual(response.code, 404); matches the API docs."],
+  );
+  const result = await separateTestDiffWarmed(diff);
+  assert.deepEqual(signalIds(result.signals), [], "a documentation line's own literal changing must never block the gate");
+});

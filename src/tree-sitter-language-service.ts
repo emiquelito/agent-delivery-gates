@@ -28,30 +28,63 @@
 // specifically: PHP's `text` node (raw HTML outside `<?php ?>`) has no
 // child structure of its own, so an inline <script>/<style> element sitting
 // inside it had no node to reopen the way a real interpolation does, and a
-// scan (fillHtmlAwareLiteral) tried to carve that content back out by
-// pattern-matching <script>/<style> tags inside one `text` node's own
-// span. Two defects followed directly from scanning one node at a time:
-// tree-sitter-php splits a single <script>...</script> element into two
-// separate `text` nodes whenever a `<?php ... ?>` span sits between its
+// scan (fillHtmlAwareLiteral, since removed) tried to carve that content
+// back out by pattern-matching <script>/<style> tags inside one `text`
+// node's own span. Two defects followed directly from scanning one node at
+// a time: tree-sitter-php splits a single <script>...</script> element into
+// two separate `text` nodes whenever a `<?php ... ?>` span sits between its
 // open and close tags, so neither half's scan ever saw both tags and the
 // assertion in between vanished; and a fake `</script>` inside the
 // script's own JavaScript string closed the scan early, blanking the real
-// assertion that followed. Both hid an assertion that plain HTML masking
-// had never hidden before -- exactly the outcome this project exists to
-// prevent. Fixing that scan correctly needs cross-node state (tracking
-// whether a script/style element is still open as the walk moves from one
-// `text` node to the next in document order) with any ambiguity resolved
-// toward leaving content visible, which is real complexity bought for
-// keeping *incidental* HTML masked. Simpler, and argued for directly: PHP's
-// `text` node no longer has any special handling here at all, and
-// src/tree-sitter-grammars.ts's php entry no longer lists `text` in either
-// literalTypes or contentTypes, so raw HTML in a `.php` file -- leading,
-// trailing, template-only, or holding a real inline <script>/<style> block
-// -- stays visible under this walk's ordinary default the same way it did
-// for years before that work started. The trade a static HTML page might
-// now read as a false "still code" signal a human can see and dismiss;
-// nothing about it can ever read as a false "nothing here", which hiding
-// an assertion would.
+// assertion that followed.
+//
+// The round after that one reacted by pulling `text` out of masking
+// entirely, leaving all PHP template HTML visible as ordinary code. That
+// traded a hidden-assertion defect for a different real cost: an
+// unremarkable documentation line sitting in template HTML --
+// `Usage: assert.strictEqual(response.code, 200); matches the API docs.`
+// -- now read as a live assertion, and editing only the literal in it
+// tripped this project's own gate at HIGH severity and blocked the commit.
+// That is not a cosmetic false signal a reviewer can shrug off in a diff;
+// it is an exit-1 failure with no reviewer necessarily in the loop before
+// CI acts on it.
+//
+// This version keeps `text` masked as HTML by default again -- see
+// src/tree-sitter-grammars.ts's php entry, which lists `text` in the new
+// `htmlTypes` bucket -- and fixes the scan's two real defects directly
+// instead of giving up on masking altogether:
+//
+//   - Cross-node state. `text` is scanned through one shared HtmlScanState
+//     object, created once per `classify()` call and threaded through
+//     every markNode call for that parse, in the same document order the
+//     recursion already visits nodes in (tree-sitter returns a node's
+//     children in source order, and the walk never revisits a subtree out
+//     of order). A <script> element split into two `text` nodes by a
+//     `<?php ... ?>` span is scanned as one continuous element: the first
+//     `text` node opens it and leaves the shared state "open" with no
+//     closing tag found in its own span, and the second `text` node
+//     resumes exactly there instead of starting a fresh, blind scan.
+//   - Ambiguous extent resolved toward visible. A closing tag is taken at
+//     its LAST occurrence in the current open run, not its first, so a
+//     fake `</script>` sitting inside the element's own JavaScript string
+//     can never end the scan early -- only a later occurrence (the real
+//     tag, or a still-later fake one) closes it, and everything in
+//     between stays CODE. See scanHtmlSpan below for the full argument,
+//     including why the opposite ambiguity (an opening tag) needs no such
+//     care: taking it at its first occurrence only ever grows the CODE
+//     span, which is the same safe direction.
+//
+// What this still cannot do, stated plainly, same as before this rewrite:
+// it does not understand HTML comments, so `<!-- <script>fake</script> -->`
+// reopens its content as code the same as a real element would. Both
+// remaining misses only ever make MORE of a `text` span read as code, never
+// less -- the absolute invariant this file exists to hold is that masking
+// must never hide an assertion that was visible with no masking at all, and
+// neither miss can violate it. A `<script>` tag written inside a PHP
+// string stays safe on a different, independent basis: that string is a
+// separate node, masked wholesale on its own terms by the ordinary
+// literalTypes handling below, so its characters are never part of any
+// `text` node's substring for this scan to read in the first place.
 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -82,6 +115,110 @@ function fill(kinds: Uint8Array, start: number, end: number, value: number): voi
 export interface GrammarConfig {
   literalTypes: ReadonlySet<string>;
   contentTypes: ReadonlySet<string>;
+  /**
+   * Node types whose own span is not uniformly code or uniformly not-code,
+   * because the grammar itself never subdivides it: PHP's `text` (raw HTML
+   * outside a `<?php ... ?>` span) is the one member today. A type listed
+   * here is masked as HTML by default, the same as a literalType, except an
+   * inline <script>/<style> element's own content inside it is carved back
+   * out as CODE by scanHtmlSpan below -- see this file's own header for
+   * why that carve-out exists and how it stays safe. Optional because
+   * every other grammar's literal containers are exactly as uniform as
+   * their own name says.
+   */
+  htmlTypes?: ReadonlySet<string>;
+}
+
+/**
+ * Whether an html-masked span (PHP's `text` node, wherever it sits) is,
+ * right where this span begins, already inside an unterminated <script> or
+ * <style> element opened by an earlier span. One instance is created per
+ * `classify()` call and threaded through every markNode call for that
+ * parse, in document order, which is what lets a <script> element split
+ * into two `text` nodes by a `<?php ... ?>` span be scanned as one
+ * continuous element instead of two blind halves. See this file's own
+ * header for the fuller account.
+ */
+interface HtmlScanState {
+  open: boolean;
+  tag: "script" | "style" | null;
+}
+
+const HTML_OPEN_TAG_RE = /<(script|style)\b[^>]*>/i;
+
+/**
+ * Marks `text[start, end)` -- one html-masked node's span -- as HTML
+ * (LITERAL) by default, carving any <script>/<style> element's own content
+ * back out as CODE, and carries `state` across calls so an element left
+ * open at the end of one span resumes, still open, at the start of the
+ * next.
+ *
+ * The two kinds of tag this cannot ever find with certainty from text
+ * alone are both resolved toward VISIBLE, i.e. toward more of the span
+ * reading as CODE, never less:
+ *
+ *   - An opening tag is taken at its FIRST occurrence. A false positive
+ *     here only widens the CODE span, which is the same safe direction
+ *     this project already accepts elsewhere: worst case, ordinary
+ *     surrounding text that merely looks like a script tag reads as code,
+ *     a false "still code" a reviewer can see and dismiss, never a false
+ *     "nothing here".
+ *   - A closing tag is taken at its LAST occurrence within the current
+ *     open run, not its first. A fake `</script>` sitting inside the
+ *     element's own JavaScript string would close the scan early on a
+ *     first-match reading and blank everything real that follows, back to
+ *     HTML -- the exact defect a prior round of this scan shipped with.
+ *     Taking the last candidate in the span instead means only an actual
+ *     final `</script>`/`</style>`, or a still-later fake one, ever ends
+ *     the run; everything in between, real assertion included, stays
+ *     CODE. If no close is found anywhere in the span, the element stays
+ *     open into whichever `text` span comes next.
+ *
+ * What this still cannot do, both only ever costing extra visible code,
+ * never a hidden one: it has no notion of an HTML comment, so
+ * `<!-- <script>fake</script> -->` reopens its content as code the same as
+ * a real element would; and taking the LAST close in the current open run
+ * means two back-to-back elements with nothing but whitespace between the
+ * first's close tag and the second's open tag are read as ONE open run
+ * spanning both, boundary tags included, instead of two separate ones --
+ * the same trade that fixes Finding 1b costs a little precision here.
+ * Neither can ever violate the invariant this file exists to hold.
+ */
+function scanHtmlSpan(text: string, kinds: Uint8Array, start: number, end: number, state: HtmlScanState): void {
+  fill(kinds, start, end, LITERAL);
+  let pos = start;
+  while (pos < end) {
+    if (state.open) {
+      const closeRe = new RegExp(`</${state.tag}\\s*>`, "gi");
+      const span = text.slice(pos, end);
+      let match: RegExpExecArray | null;
+      let last: RegExpExecArray | null = null;
+      while ((match = closeRe.exec(span)) !== null) last = match;
+      if (last === null) {
+        // No close anywhere in this span: the whole rest of it is the
+        // element's own content, and the element stays open for the next
+        // span this state is threaded into.
+        fill(kinds, pos, end, CODE);
+        pos = end;
+        continue;
+      }
+      const codeEnd = pos + last.index;
+      fill(kinds, pos, codeEnd, CODE);
+      pos = codeEnd + last[0].length;
+      state.open = false;
+      state.tag = null;
+      continue;
+    }
+    const span = text.slice(pos, end);
+    const openMatch = HTML_OPEN_TAG_RE.exec(span);
+    if (openMatch === null) {
+      pos = end; // no more script/style content in this span; rest stays HTML
+      continue;
+    }
+    state.open = true;
+    state.tag = openMatch[1].toLowerCase() as "script" | "style";
+    pos = pos + openMatch.index + openMatch[0].length;
+  }
 }
 
 /**
@@ -89,22 +226,37 @@ export interface GrammarConfig {
  * means; this is the same kind of walk as
  * src/tree-sitter-python-service.ts's markNode, generalised from one
  * hardcoded pair of node types ("comment", "string") to a per-language
- * `GrammarConfig`.
+ * `GrammarConfig`. `text` and `htmlState` exist only for `htmlTypes`
+ * handling (see scanHtmlSpan above); every other grammar's config leaves
+ * `htmlTypes` unset and neither is ever read.
  */
-function markNode(node: TSNode, kinds: Uint8Array, config: GrammarConfig): void {
+function markNode(node: TSNode, kinds: Uint8Array, config: GrammarConfig, text: string, htmlState: HtmlScanState): void {
+  if (config.htmlTypes?.has(node.type)) {
+    scanHtmlSpan(text, kinds, node.startIndex, node.endIndex, htmlState);
+    return; // an html-masked node (PHP's `text`) is a leaf; nothing to recurse into
+  }
   if (config.literalTypes.has(node.type)) {
     fill(kinds, node.startIndex, node.endIndex, LITERAL);
     for (const child of node.children) {
       if (!child) continue;
       if (!child.isNamed) continue; // anonymous punctuation: stays blanked
+      if (config.htmlTypes?.has(child.type)) {
+        // Reached as a literal container's own child (PHP's `text` inside
+        // text_interpolation) instead of visited on its own: needs the
+        // same html-aware scan the branch above gives it when visited
+        // directly, or a script/style element sitting in *this* span
+        // would just be swept into the parent's uniform blank below.
+        scanHtmlSpan(text, kinds, child.startIndex, child.endIndex, htmlState);
+        continue;
+      }
       if (config.contentTypes.has(child.type)) continue; // plain text: stays blanked
       fill(kinds, child.startIndex, child.endIndex, CODE);
-      markNode(child, kinds, config);
+      markNode(child, kinds, config, text, htmlState);
     }
     return;
   }
   for (const child of node.children) {
-    if (child) markNode(child, kinds, config);
+    if (child) markNode(child, kinds, config, text, htmlState);
   }
 }
 
@@ -122,7 +274,7 @@ function classify(parser: Parser, text: string, config: GrammarConfig): Uint8Arr
     kinds.fill(LITERAL);
     return kinds;
   }
-  markNode(tree.rootNode, kinds, config);
+  markNode(tree.rootNode, kinds, config, text, { open: false, tag: null });
   return kinds;
 }
 

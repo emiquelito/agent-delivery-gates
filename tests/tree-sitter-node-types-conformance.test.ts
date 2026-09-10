@@ -30,14 +30,16 @@
 // full stop, not "every type reachable from configuration" -- must be
 // classified into exactly one of:
 //
-//   - literalTypes or contentTypes (src/tree-sitter-grammars.ts's own
-//     config: a literal container, or plain text found inside one)
+//   - literalTypes, contentTypes, or htmlTypes (src/tree-sitter-grammars.ts's
+//     own config: a literal container, plain text found inside one, or --
+//     htmlTypes only, PHP's `text` today -- a leaf the grammar gives no
+//     further structure that still needs code carved back out of it)
 //   - EXCLUSIONS (a real, code-bearing construct -- an interpolation, most
 //     commonly -- deliberately left out so the walk reopens it as code)
 //   - CODE_TYPES (ordinary code with nothing to do with a literal at all:
 //     a statement, an expression, a pattern, a declaration)
 //
-// A type in none of the four fails the test. Nothing is exempt by being
+// A type in none of the five fails the test. Nothing is exempt by being
 // unreachable from what is already configured, because nothing here is
 // reached that way any more: this file no longer walks node-types.json's
 // children lists outward from a seed set. It reads every entry the file
@@ -144,14 +146,22 @@
 // A later round found a hidden-assertion defect in the scan a prior round
 // had added to keep an inline <script>/<style> block visible inside PHP's
 // `text` node (raw HTML outside `<?php ?>`), and reverted that scan rather
-// than fixing it in place: `text` no longer sits in literalTypes or
-// contentTypes at all, in either src/tree-sitter-grammars.ts's php entry or
-// this file's own CONTENT_SHAPED_MARKERS below, and instead joins
-// CODE_TYPES.php -- ordinary code by this walk's default, the same as any
-// other unlisted named child. Leading HTML, trailing HTML, and a
-// template-only `.php` file all read as visible code now, not masked; see
-// src/tree-sitter-language-service.ts's own file header for the fuller
-// account of why.
+// than fixing it in place: `text` moved out of literalTypes/contentTypes
+// and into CODE_TYPES.php, ordinary code by this walk's default. That
+// traded the hidden-assertion defect for a gate-blocking false positive --
+// an ordinary documentation line quoting an assertion's call form, sitting
+// in template HTML, read as a live assertion and tripped this project's
+// own HIGH-severity gate on a one-character literal edit. The round after
+// that fixed the scan's two real defects (cross-node state, and an
+// ambiguous close resolved toward visible) instead of giving up on masking
+// `text` altogether; see src/tree-sitter-language-service.ts's own file
+// header for the full account. `text` is back out of CODE_TYPES.php and
+// into the new `htmlTypes` bucket instead (GrammarConfig, same file):
+// masked as HTML by default, with an inline <script>/<style> element's own
+// content carved back out as code. It stays out of CONTENT_SHAPED_MARKERS
+// below either way -- that set is about a literal container's *children*
+// signalling it should have been a literal, and `text` is a leaf with no
+// children at all.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -360,7 +370,7 @@ const CODE_TYPES: Readonly<Record<string, ReadonlySet<string>>> = {
     "reference_assignment_expression", "reference_modifier", "relative_name", "relative_scope",
     "require_expression", "require_once_expression", "return_statement", "scoped_call_expression",
     "scoped_property_access_expression", "sequence_expression", "simple_parameter", "static_modifier",
-    "static_variable_declaration", "switch_block", "switch_statement", "text", "throw_expression", "trait_declaration",
+    "static_variable_declaration", "switch_block", "switch_statement", "throw_expression", "trait_declaration",
     "try_statement", "type_list", "unary_op_expression", "union_type", "unset_statement", "update_expression",
     "use_as_clause", "use_declaration", "use_instead_of_clause", "use_list", "var_modifier", "variadic_parameter",
     "variadic_placeholder", "variadic_unpacking", "visibility_modifier", "while_statement", "yield_expression",
@@ -533,13 +543,14 @@ function concreteNamedTypes(nodeTypes: readonly NodeTypeEntry[]): ReadonlySet<st
 
 /**
  * Every concrete named type `nodeTypes` says this grammar can produce
- * that is not accounted for by `config`'s literalTypes/contentTypes,
- * `exclusions`, or `codeTypes`. Empty means all four together cover
- * everything this grammar can actually produce; a non-empty result names
- * exactly what to go add somewhere -- see this file's own header for what
- * each of the four buckets means and why a flat check across all of them,
- * not a reachability walk from any of them, is what actually closes this
- * defect class.
+ * that is not accounted for by `config`'s literalTypes/contentTypes/
+ * htmlTypes, `exclusions`, or `codeTypes`. Empty means all five together
+ * cover everything this grammar can actually produce; a non-empty result
+ * names exactly what to go add somewhere -- see this file's own header for
+ * what each bucket means and why a flat check across all of them, not a
+ * reachability walk from any of them, is what actually closes this defect
+ * class. htmlTypes (see src/tree-sitter-language-service.ts's GrammarConfig)
+ * is optional and empty for every grammar but PHP today.
  */
 function findUnclassifiedTypes(
   nodeTypes: readonly NodeTypeEntry[],
@@ -547,7 +558,7 @@ function findUnclassifiedTypes(
   exclusions: ReadonlySet<string>,
   codeTypes: ReadonlySet<string>,
 ): string[] {
-  const known = new Set([...config.literalTypes, ...config.contentTypes, ...exclusions, ...codeTypes]);
+  const known = new Set([...config.literalTypes, ...config.contentTypes, ...(config.htmlTypes ?? []), ...exclusions, ...codeTypes]);
   const missing = [...concreteNamedTypes(nodeTypes)].filter((t) => !known.has(t));
   return missing.sort();
 }
@@ -560,9 +571,11 @@ for (const [ext, spec] of Object.entries(GRAMMAR_SPECS) as Array<[string, Gramma
       missing,
       [],
       `${ext}: ${spec.packageName}'s node-types.json can produce ${JSON.stringify(missing)}, and none of them is in ` +
-        "this grammar's literalTypes, contentTypes, or this file's own EXCLUSIONS or CODE_TYPES. Add each one to " +
-        "whichever bucket is actually correct for it: literalTypes/contentTypes if it can hold static text that " +
-        "must be masked, EXCLUSIONS if it is real code deliberately left for the walk to reopen, or CODE_TYPES if " +
+        "this grammar's literalTypes, contentTypes, htmlTypes, or this file's own EXCLUSIONS or CODE_TYPES. Add each " +
+        "one to whichever bucket is actually correct for it: literalTypes/contentTypes if it can hold static text " +
+        "that must be masked uniformly, htmlTypes if the grammar gives it no further structure but it can still hold " +
+        "real code (an inline <script>/<style> element), EXCLUSIONS if it is real code deliberately left for the " +
+        "walk to reopen, or CODE_TYPES if " +
         "it is ordinary code with nothing to do with a literal at all.",
     );
   });
@@ -740,10 +753,11 @@ const CORRECTNESS_EXCEPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   // alone, a direct child of `program` on any file with a PHP tag, already
   // satisfies it), the same way it would be true of any container that
   // legitimately mixes code and text as siblings instead of being a text
-  // container itself. `text` is not part of that trigger any more --
-  // it is deliberately absent from both literalTypes and
-  // CONTENT_SHAPED_MARKERS.php, having been found to hide an assertion when
-  // it was masked as HTML (see src/tree-sitter-grammars.ts's php entry) --
+  // container itself. `text` is not part of that trigger: it now lives in
+  // htmlTypes, not literalTypes or CONTENT_SHAPED_MARKERS.php (see
+  // src/tree-sitter-grammars.ts's php entry and src/tree-sitter-language
+  // -service.ts's own header for why `text` is masked again, carving
+  // script/style content back out instead of being left unmasked entirely),
   // but `program` still needs this exception on `php_tag`'s account alone.
   // `program` itself stays ordinary code either way: masking it would blank
   // an entire file's real statements along with its HTML.

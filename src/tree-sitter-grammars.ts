@@ -194,18 +194,22 @@ const php: GrammarSpec = {
     // close tags, so a per-node scan never saw both tags at once and an
     // assertion sitting between them vanished outright. Also real: a fake
     // `</script>` inside the script's own JavaScript string closed the scan
-    // early and blanked the real assertion that followed it. Both hid an
-    // assertion that was visible before any of this started -- the one
-    // outcome this project exists to prevent -- so `text` is deliberately
-    // left out of literalTypes (and out of contentTypes below) entirely.
-    // The accepted cost, stated plainly: leading HTML, trailing HTML, and a
-    // template-only PHP file with no `<?php` tag at all now read as
-    // ordinary code under this walk's default, unmasked, a false "this is
-    // still code" signal a human reviewing a diff can see and dismiss --
-    // never a false "nothing here" the way a hidden assertion is. See
-    // src/tree-sitter-language-service.ts's own file header for the fuller
-    // account of why fixing the scan instead was rejected.
-    //
+    // early and blanked the real assertion that followed it. That round
+    // reacted by pulling `text` out of masking entirely -- so it is not in
+    // literalTypes below. The round after that one found the accepted cost
+    // was not the cosmetic one it was described as: an ordinary
+    // documentation line sitting in template HTML, mentioning an
+    // assertion's exact call form as prose, now read as a live assertion,
+    // and editing only its literal value tripped this project's own gate at
+    // HIGH severity -- an exit-1 block, not something a reviewer necessarily
+    // sees before CI acts on it. `text` is masked again, this time via
+    // `htmlTypes` below: src/tree-sitter-language-service.ts's markNode
+    // gives it the same html-aware scan as before, except the scan now
+    // tracks state across sibling `text` spans in document order (fixing
+    // the split-element case) and resolves an ambiguous close toward the
+    // LAST candidate instead of the first (fixing the fake-`</script>`-in-a-
+    // string case). See that file's own header for the full account.
+    htmlTypes: new Set(["text"]),
     // heredoc_start/heredoc_end are the `<<<EOT` tag's own name, repeated
     // at open and close; not code, and not blanked by accident either
     // way since nothing there could satisfy a detector, but listed for
@@ -216,11 +220,11 @@ const php: GrammarSpec = {
     // `?>` tags bracketing its actual content; neither is code, so both
     // stay blanked instead of being reopened. `text`, text_interpolation's
     // third possible child and the actual raw HTML itself, is deliberately
-    // left out here too -- see the comment above literalTypes for why: a
-    // `text` child reopens to ordinary code the same way an unlisted named
-    // child anywhere else in this walk does, which is what keeps an inline
-    // <script>/<style> block sitting inside it, between two PHP spans,
-    // visible.
+    // left out of this set too -- it belongs in htmlTypes above instead,
+    // not here: markNode checks htmlTypes before contentTypes, so a `text`
+    // child reached this way (as text_interpolation's own child, rather
+    // than visited on its own directly under `program`) still gets the
+    // same html-aware scan, not a plain wholesale blank.
     contentTypes: new Set(["string_content", "escape_sequence", "nowdoc_string", "heredoc_start", "heredoc_end", "php_tag", "php_end_tag"]),
   },
 };
