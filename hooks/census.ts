@@ -279,6 +279,49 @@ function cleanEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** Whether text already names a `--test-reporter`, checked before this tool
+ * adds its own. */
+const REQUESTS_TEST_REPORTER = /--test-reporter\b/;
+
+/**
+ * The environment for the subprocess that runs the project's own test
+ * command, with `NODE_OPTIONS` extended to ask node's own test runner for
+ * TAP.
+ *
+ * Through Node 22, `node --test` printed TAP whenever its output was not a
+ * terminal, which a subprocess's stdout never is. Node 23 made the
+ * human-readable reporter the default everywhere, TAP included, so a
+ * project whose test command is plain `node --test` now hands this tool a
+ * format it does not read, on the very run it just performed. Asking for
+ * TAP through `NODE_OPTIONS`, instead of a flag appended to a command
+ * string this tool did not construct, is what survives an intervening
+ * package manager: `npm test` re-execs node with the environment intact and
+ * the command string this tool never gets to edit.
+ *
+ * Two things must not be clobbered. A `NODE_OPTIONS` the caller already set
+ * is extended, never replaced, so any other flag in it survives. And a
+ * `--test-reporter` already named, either in that `NODE_OPTIONS` or in the
+ * command itself, is left alone: node treats a second `--test-reporter` as
+ * a second reporter running alongside the first, not a replacement for it,
+ * and refuses to start unless every reporter it sees has its own
+ * `--test-reporter-destination`. Adding one here on top of a runner that
+ * already named its own would not honour that choice, it would break the
+ * run outright, confirmed by reproduction.
+ *
+ * A command that is not node's own test runner is unaffected: `NODE_OPTIONS`
+ * is read only by node, so a test runner written in another language never
+ * sees it, and a plain node process started without `--test` ignores a
+ * `--test-reporter` it has no use for, confirmed by reproduction.
+ */
+function envForCommand(command: string): NodeJS.ProcessEnv {
+  const env = cleanEnv();
+  const existing = env.NODE_OPTIONS ?? "";
+  if (!REQUESTS_TEST_REPORTER.test(command) && !REQUESTS_TEST_REPORTER.test(existing)) {
+    env.NODE_OPTIONS = existing === "" ? "--test-reporter=tap" : `${existing} --test-reporter=tap`;
+  }
+  return env;
+}
+
 function runGit(cwd: string, args: string[]): string {
   try {
     return execFileSync("git", args, { cwd, env: cleanEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -405,7 +448,7 @@ interface RunOutput {
 async function runCommand(command: string, cwd: string, timeoutMs?: number): Promise<RunOutput> {
   const result = await spawnCommand(command, {
     cwd,
-    env: cleanEnv(),
+    env: envForCommand(command),
     timeoutMs,
     maxBufferBytes: 64 * 1024 * 1024,
   });

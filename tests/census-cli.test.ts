@@ -31,6 +31,75 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "census.ts");
 const SUITE = "node --test tests/*.test.mjs";
 
+// The exact bytes `node --test` wrote, piped to a file, for a two-test file
+// with no flag of its own asking for a reporter. Captured once from a real
+// v24.21.0 binary downloaded from nodejs.org into a scratch directory (never
+// installed) and run directly; byte-identical, other than the timings, to
+// the same suite run under this repository's own node with
+// --test-reporter=spec asked for explicitly, which is the reporter node
+// picked on its own on v24. Through v22 the same command printed TAP
+// instead, because its output was not a terminal; v23 made this the default
+// everywhere, TAP included, and this is what that default looks like.
+const NODE_TEST_RUNNER_DEFAULT_OUTPUT = `\
+✔ adds (0.397898ms)
+✔ subtracts (0.079976ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 32.460652
+`;
+
+// The same two-test file, same node binary, with TAP asked for explicitly:
+// what every node --test still prints on request, on every line this
+// repository's own version still holds.
+const NODE_TEST_RUNNER_TAP_OUTPUT = `\
+TAP version 13
+# Subtest: adds
+ok 1 - adds
+  ---
+  duration_ms: 0.384865
+  type: 'test'
+  ...
+# Subtest: subtracts
+ok 2 - subtracts
+  ---
+  duration_ms: 0.063068
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 49.293671
+`;
+
+// Stands in for `node --test` across the two lines above: it prints the
+// real bytes node itself wrote for whichever reporter its own NODE_OPTIONS
+// carries, so what is under test is whether this tool's own subprocess env
+// asks for TAP, not whether some installed node still behaves the way the
+// two fixtures above were captured behaving.
+//
+// The flag is split across two string literals ('--test-repo' + 'rter=tap')
+// so the generated script's own source text never contains the contiguous
+// substring "--test-reporter": census's own detector for "did the command
+// already ask for a reporter" scans the whole --command string, this
+// script included, and a literal "--test-reporter=tap" sitting in that
+// source would false-positive as the caller already having asked for one,
+// which defeats the very thing under test here.
+const REPLAYS_NODE_TEST_RUNNER_OUTPUT = nodeCommand(
+  `const opts=process.env.NODE_OPTIONS||'';` +
+    `if(opts.indexOf('--test-repo'+'rter=tap')!==-1){${writeExpr(NODE_TEST_RUNNER_TAP_OUTPUT)}}` +
+    `else{${writeExpr(NODE_TEST_RUNNER_DEFAULT_OUTPUT)}}`,
+);
+
 interface RunResult {
   status: number | null;
   stdout: string;
@@ -366,6 +435,77 @@ test("output in neither format is exit 2, and never reads as zero tests", (t) =>
   assert.match(result.stderr, /neither TAP nor JUnit/);
   assert.equal(result.stdout, "");
   assert.doesNotMatch(result.stdout + result.stderr, /disappeared/);
+});
+
+// The gap that let node's default reporter change break every run of this
+// tool without a single test noticing: nothing here ran node --test and
+// checked what it actually printed by default, so nothing depended on that
+// assumption either. This runs the exact bytes a real node --test wrote
+// under each of the two defaults it has had, through this tool's own
+// subprocess env, and checks which one this tool actually asked for.
+test("node's own test runner is asked for TAP, not read from whatever it defaults to", (t) => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    "tests/b.test.mjs": `${HEADER}test("b", () => {});\n`,
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const result = runCli(dir, ["--command", REPLAYS_NODE_TEST_RUNNER_OUTPUT]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stderr, /neither TAP nor JUnit/);
+  assert.match(result.stdout, /Result format: tap/);
+});
+
+// A caller who already chose a reporter of their own, through NODE_OPTIONS,
+// is not overridden. Node treats a second --test-reporter as a second
+// reporter running alongside the first, not a replacement, and refuses to
+// start unless each one has its own --test-reporter-destination; silently
+// adding a second one here would not honour that choice, it would crash a
+// run that used to work.
+test("a NODE_OPTIONS that already names a --test-reporter is left alone", (t) => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    "tests/b.test.mjs": `${HEADER}test("b", () => {});\n`,
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const result = runCli(dir, ["--command", SUITE], { NODE_OPTIONS: "--test-reporter=dot" });
+  // Left as the caller set it, this run's own node still prints "dot",
+  // which this tool cannot read either -- the honest answer, and not the
+  // crash a second, conflicting --test-reporter would have produced.
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /neither TAP nor JUnit/);
+  assert.doesNotMatch(result.stdout + result.stderr, /ERR_INVALID_ARG_VALUE/);
+});
+
+// A NODE_OPTIONS the caller set for an unrelated reason keeps working: this
+// tool extends it, it does not replace it.
+//
+// No test file differs between base and HEAD here, on purpose: this is
+// about the reporter alone, and a test file the change touched would put
+// this through the red-before-green rerun too, where a trivial, empty-body
+// test always passes against the base source and would be flagged on
+// grounds that have nothing to do with NODE_OPTIONS.
+test("an unrelated NODE_OPTIONS flag survives alongside the one this tool adds", (t) => {
+  const dir = makeRepo(
+    { "tests/a.test.mjs": `${HEADER}test("a", () => {});\n`, "tests/b.test.mjs": `${HEADER}test("b", () => {});\n`, "README.md": "before\n" },
+    { "README.md": "after\n" },
+  );
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const result = runCli(dir, ["--command", SUITE], { NODE_OPTIONS: "--stack-trace-limit=64" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Result format: tap/);
+});
+
+// A command that is not node's own test runner is not touched by any of
+// this: NODE_OPTIONS is read by node alone, so a command that already
+// prints readable TAP of its own reads exactly as it would have before this
+// tool asked node's test runner for anything.
+test("a command that already prints TAP on its own is unaffected", (t) => {
+  const dir = makeRepo({ "tests/a.test.mjs": `${HEADER}test("a", () => {});\n` }, {
+    "tests/b.test.mjs": `${HEADER}test("b", () => {});\n`,
+  });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const command = nodeCommand(writeExpr("TAP version 13\nok 1 - a\n1..1\n"));
+  const result = runCli(dir, ["--command", command]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /Result format: tap/);
 });
 
 // A base run that starts, prints readable output, and holds no tests is a

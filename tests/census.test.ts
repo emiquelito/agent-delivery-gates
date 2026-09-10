@@ -258,6 +258,41 @@ test("output in neither format is an error, never an empty census", () => {
   assert.match(result.error, /neither TAP nor JUnit/);
 });
 
+// Every fixture above was typed by hand. This one is not: it is the exact
+// bytes a real `node --test` wrote, piped to a file, for a two-test suite
+// with no reporter of its own asked for -- captured from a real v24.21.0
+// binary run directly from a scratch directory, never installed, and
+// byte-identical past the timings to this repository's own node run with
+// --test-reporter=spec asked for explicitly, which is the reporter v24
+// picked on its own. Through v22 the same command printed TAP instead,
+// because its own output was never a terminal; v23 made this reporter the
+// default everywhere, TAP included. No fixture here exercised that default
+// before, so nothing caught it changing.
+const NODE_TEST_RUNNER_DEFAULT_REPORTER_OUTPUT = `\
+✔ adds (0.397898ms)
+✔ subtracts (0.079976ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 32.460652
+`;
+
+// Pins that this real output stays exactly as unreadable as the hand-typed
+// crash log above, never a census of zero tests: the parser deliberately
+// reads two machine formats and no others, so a runner's own human-readable
+// default is refused here on purpose, not missed by accident. hooks/census.ts
+// is what keeps a caller from ever handing this parser that text: it asks
+// node's own test runner for TAP before it runs it.
+test("node's own default reporter, asked for nothing else, is unreadable here too", () => {
+  const result = parseResults(NODE_TEST_RUNNER_DEFAULT_REPORTER_OUTPUT);
+  assert.ok("error" in result, JSON.stringify(result));
+  assert.match(result.error, /neither TAP nor JUnit/);
+});
+
 test("an empty census from readable output is a real answer, not an error", () => {
   const result = parseResults("TAP version 13\n1..0\n");
   assert.ok(!("error" in result));
