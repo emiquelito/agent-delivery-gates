@@ -318,6 +318,25 @@ export async function runTestDiffGate(payload: CanonicalPayload): Promise<Adapte
   // catches a future bypass of separateTestDiffWarmed too, not only this
   // one.
   const result = await separateTestDiffWarmed(diffText, { rules });
+  // Finding: hadLanguageLoadFailure (src/code-mask.ts) used to be read only
+  // by src/mutate.ts, so a grammar that failed to load -- a missing
+  // devDependency, or ADG_TEST_FORCE_GRAMMAR_FAILURE below -- left this
+  // gate silently scanning that file with the regex fallback, reading
+  // every string, comment, and interpolation inside it as ordinary code,
+  // with no warning at all. result.grammarLoadFailedExtensions (see
+  // src/test-diff-separator.ts) reports the same signal mutate.ts already
+  // refuses to mutate through; checked here the same way unwarmedExtensions
+  // already is, right below, so a load failure is loud everywhere this
+  // scanner runs, not only in mutation.
+  if (result.grammarLoadFailedExtensions.length > 0) {
+    const languages = result.grammarLoadFailedExtensions.map((ext) => UNWARMED_LANGUAGE_NAMES[ext] ?? ext).join(", ");
+    return fail(
+      `test-diff: a ${languages} file in this diff was masked with the regex fallback because its tree-sitter ` +
+        "grammar failed to load for this process; the regex scanner may have missed a string, a comment, or an " +
+        "interpolation this project's tree-sitter service for that language would have caught. This is a bug in " +
+        "the environment or the gate, not in the commit; treat this run as unmeasured, not as clean.",
+    );
+  }
   if (result.unwarmedExtensions.length > 0) {
     // A reviewer caught this message naming Python unconditionally, for
     // any of the seven languages the flag now covers: a diff touching only

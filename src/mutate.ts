@@ -812,6 +812,14 @@ export function formatReportText(input: ReportInput): string {
     );
   } else if (input.attempted < input.planned) {
     lines.push("No attempted mutation survived, but the run stopped at the cap, so part of the selection is unmeasured.");
+  } else if (input.planned === 0) {
+    // Every other unmeasured reason above is checked and absent, so the
+    // only way to land here with zero planned mutations is that nothing
+    // selected gave this tool anything to break -- an empty selection, or
+    // a selection made entirely of files it does not recognise (see
+    // unrecognizedFiles above). Either way, this run made no attempt, and
+    // must not read as a suite that caught something it was never shown.
+    lines.push("No mutation was attempted: this tool made no breaks, so the suite caught nothing and this run proves nothing.");
   } else {
     lines.push("No mutation survived: every break this tool made was caught.");
   }

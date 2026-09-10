@@ -117,6 +117,32 @@ async function main(): Promise<void> {
   // plain synchronous separateTestDiff call, so a .py file in this diff
   // gets the tree-sitter mask instead of the regex fallback silently.
   const result = await separateTestDiffWarmed(diffText, { rules, readFileText });
+  // Same gap Finding 2 found in src/agent-adapter.ts's runTestDiffGate:
+  // this hook is the other production entry point that scans a commit's
+  // diff, and it read result.signals without ever checking whether a
+  // registered extension's grammar failed to load first. A file whose
+  // extension appears in grammarLoadFailedExtensions was scanned with the
+  // regex fallback reading its strings and comments as ordinary code, with
+  // nothing here to say so. Checked before the unwarmed check below for
+  // the same reason src/mutate.ts checks it ahead of everything else that
+  // depends on the mask: it is the harder failure to recover from, since
+  // no later call in this process can make the grammar load succeed.
+  if (result.grammarLoadFailedExtensions.length > 0) {
+    block(
+      `test-diff-post-tool-hook: a file in this diff (${result.grammarLoadFailedExtensions.join(", ")}) was ` +
+        "masked with the regex fallback because its tree-sitter grammar failed to load for this process; the " +
+        "regex scanner may have missed a string, a comment, or an interpolation this project's tree-sitter " +
+        "service for that language would have caught. This is a bug in the environment or the gate, not in the " +
+        "commit; treat this run as unmeasured, not as clean.",
+    );
+  }
+  if (result.unwarmedExtensions.length > 0) {
+    block(
+      `test-diff-post-tool-hook: a file in this diff (${result.unwarmedExtensions.join(", ")}) was masked before ` +
+        "its language service warmed; this is a bug in the gate itself, not in the commit; treat this run as " +
+        "unmeasured, not as clean.",
+    );
+  }
   if (result.signals.length === 0) {
     process.exit(0);
   }

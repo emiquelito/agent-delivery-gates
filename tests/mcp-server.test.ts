@@ -358,7 +358,7 @@ test("a request needing the Python grammar still gets a reply when the client cl
 // over every in-flight request with no timeout, no bound, no escape. Two
 // ways that goes wrong, driven here against the real subprocess through the
 // test-only "__test_stall__" method src/mcp-server.ts answers only when
-// ADG_MCP_ENABLE_TEST_STALL=1 (see its own comment for why that seam is
+// ADG_TEST_MCP_STALL=1 (see its own comment for why that seam is
 // safe to ship): a handler stalled on a promise a real timer keeps alive
 // hangs the process forever (Finding 1), and a handler stalled on a promise
 // with no active handle at all lets Node's own idle exit fire first,
@@ -367,7 +367,7 @@ test("a request needing the Python grammar still gets a reply when the client cl
 // milliseconds so these tests do not take the full bound to prove their
 // point.
 
-const STALL_ENV = { ADG_MCP_ENABLE_TEST_STALL: "1", ADG_MCP_DRAIN_TIMEOUT_MS: "300" };
+const STALL_ENV = { ADG_TEST_MCP_STALL: "1", ADG_MCP_DRAIN_TIMEOUT_MS: "300" };
 
 test("Finding 1: a handler stalled on a live timer does not hang the process forever; it answers and exits within the drain bound", async () => {
   const s = new Session(REPO_ROOT, STALL_ENV);

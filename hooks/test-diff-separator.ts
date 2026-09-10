@@ -361,6 +361,32 @@ function signalBlock(result: SeparateResult): string[] {
   return lines;
 }
 
+/** Same reasoning as exemptBlock above, for the two ways a mask can be
+ * less than fully trustworthy: see Finding 2's grammarLoadFailedExtensions
+ * and unwarmedExtensions on SeparateResult. This CLI has no gate to fail
+ * loudly the way src/agent-adapter.ts's runTestDiffGate and
+ * hooks/test-diff-post-tool-hook.ts now do, but a clean-looking run whose
+ * mask was not trustworthy for some of what it scanned must still say so,
+ * not read the same as a run that scanned everything cleanly. */
+function warningBlock(result: SeparateResult): string[] {
+  const lines: string[] = [];
+  if (result.grammarLoadFailedExtensions.length > 0) {
+    lines.push(
+      `Warning: grammar failed to load for ${result.grammarLoadFailedExtensions.join(", ")}; those files were ` +
+        "scanned with the regex fallback and may have missed a string, a comment, or an interpolation. Treat " +
+        "this result as unmeasured for those files, not as clean.",
+    );
+  }
+  if (result.unwarmedExtensions.length > 0) {
+    lines.push(
+      `Warning: ${result.unwarmedExtensions.join(", ")} file(s) were masked before their language service ` +
+        "warmed; this result may be less accurate than usual for those files.",
+    );
+  }
+  if (lines.length > 0) lines.push("");
+  return lines;
+}
+
 function formatText(result: SeparateResult): string {
   const lines: string[] = ["Source diff:"];
   if (result.sourceFiles.length === 0) {
@@ -374,6 +400,7 @@ function formatText(result: SeparateResult): string {
     lines.push("Test diff: no test files changed.");
     lines.push("");
     lines.push(...exemptBlock(result));
+    lines.push(...warningBlock(result));
     // A signal can still exist with no test file in the diff: a test renamed
     // out of the naming rules leaves nothing classified as a test, and that
     // rename is the whole point. Returning early hid it.
@@ -390,6 +417,7 @@ function formatText(result: SeparateResult): string {
   lines.push("");
 
   lines.push(...exemptBlock(result));
+  lines.push(...warningBlock(result));
   lines.push(...signalBlock(result));
   return lines.join("\n");
 }

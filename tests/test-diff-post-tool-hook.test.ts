@@ -23,9 +23,14 @@ interface RunResult {
   stderr: string;
 }
 
-function runHook(input: unknown, cwd?: string): RunResult {
+function runHook(input: unknown, cwd?: string, env?: Record<string, string>): RunResult {
   const stdin = typeof input === "string" ? input : JSON.stringify(input);
-  const result = spawnSync("node", [HOOK_PATH], { input: stdin, encoding: "utf8", cwd, env: process.env });
+  const result = spawnSync("node", [HOOK_PATH], {
+    input: stdin,
+    encoding: "utf8",
+    cwd,
+    env: env === undefined ? process.env : { ...process.env, ...env },
+  });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
@@ -187,5 +192,57 @@ test("a config that only breaks once compiled exits 2, not 1, with no raw stack 
     assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
     assert.notEqual(result.stderr.trim(), "");
     assert.doesNotMatch(result.stderr, /at compileFragments|at separateTestDiff/, "stderr must not be a raw stack trace");
+  });
+});
+
+// --- Finding 2: a grammar load failure must be loud here too -----------
+
+// This hook is the actual PostToolUse gate wired into this project's own
+// Claude Code settings, a second production entry point reading
+// separateTestDiffWarmed's result besides src/agent-adapter.ts's
+// runTestDiffGate. Before this fix it read result.signals without ever
+// checking whether a registered extension's grammar had failed to load,
+// so a Python (or any tree-sitter-backed language) commit whose grammar
+// could not be trusted was scanned with the regex fallback and let
+// through silently. ADG_TEST_FORCE_GRAMMAR_FAILURE (see src/code-mask.ts)
+// reaches the same "load failed" path a missing devDependency would,
+// without touching node_modules; a subprocess is required because that
+// variable is read once at module load.
+const DOCSTRING_SOURCE = [
+  "def test_discount():",
+  '    """',
+  "    Compute the discount. True and False are the boolean literals,",
+  "    and 'and'/'or' are the connectives, kept here on purpose.",
+  '    """',
+  "    assert discount(100, True) == 90",
+  "",
+].join("\n");
+
+test("Finding 2: a .py commit whose grammar failed to load exits 2, naming the failure", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/test_discount.py", DOCSTRING_SOURCE);
+    writeFileSync(join(dir, "tests/test_discount.py"), `${DOCSTRING_SOURCE}\n`);
+    runGit(dir, ["add", "tests/test_discount.py"]);
+    runGit(dir, ["commit", "-q", "-m", "touch the docstring file"]);
+    const result = runHook(
+      { tool_name: "Bash", tool_input: { command: "git commit -m 'x'" }, cwd: dir },
+      dir,
+      { ADG_TEST_FORCE_GRAMMAR_FAILURE: ".py" },
+    );
+    assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    assert.match(result.stderr, /grammar failed to load/);
+    assert.match(result.stderr, /\.py/);
+    assert.match(result.stderr, /unmeasured, not as clean/);
+  });
+});
+
+test("Finding 2: the same commit with no forced failure is scanned normally (control)", () => {
+  withTempRepo((dir) => {
+    commitFile(dir, "tests/test_discount.py", DOCSTRING_SOURCE);
+    writeFileSync(join(dir, "tests/test_discount.py"), `${DOCSTRING_SOURCE}\n`);
+    runGit(dir, ["add", "tests/test_discount.py"]);
+    runGit(dir, ["commit", "-q", "-m", "touch the docstring file"]);
+    const result = runHook({ tool_name: "Bash", tool_input: { command: "git commit -m 'x'" }, cwd: dir }, dir);
+    assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   });
 });

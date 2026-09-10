@@ -16,6 +16,7 @@ import {
   warmLanguageServices,
   hadUnwarmedLanguageAccess,
   resetUnwarmedLanguageAccess,
+  hadLanguageLoadFailure,
 } from "./code-mask.ts";
 
 /** Reaches the scanner chosen for `path` on every call (see
@@ -330,6 +331,22 @@ export interface SeparateResult {
    * nothing outside this repository reads this field's name.
    */
   unwarmedExtensions: readonly string[];
+  /**
+   * The extensions (".py", ".rs", and so on) at least one file in this diff
+   * carried whose tree-sitter grammar was attempted, through
+   * `warmLanguageServices`, and failed to load for this process: see
+   * `hadLanguageLoadFailure` in src/code-mask.ts. Distinct from
+   * `unwarmedExtensions` above -- that one means nobody asked the grammar
+   * to load yet; this one means the load was tried and did not succeed, so
+   * no later call in this process is going to fix it either. A file whose
+   * extension appears here was scanned with the regex fallback reading
+   * every string, comment, and interpolation as ordinary code, the same
+   * gap src/mutate.ts already refuses to mutate through (see
+   * grammarUnavailablePaths there). Reported unconditionally, found or
+   * not, for the same reason unwarmedExtensions is: a degraded run that
+   * reads like a clean one is the failure this project exists to catch.
+   */
+  grammarLoadFailedExtensions: readonly string[];
 }
 
 /** Renders one signal as the CLI's text-format line: `id severity file: message`. */
@@ -1316,7 +1333,24 @@ function separateTestDiffBody(diffText: string, options: SeparateOptions): Separ
     exemptFiles,
     exemptCount: exemptFiles.length,
     unwarmedExtensions: hadUnwarmedLanguageAccess(),
+    grammarLoadFailedExtensions: grammarLoadFailedExtensionsIn(files.map((file) => file.path)),
   };
+}
+
+/** The extensions among `paths` whose tree-sitter grammar failed to load
+ * for this process: see `hadLanguageLoadFailure` in src/code-mask.ts and
+ * `grammarLoadFailedExtensions` on `SeparateResult` above. Sorted and
+ * deduplicated, in the same form `unwarmedExtensions` already returns, so a
+ * caller can report either the same way. */
+function grammarLoadFailedExtensionsIn(paths: readonly string[]): string[] {
+  const found = new Set<string>();
+  for (const path of paths) {
+    const lower = path.toLowerCase();
+    const dot = lower.lastIndexOf(".");
+    const ext = dot === -1 ? "" : lower.slice(dot);
+    if (ext !== "" && hadLanguageLoadFailure(ext)) found.add(ext);
+  }
+  return [...found].sort();
 }
 
 /**

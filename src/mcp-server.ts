@@ -315,6 +315,26 @@ async function runSeparateTestDiff(args: Record<string, unknown>, ctx: McpContex
   lines.push(result.signals.length === 0 ? "Signals: none found." : `Signals (${result.signals.length}):`);
   for (const signal of result.signals) lines.push(`  ${formatSignalText(signal)}`);
 
+  // This server is advisory (see SERVER_INSTRUCTIONS below): it never
+  // blocks anything, so it has no gate to fail loudly the way
+  // src/agent-adapter.ts's runTestDiffGate and
+  // hooks/test-diff-post-tool-hook.ts now do (see Finding 2). What it can
+  // still do is say when its own answer is not trustworthy, the same
+  // reasoning that already applies to a summary with no gate behind it.
+  if (result.grammarLoadFailedExtensions.length > 0) {
+    lines.push(
+      `Warning: this diff touches ${result.grammarLoadFailedExtensions.join(", ")} file(s) whose grammar ` +
+        "failed to load; those were scanned with the regex fallback and may have missed a string, a comment, " +
+        "or an interpolation. Treat this result as unmeasured for those files, not as clean.",
+    );
+  }
+  if (result.unwarmedExtensions.length > 0) {
+    lines.push(
+      `Warning: this diff touches ${result.unwarmedExtensions.join(", ")} file(s) masked before their language ` +
+        "service warmed; this result may be less accurate than usual for those files.",
+    );
+  }
+
   return textResult(lines.join("\n"), false);
 }
 
@@ -476,10 +496,16 @@ export async function handleLine(raw: string, ctx: McpContext): Promise<string |
 
 // --- Test-only stall seam ----------------------------------------------------
 //
+// See docs/test-only-env-vars.md for what an ADG_TEST_* variable is and is
+// not allowed to do; this one conforms by selecting between two already-real
+// ways a promise can stall (see stallForever below), gated behind a method
+// this server never advertises, so reaching it at all takes a caller that
+// already knows the name.
+//
 // A method this server never advertises: absent from TOOLS, from
 // handleToolsList, from every template this project ships, and answered
 // with the ordinary "unknown method" error unless
-// ADG_MCP_ENABLE_TEST_STALL=1 is set in the environment, which nothing this
+// ADG_TEST_MCP_STALL=1 is set in the environment, which nothing this
 // project ships ever sets. It exists so tests/mcp-server.test.ts can drive
 // the real subprocess in hooks/mcp-server.ts against a request that truly
 // never resolves, the only way to prove that file's close-handler drain is
@@ -508,7 +534,7 @@ function stallForever(mode: unknown): Promise<never> {
 async function dispatch(method: string, msg: ParsedMessage, ctx: McpContext): Promise<string | null> {
   switch (method) {
     case "__test_stall__": {
-      if (process.env.ADG_MCP_ENABLE_TEST_STALL !== "1") {
+      if (process.env.ADG_TEST_MCP_STALL !== "1") {
         return err(msg.id, errorObj(-32601, `unknown method '${method}'`));
       }
       const params = typeof msg.params === "object" && msg.params !== null ? (msg.params as Record<string, unknown>) : {};

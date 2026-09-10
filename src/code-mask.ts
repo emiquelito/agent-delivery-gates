@@ -488,9 +488,13 @@ const grammarLoadFailures = new Set<string>();
 // exactly those extensions -- the same code path a real failed import
 // takes, `grammarLoadFailures` included, just reached without deleting or
 // moving a single file. Read once at module load, the same way this
-// project already reads ADG_MCP_ENABLE_TEST_STALL in src/mcp-server.ts for
+// project already reads ADG_TEST_MCP_STALL in src/mcp-server.ts for
 // an identical reason: a name a real adopter is never going to set by
-// accident, doing nothing unless a test deliberately sets it.
+// accident, doing nothing unless a test deliberately sets it. See
+// docs/test-only-env-vars.md for what an ADG_TEST_* variable is and is not
+// allowed to do; this one conforms by picking a branch the real loader
+// already has, at the one point that loader is called, with everything
+// downstream reading the same recorded failure a real one would leave.
 const FORCED_GRAMMAR_FAILURES: ReadonlySet<string> = new Set(
   (process.env.ADG_TEST_FORCE_GRAMMAR_FAILURE ?? "")
     .split(",")
