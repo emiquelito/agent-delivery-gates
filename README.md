@@ -98,6 +98,32 @@ on a new project, which has nothing to record; on its own, without
 Copilot; if one is already there it prints the template's content for a
 person to merge in by hand.
 
+## 🖥️ Platforms
+
+| OS | Node | Result |
+|---|---|---|
+| Linux | 22 | passes |
+| macOS | 22 | passes |
+| Linux | 24 | passes |
+| Windows | 22 | passes, with a few tests skipped (see below) |
+| Windows | 23, 24 | broken on exit (see below); use Node 22 |
+
+Node 22.18 or newer is required on every platform.
+
+On Windows, a few tests are skipped for a real limitation: Windows has no
+way to deliver an interrupt to another process the way Unix does. Asking
+Node to send one terminates the target process instead of letting its own
+interrupt handler run, so those particular tests cannot pass as written on
+this platform. A real Ctrl-C typed in a terminal takes a different route
+and does reach the handler, so ordinary use is unaffected; what is skipped
+is only the path that simulates sending the signal from outside, which is
+not tested on Windows.
+
+Windows on Node 23 and 24 hits an unfixed Node bug that aborts these tools
+on exit (nodejs/node#56645). It is merged into Node's main branch but not
+backported to any released Node 24. Node 22 is not affected. Use Node 22
+on Windows until a fixed Node 24 ships.
+
 <a id="the-mcp-server"></a>
 
 ## 🧩 The MCP server

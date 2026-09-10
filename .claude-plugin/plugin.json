@@ -1,7 +1,7 @@
 {
   "name": "agent-delivery-gates",
   "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Evandro Miquelito"
   },
