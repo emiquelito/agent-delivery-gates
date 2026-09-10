@@ -37,7 +37,7 @@
 
 import process from "node:process";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, statSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { spawnCommand, reraiseSignal } from "../src/spawn-command.ts";
 import {
@@ -61,7 +61,7 @@ import {
   resolveRepoRoot,
   unstagedDirtyLines,
 } from "../src/clean-tree-gate.ts";
-import { resolveWithinRoot } from "../src/path-allowlist.ts";
+import { resolveWithinRoot, realPath } from "../src/path-allowlist.ts";
 
 const DEFAULT_MAX = 25;
 
@@ -399,7 +399,7 @@ function toRepoRelative(path: string, repoRoot: string): string {
   // path, so comparing it with a candidate that still carries the symlinks
   // it was reached through refused files that were inside the repository
   // all along.
-  const found = resolveWithinRoot(repoRoot, path, realpathSync, process.cwd());
+  const found = resolveWithinRoot(repoRoot, path, realPath, process.cwd());
   if (!found.contained) {
     fail(`'${path}' is outside the repository at ${found.realRoot}`);
   }

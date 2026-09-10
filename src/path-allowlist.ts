@@ -12,6 +12,7 @@
 // string is wrong because a symlink can point it somewhere else.
 
 import { dirname, basename, join, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
 
 /** Check ids this core can produce, as a union in the same form
  * tests/catalog-code-seam.test.ts reads out of report-validator.ts and
@@ -23,6 +24,27 @@ export type CheckId = "path-allowlist-confinement";
  * not exist, the same contract as node:fs's realpathSync. Injected so the
  * core stays testable without touching a filesystem. */
 export type PathResolver = (path: string) => string;
+
+/**
+ * The resolver every caller in this codebase should inject: node:fs's
+ * *native* realpath, not the plain one.
+ *
+ * `fs.realpathSync` is a JS-level walk that only ever follows symlinks; it
+ * has no notion of a Windows 8.3 short name (`RUNNER~1`) and leaves one
+ * untouched, because expanding one isn't a symlink operation, it's asking
+ * the OS what a name really refers to. `git rev-parse --show-toplevel`, by
+ * contrast, is a real Windows API call under the hood and always answers
+ * with the long form. Feed one side of a containment check through the
+ * plain resolver and the other through git, and the two sides are spelled
+ * from two different sources of truth that happen to agree everywhere
+ * except a runner whose profile directory got a short name, exactly the
+ * Windows CI runner this project ships to. `realpathSync.native` calls
+ * the same OS canonicalization git relies on (`realpath(3)` on
+ * POSIX, `GetFinalPathNameByHandleW` on Windows), so both sides of every
+ * comparison in this file are built from the same authority instead of two
+ * different ones that usually happen to match.
+ */
+export const realPath: PathResolver = (path) => realpathSync.native(path);
 
 export interface PathAllowlistDecision {
   allowed: boolean;

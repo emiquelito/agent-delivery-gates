@@ -5,9 +5,9 @@
 // ignored a marker the CLI honoured, which is two implementations of one
 // decision, a mistake this project has now made four times.
 
-import { openSync, readSync, closeSync, realpathSync } from "node:fs";
+import { openSync, readSync, closeSync } from "node:fs";
 import { resolve } from "node:path";
-import { resolveWithinRoot, type PathResolver } from "./path-allowlist.ts";
+import { resolveWithinRoot, realPath, type PathResolver } from "./path-allowlist.ts";
 
 /** How much of a file to read. The marker has to be near the top anyway. */
 const FILE_HEAD_BYTES = 64 * 1024;
@@ -34,7 +34,7 @@ const FILE_HEAD_BYTES = 64 * 1024;
  */
 export function makeFileTextReader(
   repoRoot: string,
-  resolver: PathResolver = realpathSync,
+  resolver: PathResolver = realPath,
 ): (path: string) => string | undefined {
   const cache = new Map<string, string | undefined>();
   // Made absolute once, so a relative repoRoot cannot be joined to itself

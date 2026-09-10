@@ -19,13 +19,13 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, symlinkSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, existsSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { makeFileTextReader } from "../src/repo-file-reader.ts";
-import { isInsideSystemTemp, resolveWithinRoot } from "../src/path-allowlist.ts";
+import { isInsideSystemTemp, resolveWithinRoot, realPath } from "../src/path-allowlist.ts";
 import { runInit } from "../src/init.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -58,10 +58,12 @@ const SOURCE = `export function pick(a, b) {
  * Builds a committed git repository and a symlink pointing at it, and
  * returns both names for the same tree plus a directory outside it.
  *
- * The temp directory is passed through realpathSync first, so the "real"
- * name here is really link-free even on a machine whose temp directory
- * is itself a symlink. Otherwise a test could pass on Linux for the wrong
- * reason and say nothing about the case it exists for.
+ * The temp directory is passed through realPath (the same native realpath
+ * production code uses) first, so the "real" name here is really link-free
+ * even on a machine whose temp directory is itself a symlink, and really
+ * long-form even on a machine whose temp directory is itself an 8.3 short
+ * name. Otherwise a test could pass on Linux for the wrong reason and say
+ * nothing about the case it exists for.
  *
  * The whole `base` directory is scheduled for removal on `t.after`, passing
  * or failing. That is safe even though some fixtures built on top of it
@@ -72,7 +74,7 @@ const SOURCE = `export function pick(a, b) {
  * paths actually rooted under `base` are ever deleted.
  */
 function buildSymlinkedRepo(t: TestContext): { real: string; linked: string; outside: string } {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "adg-symlink-")));
+  const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const real = join(base, "realrepo");
   const linked = join(base, "linkrepo");
@@ -171,7 +173,7 @@ test("the file reader still refuses a link out of the repository and a path outs
 // --- init --dir ---------------------------------------------------------------
 
 test("init writes into a target directory named through a symlink", (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "adg-symlink-init-")));
+  const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-init-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const real = join(base, "project");
   const linked = join(base, "projectlink");
@@ -187,7 +189,7 @@ test("init writes into a target directory named through a symlink", (t) => {
 });
 
 test("init still refuses to write through a directory that links out of the target", (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "adg-symlink-init-deny-")));
+  const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-init-deny-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const target = join(base, "project");
   const elsewhere = join(base, "elsewhere");
@@ -209,22 +211,22 @@ test("init still refuses to write through a directory that links out of the targ
 test("a not-yet-created path inside the root is accepted, outside it is refused", (t) => {
   const { real, linked, outside } = buildSymlinkedRepo(t);
 
-  const inside = resolveWithinRoot(real, join(linked, "src", "new-file.mjs"), realpathSync, real);
+  const inside = resolveWithinRoot(real, join(linked, "src", "new-file.mjs"), realPath, real);
   assert.equal(inside.contained, true);
   assert.equal(inside.realPath, join(real, "src", "new-file.mjs"));
 
-  const beyond = resolveWithinRoot(real, join(outside, "new-file.mjs"), realpathSync, real);
+  const beyond = resolveWithinRoot(real, join(outside, "new-file.mjs"), realPath, real);
   assert.equal(beyond.contained, false);
 
   // A path that does not exist yet whose parent links out of the root: the
   // parent is what resolves, so the whole thing lands outside.
   symlinkSync(outside, join(real, "src", "away"));
-  const throughLink = resolveWithinRoot(real, join(linked, "src", "away", "new-file.mjs"), realpathSync, real);
+  const throughLink = resolveWithinRoot(real, join(linked, "src", "away", "new-file.mjs"), realPath, real);
   assert.equal(throughLink.contained, false);
 });
 
 test("a sibling directory whose name starts with the root's name is not inside it", (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "adg-symlink-sibling-")));
+  const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-sibling-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const root = join(base, "repo");
   const sibling = join(base, "repo-evil");
@@ -232,30 +234,30 @@ test("a sibling directory whose name starts with the root's name is not inside i
   mkdirSync(sibling, { recursive: true });
   writeFileSync(join(sibling, "f.txt"), "x\n");
 
-  const decision = resolveWithinRoot(root, join(sibling, "f.txt"), realpathSync, base);
+  const decision = resolveWithinRoot(root, join(sibling, "f.txt"), realPath, base);
   assert.equal(decision.contained, false);
 });
 
 // --- census's temporary worktree check ----------------------------------------
 
 test("census's worktree check refuses anything outside the system temp directory", (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "adg-symlink-temp-")));
+  const base = realPath(mkdtempSync(join(tmpdir(), "adg-symlink-temp-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   // The directory a run actually makes: inside the temp directory, accepted.
-  assert.equal(isInsideSystemTemp(base, tmpdir(), realpathSync, process.cwd()), true);
+  assert.equal(isInsideSystemTemp(base, tmpdir(), realPath, process.cwd()), true);
 
   // The temp directory itself: refused. A removal aimed at the whole temp
   // directory is never what was meant.
-  assert.equal(isInsideSystemTemp(tmpdir(), tmpdir(), realpathSync, process.cwd()), false);
+  assert.equal(isInsideSystemTemp(tmpdir(), tmpdir(), realPath, process.cwd()), false);
 
   // A directory that is not under the temp directory at all: refused.
-  assert.equal(isInsideSystemTemp(homedir(), tmpdir(), realpathSync, process.cwd()), false);
+  assert.equal(isInsideSystemTemp(homedir(), tmpdir(), realPath, process.cwd()), false);
 
   // A name under the temp directory that links out of it: still refused,
   // which is the half resolving must not give away.
   const link = join(base, "escape");
   symlinkSync(homedir(), link);
-  assert.equal(isInsideSystemTemp(link, tmpdir(), realpathSync, process.cwd()), false);
+  assert.equal(isInsideSystemTemp(link, tmpdir(), realPath, process.cwd()), false);
 });
 
 test("census removes its worktree and leaves the repository alone, from a symlinked path", (t) => {

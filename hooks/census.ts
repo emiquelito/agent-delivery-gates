@@ -43,7 +43,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -70,7 +69,7 @@ import {
 } from "../src/census.ts";
 import { classifyTestPath } from "../src/test-diff-separator.ts";
 import { formatDirtyTreeMessage, getGitStatus, resolveRepoRoot } from "../src/clean-tree-gate.ts";
-import { isInsideSystemTemp, resolveWithinRoot } from "../src/path-allowlist.ts";
+import { isInsideSystemTemp, resolveWithinRoot, realPath } from "../src/path-allowlist.ts";
 
 const USAGE = `Usage: census [--base REF] [--command CMD] [--format text|json]
               [--format-in tap|junit] [--timeout SECONDS] [--no-rerun]
@@ -533,7 +532,7 @@ function removeWorktree(repoRoot: string, worktree: Worktree): void {
   // directory this run created on macOS, where the temp directory is a
   // symlink into /private.
   const tmpRoot = resolve(worktree.tmpRoot);
-  if (!isInsideSystemTemp(worktree.tmpRoot, tmpdir(), realpathSync, process.cwd())) {
+  if (!isInsideSystemTemp(worktree.tmpRoot, tmpdir(), realPath, process.cwd())) {
     process.stderr.write(
       `census: refusing to remove '${worktree.tmpRoot}', which is not inside the system temp directory\n`,
     );
@@ -667,7 +666,7 @@ function copyTestFilesInto(repoRoot: string, worktreeDir: string, paths: string[
     // hold yet resolves to its nearest existing ancestor with the rest
     // reattached, so a file about to be created passes while a path whose
     // parent links out of the worktree does not.
-    const found = resolveWithinRoot(worktreeDir, path, realpathSync, worktreeDir);
+    const found = resolveWithinRoot(worktreeDir, path, realPath, worktreeDir);
     if (!found.contained || found.realPath === found.realRoot) {
       fail(`'${path}' resolves outside the base worktree; refusing to write there`);
     }

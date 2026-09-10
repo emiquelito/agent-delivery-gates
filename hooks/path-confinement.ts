@@ -16,10 +16,9 @@
 
 import process from "node:process";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter } from "node:path";
-import { checkPathAllowed } from "../src/path-allowlist.ts";
+import { checkPathAllowed, realPath } from "../src/path-allowlist.ts";
 import { readAllStdin, parseHookInput,
   isMutatingTool,
 } from "../src/clean-tree-gate.ts";
@@ -122,7 +121,7 @@ function main(): void {
 
   // checkPathAllowed never throws: a path it cannot resolve comes back as a
   // denied decision carrying its own message, which block() below reports.
-  const decision = checkPathAllowed(candidate, roots, realpathSync, workingDir);
+  const decision = checkPathAllowed(candidate, roots, realPath, workingDir);
 
   if (decision.allowed) {
     allow();

@@ -899,11 +899,16 @@ test("a real Ctrl-C (SIGINT) to the induce process leaves no descendant running"
     }
   } finally {
     // A worker just SIGINTed or SIGKILLed can still hold a Windows
-    // directory handle open for a few dozen milliseconds after the OS
-    // reports the process gone, and a bare rmSync lands inside that
-    // window often enough to fail with EBUSY. maxRetries/retryDelay give
-    // the handle time to actually let go instead of racing it once.
-    rmSync(pidDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // directory handle open for a while after the OS reports the process
+    // gone (every pid this test tracks is confirmed dead by
+    // waitForNoneAlive above; nothing is still running), and a bare
+    // rmSync lands inside that window often enough to fail with EBUSY.
+    // maxRetries/retryDelay give the handle time to actually let go
+    // instead of racing it once. 5 retries at 100ms (Node's own linear
+    // backoff: 100+200+300+400+500 = 1.5s) was still not enough on a
+    // real, loaded Windows runner; 10 at 300ms (up to 16.5s) gives the
+    // kernel a much longer window before this gives up for real.
+    rmSync(pidDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
 });

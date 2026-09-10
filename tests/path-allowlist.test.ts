@@ -14,11 +14,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkPathAllowed, resolveWithinRoot, type PathResolver } from "../src/path-allowlist.ts";
-import { mkdtempSync, writeFileSync, symlinkSync, realpathSync, rmSync } from "node:fs";
+import { checkPathAllowed, resolveWithinRoot, realPath, type PathResolver } from "../src/path-allowlist.ts";
+import { mkdtempSync, writeFileSync, symlinkSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { join, sep, dirname, extname } from "node:path";
+import { fileURLToPath } from "node:url";
 import process from "node:process";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(HERE, "..");
 
 /** Joins segments into an absolute path in the current platform's own
  * flavor: forward slashes rooted at "/" on POSIX, backslashes rooted at a
@@ -270,7 +274,7 @@ test("a real symlink out of the only allowed root is denied", (t) => {
       }
       throw err;
     }
-    const resolver: PathResolver = (p) => realpathSync(p);
+    const resolver: PathResolver = realPath;
     const inside = checkPathAllowed(join(root, "ok.txt"), [root], resolver, root);
     assert.equal(inside.allowed, true);
     const escaped = checkPathAllowed(join(link, "secret.txt"), [root], resolver, root);
@@ -280,4 +284,92 @@ test("a real symlink out of the only allowed root is denied", (t) => {
     rmSync(outside, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// --- pinning the Windows defect this file's `realPath` export exists for ----
+//
+// The three tests below run and mean something on any platform, not only
+// Windows: they do not depend on an 8.3 short name actually existing, only
+// on the mechanism of the bug it caused. A containment check compares a root
+// and a candidate, and both sides have to be canonicalized by the same
+// authority or "inside" stops meaning anything; one side canonicalized more
+// than the other reproduces the exact failure the Windows CI logs showed
+// (git's root already expanded, a plain fs.realpathSync-resolved cwd still
+// carrying a name git would have expanded further), whatever the two
+// spellings actually are on a given OS.
+
+test("two resolvers that disagree about one segment's canonical spelling break containment, the same mechanism as the actual Windows failure", () => {
+  // "RUNNER~1" only means something on Windows, but the mechanism does
+  // not: one resolver (standing in for git's root, already fully
+  // canonicalized) spells the middle segment "runneradmin"; the other
+  // (standing in for a caller that only resolved symlinks, the way plain
+  // fs.realpathSync does) still spells it "RUNNER~1". A real containment
+  // check has one resolver, so this models what happens when a root
+  // arrives pre-resolved by a more thorough authority than the one the
+  // candidate's own cwd was resolved through, not two different resolver
+  // functions in the same call.
+  const root = p("Users", "runneradmin", "Temp", "repo");
+  const cwd = p("Users", "RUNNER~1", "Temp", "repo");
+  const resolver = fakeResolver({
+    [root]: root,
+    // A fully canonicalizing resolver would map this short spelling to
+    // the same real directory as the long one above; leaving it mapped
+    // to itself stands in for fs.realpathSync's inability to expand an
+    // 8.3 name, so this resolver's "real path" of `cwd` is `cwd`,
+    // unexpanded, exactly what left the Windows candidate side one
+    // spelling short of the root's.
+    [cwd]: cwd,
+  });
+  // resolveWithinRoot trusts whatever the injected resolver says "real"
+  // means, so a resolver that only expands the root is the bug
+  // reproduced, not the fix exercised: containment reads as false for a
+  // file that is actually inside the repository.
+  const result = resolveWithinRoot(root, join(cwd, "src", "order.mjs"), resolver, cwd);
+  assert.equal(
+    result.contained,
+    false,
+    "this pins the defect: two different canonicalization authorities were expected to disagree here",
+  );
+});
+
+test("the same case, both sides canonicalized by the one authority realPath is, agrees", () => {
+  // Same setup, but the resolver expands the short spelling too, standing
+  // in for realPath (fs.realpathSync.native): once both sides go through
+  // one authority, the segments actually match and the file reads as
+  // inside its own repository.
+  const root = p("Users", "runneradmin", "Temp", "repo");
+  const cwd = p("Users", "RUNNER~1", "Temp", "repo");
+  const resolver = fakeResolver({ [root]: root, [cwd]: root });
+  const result = resolveWithinRoot(root, join(cwd, "src", "order.mjs"), resolver, cwd);
+  assert.equal(result.contained, true);
+  assert.equal(result.realPath, join(root, "src", "order.mjs"));
+});
+
+test("every production containment call site injects the shared realPath, never a bare fs.realpathSync", () => {
+  // The bug that produced 35 of 40 Windows failures was not in this file's
+  // logic; every test above it in this file already passed on Windows. It
+  // was that seven call sites each imported plain fs.realpathSync as the
+  // PathResolver instead of this module's realPath (fs.realpathSync.native):
+  // a JS-level symlink walk has no notion of an 8.3 short name and leaves
+  // one untouched, while git rev-parse --show-toplevel, a real Windows API
+  // call, always answers with the long form. That is a defect a Linux CI
+  // run cannot reproduce (there is no short name to disagree about), but a
+  // caller reverting to the plain import is a defect this can catch on any
+  // platform: the fix is "one resolver, used everywhere," and that claim
+  // can be checked directly with a grep, not merely trusted.
+  const skip = new Set(["path-allowlist.ts", "scan-prose.ts"]);
+  const offenders: string[] = [];
+  for (const dir of ["src", "hooks"]) {
+    const full = join(REPO_ROOT, dir);
+    for (const entry of readdirSync(full)) {
+      if (extname(entry) !== ".ts" || skip.has(entry)) continue;
+      const text = readFileSync(join(full, entry), "utf8");
+      // A bare "realpathSync" not immediately followed by ".native" and not
+      // part of the identifier "realPath" itself (this module's export).
+      if (/\brealpathSync\b(?!\.native)/.test(text)) {
+        offenders.push(`${dir}/${entry}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, []);
 });

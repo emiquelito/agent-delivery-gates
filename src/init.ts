@@ -14,14 +14,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { resolveWithinRoot } from "./path-allowlist.ts";
+import { resolveWithinRoot, realPath } from "./path-allowlist.ts";
 import {
   LANGUAGES,
   localWasmPath,
@@ -128,7 +127,7 @@ function writeOrPlan(
   // through a symlink, which is every scratch directory under /tmp on
   // macOS, then still reads as containing its own files, while a parent
   // that links out of the target directory still reads as outside it.
-  const found = resolveWithinRoot(targetDir, relPath, realpathSync, targetDir);
+  const found = resolveWithinRoot(targetDir, relPath, realPath, targetDir);
   if (!found.contained) {
     throw new Error(`refusing to write outside the target directory: '${found.realPath}'`);
   }

@@ -40,6 +40,16 @@ function withTempDir(fn: (dir: string) => void): void {
 
 const CREATED_FILES = [".githooks/pre-commit", "AGENTS.md", "docs/gate-tally.md"];
 
+/** Turns a repo-relative path written with "/" into a pattern that matches
+ * it in a CLI's printed report on either platform: init reports a path
+ * through node:path.join, which prints "\" on win32, while every path here
+ * is written as a "/"-separated literal for readability. Escaping first and
+ * only then swapping the separator keeps the escaped backslash the regex
+ * needs distinct from the literal "/" being replaced. */
+function relPattern(rel: string): string {
+  return rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\//g, "[\\\\/]");
+}
+
 // --- creates the expected files, in an empty directory ----------------------
 
 test("in an empty directory: creates every expected file, exits 0", () => {
@@ -211,7 +221,7 @@ test("run twice with no flags: the second run reports everything present, create
     const second = runInitCli(["--dir", dir]);
     assert.equal(second.status, 0, second.stderr);
     for (const rel of CREATED_FILES) {
-      assert.match(second.stdout, new RegExp(`exists, skipped: ${rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(second.stdout, new RegExp(`exists, skipped: ${relPattern(rel)}`));
       assert.equal(readFileSync(join(dir, rel), "utf8"), before[rel]);
     }
   });
@@ -348,9 +358,14 @@ test("--dir pointing at a path that does not exist: exits 2, writes nothing", ()
 // it, which is the one place that drop would show up.
 
 test("the packed tarball carries every template and preset init needs", () => {
+  // On Windows, "npm" on PATH is npm.cmd, a batch file; Windows can only
+  // execute a .cmd through cmd.exe, so spawning it the same way as every
+  // other binary in this file throws ENOENT (status null here, never 0 or
+  // a real exit code) with no shell in front of it.
   const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
+    shell: process.platform === "win32",
   });
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(result.stdout) as { files: { path: string }[] }[];

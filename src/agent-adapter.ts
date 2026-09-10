@@ -17,7 +17,7 @@
 
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { delimiter } from "node:path";
 import {
   ACCEPTED_PHASES,
@@ -27,7 +27,7 @@ import {
   resolvePhase,
   resolveRepoRoot,
 } from "./clean-tree-gate.ts";
-import { checkPathAllowed } from "./path-allowlist.ts";
+import { checkPathAllowed, realPath } from "./path-allowlist.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
 import { makeGitWholeFileReader } from "./git-blob-reader.ts";
 import { ConfigError, loadRuleSet, resolveConfigPath } from "./test-diff-config.ts";
@@ -213,7 +213,7 @@ export function runPathConfinementGate(payload: CanonicalPayload): AdapterDecisi
     }
   }
 
-  const decision = checkPathAllowed(filePath, roots, realpathSync, cwd);
+  const decision = checkPathAllowed(filePath, roots, realPath, cwd);
   if (decision.allowed) return allow();
   return deny("This file is outside the project's allowed paths.", decision.message);
 }

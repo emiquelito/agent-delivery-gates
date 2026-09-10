@@ -18,10 +18,10 @@
 // server -32603, and an unknown resource uri -32002 (used by resources/read
 // only; nothing else in this server needs it).
 
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { checkPathAllowed } from "./path-allowlist.ts";
+import { checkPathAllowed, realPath } from "./path-allowlist.ts";
 import { validateReport, formatFindingText } from "./report-validator.ts";
 import { separateTestDiffWarmed, formatSignalText, type RuleSet } from "./test-diff-separator.ts";
 import { makeGitWholeFileReader, resolveRangeRevisions } from "./git-blob-reader.ts";
@@ -161,7 +161,7 @@ interface DeniedPath {
  * local somewhere else, so the check runs on the resolved real path, never
  * on the string as given. */
 function resolveWithinWorkingDir(candidate: string, ctx: McpContext): ResolvedPath | DeniedPath {
-  const decision = checkPathAllowed(candidate, [ctx.workingDir], realpathSync, ctx.workingDir);
+  const decision = checkPathAllowed(candidate, [ctx.workingDir], realPath, ctx.workingDir);
   if (!decision.allowed) {
     return { ok: false, message: decision.message };
   }
