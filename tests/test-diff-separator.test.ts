@@ -1575,14 +1575,17 @@ test("the same capture group name in two DIFFERENT buckets is not a collision", 
   assert.doesNotThrow(() => compileRuleSet(rules));
 });
 
-test("a capture group name repeated in one fragment's own alternation is not flagged as cross-fragment", () => {
-  // (?<n>a)|(?<n>b) inside a SINGLE fragment string is already an invalid
-  // regex on its own -- the engine still throws on that, since it is not
-  // two fragments sharing a name, it is one fragment declaring the same
-  // name twice. Our own check is scoped to names reused ACROSS fragments,
-  // so this is left to the ordinary "invalid regex fragment" path below.
+test("a capture group name repeated in one fragment's own alternation is flagged by our own check, not left to the engine", () => {
+  // (?<n>a)|(?<n>b) inside a SINGLE fragment string used to be an invalid
+  // regex on its own, on every engine: two branches of one alternation
+  // declaring the same name twice. That stopped being reliable once the
+  // engine started permitting a shared name across alternation branches it
+  // judges mutually exclusive, which now includes this single-fragment
+  // case too. compileRuleSet no longer depends on the engine to catch this;
+  // it flags the repeat itself, ahead of ever compiling the joined
+  // pattern, so the result does not depend on which engine version runs it.
   const rules: RuleSet = { ...DEFAULT_RULES, skips: ["(?<n>a)|(?<n>b)"] };
-  assert.throws(() => compileRuleSet(rules), /invalid regex fragment/);
+  assert.throws(() => compileRuleSet(rules), /duplicate capture group name "n"/);
 });
 
 test("an empty rules bucket, from replace: [], never matches anything", () => {

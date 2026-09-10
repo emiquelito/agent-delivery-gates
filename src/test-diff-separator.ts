@@ -564,7 +564,8 @@ function namedCaptureGroupsIn(fragment: string): string[] {
 
 /**
  * Rejects a capture group name reused across two fragments in the same
- * bucket, before they are ever joined into one regex.
+ * bucket, or reused within a single fragment's own alternation, before any
+ * of it is ever joined into (or compiled as) one regex.
  *
  * Each fragment here is validated alone (see validateFragments in
  * src/test-diff-config.ts) and can compile cleanly on its own while still
@@ -572,20 +573,30 @@ function namedCaptureGroupsIn(fragment: string): string[] {
  * "|": two named groups sharing a name is ordinarily a SyntaxError, but only
  * across the SAME alternation, which is exactly what joining does and what
  * validating each fragment alone never exercises. Older JS engines threw on
- * every such collision; newer ones permit it when they judge the two
- * branches mutually exclusive, and what counts as "mutually exclusive" has
- * already widened once. Relying on the engine's judgment call to enforce a
- * contract that is really ours was an accident, not a design: two fragments
- * sharing a name means a finding's capture could be read from whichever
- * fragment the engine happened to match, our correctness problem regardless
- * of whether the engine throws. This check runs the same way on every Node
- * version, so it can never again depend on that judgment call changing
- * under it.
+ * every such collision, including a name repeated twice inside one
+ * fragment's own top-level alternation; newer ones permit it whenever they
+ * judge the branches mutually exclusive, and what counts as "mutually
+ * exclusive" has already widened once, to cover that single-fragment case
+ * too. Relying on the engine's judgment call to enforce a contract that is
+ * really ours was an accident, not a design: whether the repeat sits across
+ * two fragments or inside one, a finding's capture could be read from
+ * whichever branch the engine happened to match, our correctness problem
+ * regardless of whether the engine throws. This check runs the same way on
+ * every Node version, so it can never again depend on that judgment call
+ * changing under it.
  */
 function checkNoDuplicateCaptureGroups(bucket: RuleBucket, fragments: string[]): void {
   const declaredBy = new Map<string, string>();
   for (const fragment of fragments) {
+    const seenInFragment = new Set<string>();
     for (const name of namedCaptureGroupsIn(fragment)) {
+      if (seenInFragment.has(name)) {
+        throw new Error(
+          `duplicate capture group name "${name}" in rule bucket "${bucket}": fragment "${fragment}" declares it more than once in its own alternation, so a finding could read either branch's capture; give one branch a distinct name`,
+        );
+      }
+      seenInFragment.add(name);
+
       const earlier = declaredBy.get(name);
       if (earlier !== undefined && earlier !== fragment) {
         throw new Error(
