@@ -15,7 +15,7 @@ import {
   languageServiceFor,
   warmLanguageServices,
   hadUnwarmedPythonAccess,
-  resetUnwarmedPythonAccess,
+  resetUnwarmedLanguageAccess,
 } from "./code-mask.ts";
 
 /** Reaches the scanner chosen for `path` on every call (see
@@ -1181,7 +1181,7 @@ export function separateTestDiff(diffText: string, options: SeparateOptions = {}
   // in anything it calls), so nothing else in this process can run between
   // the reset below and the read at the bottom to blur one call's answer
   // into another's, however many other callers share this same process.
-  resetUnwarmedPythonAccess();
+  resetUnwarmedLanguageAccess();
   const ruleSet = options.rules ?? DEFAULT_RULES;
   const rules = ruleSet === DEFAULT_RULES ? DEFAULT_COMPILED : compileRuleSet(ruleSet);
   const files = parseDiff(diffText);

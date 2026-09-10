@@ -10,7 +10,12 @@
 // It lived in src/mutate.ts first. It moved here so test-diff could use it
 // without closing an import loop: src/mutate.ts already imports from
 // src/test-diff-separator.ts, so src/test-diff-separator.ts cannot import
-// from src/mutate.ts. This module imports nothing.
+// from src/mutate.ts. This module imports nothing that could reopen that
+// loop: src/tree-sitter-grammars.ts below is pure per-language data (node
+// type names, package and wasm file names), with no import of its own on
+// web-tree-sitter or any grammar package, so importing it here costs
+// nothing at module load and pulls in nothing mutate.ts or
+// test-diff-separator.ts would circle back through.
 //
 // KNOWN LIMIT, per line. A caller that hands over one line at a time cannot
 // be told about a string that opened on an earlier line:
@@ -24,6 +29,8 @@
 // fix it, and the diff callers have no whole file to hand in: a diff line is
 // all they hold. For a test file where this is common, the fixture marker
 // (`adg-test-diff: fixtures`) is the answer, not this scanner.
+
+import { GRAMMAR_SPECS } from "./tree-sitter-grammars.ts";
 
 /** A character that may appear inside an identifier. */
 export const IDENT_CHAR = /[A-Za-z0-9_$]/;
@@ -383,112 +390,204 @@ export const regexLanguageService: LanguageService = {
   maskNonCode,
 };
 
-// The tree-sitter-backed Python service, once loading it has been tried for
-// this process. `undefined` means "never tried yet", which is also this
-// module's initial state: nothing here imports web-tree-sitter or
-// tree-sitter-python at module load, so a process that never touches a
-// `.py` file never even attempts it. A value of `regexLanguageService`
-// here records a real, already-made decision: the load was tried and
-// failed (the dev dependencies are not installed), and falling back to the
-// regex scanner for `.py` files is what this project did before this
-// service existed, so that is the answer once and for all for this
-// process, not retried on every call.
-let pythonService: LanguageService | undefined;
+// --- the per-extension registry ------------------------------------------
+//
+// Finding 1 from three earlier builders of this phase: a single inline
+// `.py` check does not scale to six more languages. What it becomes
+// instead is one table, keyed by lowercase extension, from which a
+// seventh language is added by adding one more entry and, for anything
+// beyond Python's bespoke tree-sitter-python-service.ts, one more
+// GrammarSpec in src/tree-sitter-grammars.ts -- no new file, no touched
+// function here.
+//
+// Each entry is a *loader*, not a service: calling it is what imports
+// web-tree-sitter and evaluates a wasm file, so a repository with no file
+// of a given language never calls that language's entry and never pays
+// for it. Python keeps its own bespoke loader, wired to the module that
+// predates this registry and already has its own 1199-test history behind
+// it; every other language shares one generic loader
+// (loadTreeSitterLanguageService in src/tree-sitter-language-service.ts)
+// parameterised by that language's GrammarSpec.
+const TREE_SITTER_LOADERS: Readonly<Record<string, () => Promise<LanguageService>>> = {
+  ".py": async () => {
+    const { loadPythonLanguageService } = await import("./tree-sitter-python-service.ts");
+    return loadPythonLanguageService();
+  },
+  ...Object.fromEntries(
+    Object.entries(GRAMMAR_SPECS).map(([ext, spec]) => [
+      ext,
+      async () => {
+        const { loadTreeSitterLanguageService } = await import("./tree-sitter-language-service.ts");
+        return loadTreeSitterLanguageService(spec.packageName, spec.wasmFileName, spec.config);
+      },
+    ]),
+  ),
+};
+
+// One resolved service per extension, once loading it has been tried for
+// this process. A key absent from this map means "never tried yet",
+// which is also this module's initial state: nothing here imports
+// web-tree-sitter or any grammar package at module load, so a process
+// that never touches a file of a given language never even attempts it.
+// A value of `regexLanguageService` for a key records a real,
+// already-made decision: the load was tried and failed (the dev
+// dependency is not installed, or the wasm file failed to load), and
+// falling back to the regex scanner for that extension is what this
+// project did before that language's service existed, so that is the
+// answer once and for all for this process, not retried on every call.
+const resolvedServices = new Map<string, LanguageService>();
+
+function extensionOf(path: string): string {
+  const lower = path.toLowerCase();
+  const dot = lower.lastIndexOf(".");
+  return dot === -1 ? "" : lower.slice(dot);
+}
+
+async function resolveTreeSitterService(ext: string): Promise<LanguageService> {
+  const cached = resolvedServices.get(ext);
+  if (cached !== undefined) return cached;
+  const load = TREE_SITTER_LOADERS[ext];
+  let service = regexLanguageService;
+  if (load !== undefined) {
+    try {
+      service = await load();
+    } catch {
+      // No web-tree-sitter, no grammar package, or the wasm grammar
+      // itself failed to load: on any of those, a file of this
+      // extension gets exactly the scanner it always got, and nothing
+      // above this catch throws.
+      service = regexLanguageService;
+    }
+  }
+  resolvedServices.set(ext, service);
+  return service;
+}
 
 // Records a fact `languageServiceFor` cannot report through its own return
-// value: that a `.py` path was answered by the regex scanner not because
-// the load was tried and failed, but because nothing had asked it to try
-// yet. That distinction matters because a caller who never warms keeps
+// value: that a path was answered by the regex scanner not because the
+// load was tried and failed, but because nothing had asked it to try yet.
+// That distinction matters because a caller who never warms keeps
 // reintroducing the same bug this project has already hit more than once
 // (see planMutationsWarmed in src/mutate.ts, and src/agent-adapter.ts's
 // runTestDiffGate before this file's own history added a fourth, then a
 // fifth, warm call by hand). Set here, inside the one function every
 // caller already goes through, so the fact survives even a future caller
 // nobody adds a comment for. Cleared by `separateTestDiffWarmed`'s own
-// caller reading `resetUnwarmedPythonAccess`/`hadUnwarmedPythonAccess`
+// caller reading `resetUnwarmedLanguageAccess`/`hadUnwarmedLanguageAccess`
 // around one synchronous batch of work; see src/test-diff-separator.ts.
-let unwarmedPythonAccess = false;
+//
+// Generalised in this phase from a Python-only flag to one that covers
+// every tree-sitter-backed language in the registry above: the bug class
+// (a caller reads a mask before its grammar finished loading, and gets
+// the regex fallback silently) is the same bug for a `.rs` file as it was
+// for `.py`, so one flag answers "did this batch hit that bug for any
+// language it touched", not one flag per language. `SeparateResult`'s own
+// field keeps its historic name, `unwarmedPythonUsed`: existing callers
+// (src/agent-adapter.ts) and existing tests already read that name for
+// the Python case this flag first covered, and this phase does not
+// change what either one needs to say about a `.py` file, only what else
+// this same flag now also catches.
+let unwarmedLanguageAccess = false;
 
-/** True once this process has answered a `.py` mask request with the regex
- * scanner because `warmLanguageServices` had not yet resolved the Python
- * service for it -- not because the load was tried and failed. A caller
- * that always warms before asking (every production entry point this
- * project ships now does) never sets this; a caller that forgets to does,
- * silently or not. */
+// Re-entrancy guard for the reset/read pair above. `separateTestDiff`
+// documents itself as synchronous end to end specifically so that a
+// module-level flag can be reset before its own work and read back after,
+// with no other call able to run in between and blur one batch's answer
+// into another's. That invariant is enforced today only by that comment;
+// nothing fails if a future refactor adds an `await` somewhere in
+// separateTestDiff's call graph and lets two calls interleave. This flag
+// makes that failure loud instead of silent: a reset while a previous
+// batch's reset has not yet been matched by a read throws immediately,
+// instead of quietly letting the second batch's answer bleed into the
+// first's.
+let unwarmedAccessBatchOpen = false;
+
+/** True once this process has answered a mask request, for some file
+ * whose extension has a tree-sitter service, with the regex scanner
+ * because `warmLanguageServices` had not yet resolved that service for
+ * it -- not because the load was tried and failed. A caller that always
+ * warms before asking (every production entry point this project ships
+ * now does) never sets this; a caller that forgets to does, silently or
+ * not. Reading this closes the batch opened by
+ * `resetUnwarmedLanguageAccess`; see that function and
+ * `unwarmedAccessBatchOpen` above. */
 export function hadUnwarmedPythonAccess(): boolean {
-  return unwarmedPythonAccess;
+  unwarmedAccessBatchOpen = false;
+  return unwarmedLanguageAccess;
 }
 
 /** Clears the flag `hadUnwarmedPythonAccess` reports. Meant to be called
  * immediately before one synchronous batch of `languageServiceFor` calls,
  * so the flag it reports after that batch reflects only that batch, not
- * whatever ran earlier in this same process. Safe to call this way because
- * every reader of this flag is itself synchronous, start to finish: nothing
- * else can run between the reset and the read to blur one batch into
- * another. */
-export function resetUnwarmedPythonAccess(): void {
-  unwarmedPythonAccess = false;
-}
-
-async function resolvePythonService(): Promise<LanguageService> {
-  if (pythonService !== undefined) return pythonService;
-  try {
-    const { loadPythonLanguageService } = await import("./tree-sitter-python-service.ts");
-    pythonService = await loadPythonLanguageService();
-  } catch {
-    // No web-tree-sitter, no tree-sitter-python, or the wasm grammar itself
-    // failed to load: on any of those, a `.py` file gets exactly the
-    // scanner it always got, and nothing above this catch throws.
-    pythonService = regexLanguageService;
+ * whatever ran earlier in this same process. Safe to call this way
+ * because every reader of this flag is itself synchronous, start to
+ * finish: nothing else can run between the reset and the read to blur one
+ * batch into another. Throws if a previous batch's reset was never
+ * matched by a read -- see `unwarmedAccessBatchOpen` above -- which is
+ * this guard actually firing, not a bug in the guard. */
+export function resetUnwarmedLanguageAccess(): void {
+  if (unwarmedAccessBatchOpen) {
+    throw new Error(
+      "resetUnwarmedLanguageAccess called again before the previous batch's hadUnwarmedPythonAccess read. " +
+        "separateTestDiff must stay synchronous end to end for this flag to mean anything; an `await` was " +
+        "added somewhere in its call graph, letting two calls interleave.",
+    );
   }
-  return pythonService;
+  unwarmedAccessBatchOpen = true;
+  unwarmedLanguageAccess = false;
 }
 
 /**
  * Loads whichever language services a batch of files will actually need,
  * before any of them is scanned. `languageServiceFor` below is
- * synchronous, because both callers need to call it deep inside otherwise
- * synchronous, per-line and per-file logic; loading a WASM grammar is not
- * synchronous, so the load has to happen here, ahead of time, from a
- * caller that already knows every path it is about to process. A path
- * list with no `.py` file in it returns immediately having imported
- * nothing. Safe to call more than once: the second call for a process
- * that already resolved the Python service returns at once.
+ * synchronous, because every caller needs to call it deep inside
+ * otherwise synchronous, per-line and per-file logic; loading a WASM
+ * grammar is not synchronous, so the load has to happen here, ahead of
+ * time, from a caller that already knows every path it is about to
+ * process. A path list touching no registered extension returns
+ * immediately having imported nothing. Safe to call more than once: an
+ * extension already resolved for this process is skipped.
  */
 export async function warmLanguageServices(paths: readonly string[]): Promise<void> {
-  if (pythonService !== undefined) return;
-  if (!paths.some((path) => path.toLowerCase().endsWith(".py"))) return;
-  await resolvePythonService();
+  const toLoad = new Set<string>();
+  for (const path of paths) {
+    const ext = extensionOf(path);
+    if (ext in TREE_SITTER_LOADERS && !resolvedServices.has(ext)) toLoad.add(ext);
+  }
+  if (toLoad.size === 0) return;
+  await Promise.all([...toLoad].map((ext) => resolveTreeSitterService(ext)));
 }
 
 /**
  * The scanner for one file, chosen from its path, not from any state
- * carried between calls. Every extension other than `.py` gets the regex
- * scanner this file has always run, unchanged. A `.py` file gets the
- * tree-sitter-backed service when `warmLanguageServices` was able to load
- * it for this process, and the regex scanner otherwise, including for a
- * caller that never called `warmLanguageServices` at all: that keeps every
- * caller written before this function existed working exactly as it did.
+ * carried between calls. Every extension not in the registry gets the
+ * regex scanner this file has always run, unchanged. A registered
+ * extension gets its tree-sitter-backed service when `warmLanguageServices`
+ * was able to load it for this process, and the regex scanner otherwise,
+ * including for a caller that never called `warmLanguageServices` at all:
+ * that keeps every caller written before this function existed working
+ * exactly as it did.
  *
- * That last case is also what the bug `adg mutate` had looked like: a caller
- * that reads a `.py` file's mask without ever warming gets the regex
- * scanner's answer silently, with nothing to say the tree-sitter one was
- * available and simply never asked for. This function cannot fail loudly
- * on "never warmed" itself, because src/test-diff-separator.ts calls it
- * the same way, unwarmed, from tests that intend the regex fallback and
- * would break if this started throwing (verified: doing so failed 5 tests
- * in tests/test-diff-separator.test.ts). The fix belongs one level up, at
- * whichever function actually knows all the paths a batch of work is
- * about to touch: see `planMutationsWarmed` in src/mutate.ts, the single
- * warm-then-plan entry point every production caller of mutate's planner
- * now goes through, so which mask a `.py` file gets no longer depends on
- * an entry point remembering a second, separate call.
+ * That last case is also what the bug `adg mutate` had looked like: a
+ * caller that reads a registered file's mask without ever warming gets
+ * the regex scanner's answer silently, with nothing to say a better one
+ * was available and simply never asked for. This function cannot fail
+ * loudly on "never warmed" itself, because src/test-diff-separator.ts
+ * calls it the same way, unwarmed, from tests that intend the regex
+ * fallback and would break if this started throwing (verified: doing so
+ * failed 5 tests in tests/test-diff-separator.test.ts). The fix belongs
+ * one level up, at whichever function actually knows all the paths a
+ * batch of work is about to touch: see `planMutationsWarmed` in
+ * src/mutate.ts, the single warm-then-plan entry point every production
+ * caller of mutate's planner now goes through, so which mask a
+ * registered file gets no longer depends on an entry point remembering a
+ * second, separate call.
  */
 export function languageServiceFor(path: string): LanguageService {
-  if (path.toLowerCase().endsWith(".py")) {
-    if (pythonService !== undefined) return pythonService;
-    unwarmedPythonAccess = true;
-    return regexLanguageService;
-  }
+  const ext = extensionOf(path);
+  if (!(ext in TREE_SITTER_LOADERS)) return regexLanguageService;
+  const cached = resolvedServices.get(ext);
+  if (cached !== undefined) return cached;
+  unwarmedLanguageAccess = true;
   return regexLanguageService;
 }

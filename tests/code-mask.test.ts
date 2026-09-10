@@ -6,7 +6,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { codeMask, maskNonCode } from "../src/code-mask.ts";
+import {
+  codeMask,
+  maskNonCode,
+  languageServiceFor,
+  hadUnwarmedPythonAccess,
+  resetUnwarmedLanguageAccess,
+} from "../src/code-mask.ts";
 
 // --- codeMask, moved here with src/mutate.ts's scanner -----------------------
 
@@ -137,4 +143,64 @@ test("a literal's own quotes survive, because the rules match on them", () => {
   // Blanking the quote itself would stop those matching at all.
   assert.match(maskNonCode(`it 'adds numbers' do`), /it ' +' do/);
   assert.match(maskNonCode(`  skip "not ready"`), /skip " +"/);
+});
+
+// --- the per-extension registry ------------------------------------------
+
+test("languageServiceFor answers an unregistered extension with the regex scanner, and never touches the unwarmed flag", () => {
+  resetUnwarmedLanguageAccess();
+  const service = languageServiceFor("src/thing.js");
+  assert.equal(service.maskNonCode("a + 'b'"), maskNonCode("a + 'b'"), "still the regex scanner, unchanged");
+  assert.equal(hadUnwarmedPythonAccess(), false, "a .js path is not in the tree-sitter registry at all");
+});
+
+test("languageServiceFor answers a registered extension with the regex fallback when unwarmed, and records it", () => {
+  // Every one of the six languages this phase adds -- .rs, .rb, .php, .go,
+  // .java, .cs -- shares this same path with .py before it: unwarmed, the
+  // registry has never resolved a service for that extension, so the call
+  // falls back to the regex scanner exactly as it did before that
+  // language's service existed, and the fact that it did so unwarmed is
+  // recorded instead of lost silently.
+  resetUnwarmedLanguageAccess();
+  for (const path of ["src/thing.rs", "src/thing.rb", "src/thing.php", "src/thing.go", "src/thing.java", "src/thing.cs"]) {
+    const service = languageServiceFor(path);
+    assert.equal(service.maskNonCode("a + 'b'"), maskNonCode("a + 'b'"), `${path}: still the regex fallback`);
+  }
+  assert.equal(hadUnwarmedPythonAccess(), true, "every one of those paths was answered unwarmed");
+});
+
+// --- the re-entrancy guard -------------------------------------------------
+//
+// src/code-mask.ts's own comment on unwarmedAccessBatchOpen explains what
+// this guards against: separateTestDiff documents itself as synchronous
+// end to end specifically so that resetUnwarmedLanguageAccess and
+// hadUnwarmedPythonAccess can bracket one batch of work with nothing able
+// to run in between and blur one batch's answer into another's. Today
+// that invariant holds only because nothing in that call graph awaits
+// anything; if a future refactor added one, two overlapping batches could
+// interleave their resets, and without this guard the flag one batch
+// reads back could quietly belong to the other one instead. These tests
+// simulate exactly that interleaving without needing an actual `await` to
+// land in production code to prove it.
+
+test("resetUnwarmedLanguageAccess throws when called again before the previous batch's read", () => {
+  resetUnwarmedLanguageAccess();
+  assert.throws(
+    () => resetUnwarmedLanguageAccess(),
+    /called again before the previous batch/,
+    "a second reset before the first batch's hadUnwarmedPythonAccess call must fail loudly",
+  );
+  // Closing the batch the first reset opened, so this test does not leave
+  // the module-level guard open for whatever test runs after it in this
+  // same file/process.
+  hadUnwarmedPythonAccess();
+});
+
+test("resetUnwarmedLanguageAccess works normally again once the previous batch's read has happened", () => {
+  resetUnwarmedLanguageAccess();
+  languageServiceFor("src/thing.rs");
+  assert.equal(hadUnwarmedPythonAccess(), true, "closes the batch");
+  // A fresh, non-overlapping batch: no re-entrancy, so this must not throw.
+  resetUnwarmedLanguageAccess();
+  assert.equal(hadUnwarmedPythonAccess(), false, "a batch that touched nothing reports clean");
 });
