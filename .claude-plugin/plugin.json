@@ -1,5 +1,5 @@
 {
-  "name": "agent-delivery-gates",
+  "name": "adg",
   "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
   "version": "0.2.1",
   "author": {

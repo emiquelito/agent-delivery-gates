@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // CLI entry point for the version check. Compares the version string carried
-// by package.json, .claude-plugin/plugin.json, and package-lock.json's root
-// version field, and fails when they disagree.
+// by package.json, the Claude, Codex, and Copilot plugin manifests,
+// gemini-extension.json, and package-lock.json's root version field, and
+// fails when they disagree.
 //
-// Three files each carry this project's version, and nothing kept them in
+// Six files each carry this project's version, and nothing kept them in
 // step before this: the plugin manifest once drifted three releases behind
 // before anyone noticed. This is a report, not a hook: it lives in
 // scripts/, not hooks/, which holds tools that gate a tool call.
@@ -34,6 +35,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCES: { label: string; path: string }[] = [
   { label: "package.json", path: join(ROOT, "package.json") },
   { label: ".claude-plugin/plugin.json", path: join(ROOT, ".claude-plugin", "plugin.json") },
+  { label: ".codex-plugin/plugin.json", path: join(ROOT, ".codex-plugin", "plugin.json") },
+  { label: ".github/plugin/plugin.json", path: join(ROOT, ".github", "plugin", "plugin.json") },
+  { label: "gemini-extension.json", path: join(ROOT, "gemini-extension.json") },
   { label: "package-lock.json", path: join(ROOT, "package-lock.json") },
 ];
 

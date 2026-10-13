@@ -1,0 +1,21 @@
+{
+  "name": "adg",
+  "interface": {
+    "displayName": "Agent Delivery Gates"
+  },
+  "plugins": [
+    {
+      "name": "adg",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/emiquelito/agent-delivery-gates.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "adg",
+  "version": "0.2.1",
+  "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
+  "author": {
+    "name": "Evandro Miquelito",
+    "url": "https://github.com/emiquelito"
+  },
+  "homepage": "https://agentgates.dev/",
+  "repository": "https://github.com/emiquelito/agent-delivery-gates",
+  "license": "Apache-2.0",
+  "keywords": [
+    "code-review",
+    "testing",
+    "mutation-testing",
+    "git-hooks",
+    "quality"
+  ],
+  "interface": {
+    "displayName": "Agent Delivery Gates",
+    "shortDescription": "Green tests are not proof",
+    "longDescription": "Breaks your code on purpose and reports the breaks no test noticed, runs a change's new tests against the code from before it, and fails a delivery-report claim with nothing behind it.",
+    "developerName": "Evandro Miquelito",
+    "category": "Productivity",
+    "capabilities": [],
+    "websiteURL": "https://agentgates.dev/",
+    "defaultPrompt": [
+      "Run the delivery gates on this change.",
+      "Break this code on purpose and show what no test caught.",
+      "Check my delivery report against the proof obligations."
+    ],
+    "brandColor": "#111111"
+  }
+}

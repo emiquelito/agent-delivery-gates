@@ -28,7 +28,7 @@ function realVersion(): string {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 }
 
-test("the real repository has all three version files agreeing, and exits 0", () => {
+test("the real repository has all six version files agreeing, and exits 0", () => {
   const result = runCli([]);
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.match(result.stdout, new RegExp(`all agree on ${realVersion()}`));

@@ -1,5 +1,5 @@
 {
-  "name": "agent-delivery-gates",
+  "name": "adg",
   "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
   "owner": {
     "name": "Evandro Miquelito",
@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "name": "agent-delivery-gates",
+      "name": "adg",
       "source": "./",
       "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote."
     }

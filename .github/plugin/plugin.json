@@ -1,0 +1,20 @@
+{
+  "name": "adg",
+  "version": "0.2.1",
+  "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
+  "author": {
+    "name": "Evandro Miquelito",
+    "url": "https://github.com/emiquelito"
+  },
+  "homepage": "https://agentgates.dev/",
+  "repository": "https://github.com/emiquelito/agent-delivery-gates",
+  "license": "Apache-2.0",
+  "keywords": [
+    "code-review",
+    "testing",
+    "mutation-testing",
+    "git-hooks",
+    "quality"
+  ],
+  "category": "productivity"
+}

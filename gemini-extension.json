@@ -1,0 +1,12 @@
+{
+  "name": "agent-delivery-gates",
+  "version": "0.2.1",
+  "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
+  "contextFileName": "AGENTS.md",
+  "mcpServers": {
+    "agent-delivery-gates": {
+      "command": "node",
+      "args": ["${extensionPath}/hooks/mcp-server.ts"]
+    }
+  }
+}

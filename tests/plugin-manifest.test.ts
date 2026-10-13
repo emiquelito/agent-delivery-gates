@@ -37,7 +37,7 @@ function allCommands(): string[] {
 
 test("the plugin manifest carries the fields the loader needs", () => {
   const manifest = readJson<Record<string, unknown>>(".claude-plugin/plugin.json");
-  assert.equal(manifest.name, "agent-delivery-gates");
+  assert.equal(manifest.name, "adg");
   assert.equal(typeof manifest.description, "string");
   assert.equal(typeof manifest.version, "string");
 });
