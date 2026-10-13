@@ -10,7 +10,7 @@
 // says why, and says what a person would type to do it themselves.
 
 import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
 export interface SetupStep {
@@ -272,13 +272,13 @@ export function planSetup(opts: SetupOptions): SetupStep[] {
   }
 
   // 5. hooks path
-  const hookFile = join(".githooks", "pre-commit");
+  const hookFile = ".githooks/pre-commit";
   if (!repo) {
     steps.push({ id: "hooks-path", action: "skip", summary: "set core.hooksPath to .githooks", reason: "not a git repository" });
   } else {
     const current = git(targetDir, ["config", "--get", "core.hooksPath"]);
     const hooksDir = git(targetDir, ["rev-parse", "--git-path", "hooks"]);
-    const existingHook = hooksDir.ok && existsSync(join(targetDir, hooksDir.out, "pre-commit"));
+    const existingHook = hooksDir.ok && existsSync(resolve(targetDir, hooksDir.out, "pre-commit"));
     if (current.ok && current.out === ".githooks") {
       steps.push({ id: "hooks-path", action: "skip", summary: "set core.hooksPath to .githooks", reason: "already set to .githooks" });
     } else if (current.ok && current.out !== "") {
@@ -290,7 +290,7 @@ export function planSetup(opts: SetupOptions): SetupStep[] {
     } else if (existingHook) {
       steps.push({
         id: "hooks-path", action: "skip", summary: "set core.hooksPath to .githooks",
-        reason: `${join(hooksDir.out, "pre-commit")} exists, and a hooks path would stop git from running it`,
+        reason: `${hooksDir.out}/pre-commit exists, and a hooks path would stop git from running it`,
         manual: "git config core.hooksPath .githooks",
       });
     } else {
@@ -317,8 +317,28 @@ export interface StepResult {
   message: string;
 }
 
+/** Quotes one argument for cmd.exe. Only used on Windows, where npm is a
+ * .cmd shim that cannot be spawned without a shell. An argument holding a
+ * double quote or a percent sign cannot be quoted safely there, so it is
+ * refused. */
+function cmdQuote(arg: string): string {
+  if (/["%\r\n]/.test(arg)) throw new Error(`cannot pass ${JSON.stringify(arg)} to cmd.exe safely`);
+  return /^[A-Za-z0-9_.:\\/@=+,-]+$/.test(arg) ? arg : `"${arg}"`;
+}
+
 function run(cmd: string, args: string[], cwd: string, timeout = 600_000): { ok: boolean; out: string } {
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf8", timeout });
+  // On Windows, npm is npm.cmd. Node cannot spawn a .cmd without a shell
+  // (ENOENT before Node 18.20/20.12, EINVAL after), so npm goes through
+  // cmd.exe with the command line built here. git is a real executable.
+  const viaShell = process.platform === "win32" && cmd === "npm";
+  let r;
+  try {
+    r = viaShell
+      ? spawnSync([cmd, ...args].map(cmdQuote).join(" "), { cwd, encoding: "utf8", timeout, shell: true })
+      : spawnSync(cmd, args, { cwd, encoding: "utf8", timeout });
+  } catch (err) {
+    return { ok: false, out: (err as Error).message };
+  }
   if (r.error) return { ok: false, out: r.error.message };
   return { ok: r.status === 0, out: `${r.stdout ?? ""}${r.stderr ?? ""}`.trim() };
 }
