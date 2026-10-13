@@ -56,10 +56,20 @@ produced:
 ## 🚀 Quickstart
 
 ```
-npm install --save-dev agent-delivery-gates
-npx adg init
-git config core.hooksPath .githooks
+npx agent-delivery-gates init --yes
 ```
+
+Without `--yes`, `init` prints its setup plan and applies it only if you
+answer yes at a terminal; with no terminal (an agent session, CI) it prints
+the plan and applies nothing. The plan can install this package as a dev
+dependency, write `scripts.test` when the repository plainly has tests and no
+test script (`go test ./...` for a Go module, and so on for the other
+languages, only where the runner is certain), fetch the grammars for the
+languages it finds, add `node_modules/` to `.gitignore` when its own install
+created it, set `core.hooksPath`, and stage what it created. A test script,
+hooks path or gitignore entry that already exists is never replaced; the plan
+lists it as skipped with the reason. `--no-setup` writes only the starter
+files.
 
 `init` writes a git pre-commit hook, `AGENTS.md`, an empty gate tally log,
 a CI workflow, and the hook and MCP configs for the agents listed below,
