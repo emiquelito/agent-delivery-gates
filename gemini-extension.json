@@ -1,6 +1,6 @@
 {
   "name": "agent-delivery-gates",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Gates that check what an AI coding agent claims about its own work, not only what it wrote.",
   "contextFileName": "AGENTS.md",
   "mcpServers": {

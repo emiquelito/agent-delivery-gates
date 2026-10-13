@@ -1,6 +1,6 @@
 {
   "name": "agent-delivery-gates",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Delivery gates for AI coding agents: breaks your code on purpose and reports the breaks no test noticed. Seven languages via tree-sitter, on Windows, macOS and Linux. Git hook, CI step or MCP server.",
   "license": "Apache-2.0",
   "author": "emiquelito <contact@agentgates.dev>",
