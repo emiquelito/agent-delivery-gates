@@ -36,6 +36,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { escapeRegExp } from "./lib/regex-escape.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BUILD = join(ROOT, "site", "build.js");
@@ -278,7 +279,7 @@ test("the page carries the meta tags a crawler reads", () => {
   const required: [string, RegExp][] = [
     ["a title", /<title>[^<]{20,}<\/title>/],
     ["a description", /<meta name="description" content="[^"]{50,}">/],
-    ["a canonical link", new RegExp(`<link rel="canonical" href="${SITE_URL}">`)],
+    ["a canonical link", new RegExp(`<link rel="canonical" href="${escapeRegExp(SITE_URL)}">`)],
     ["an English lang attribute", /<html lang="en">/],
     ["og:type", /<meta property="og:type" content="[^"]+">/],
     ["og:url", /<meta property="og:url" content="[^"]+">/],
@@ -358,7 +359,7 @@ test("robots.txt names every crawler and blocks none of them", () => {
   assert.match(robots, /^Allow: \/$/m, "robots.txt allows nothing");
   for (const agent of REQUIRED_CRAWLERS) {
     assert.ok(
-      new RegExp(`^User-agent: ${agent}$`, "m").test(robots),
+      new RegExp(`^User-agent: ${escapeRegExp(agent)}$`, "m").test(robots),
       `robots.txt never names ${agent}`,
     );
   }

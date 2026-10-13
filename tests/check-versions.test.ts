@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { escapeRegExp } from "./lib/regex-escape.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -33,7 +34,7 @@ function realVersion(): string {
 test("the real repository has all six version files agreeing, and exits 0", () => {
   const result = runCli([]);
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
-  assert.match(result.stdout, new RegExp(`all agree on ${realVersion()}`));
+  assert.match(result.stdout, new RegExp(`all agree on ${escapeRegExp(realVersion())}`));
 });
 
 test("--check on the real repository exits 0 and reports no problems", () => {
@@ -129,7 +130,8 @@ test("--set leaves a dependency that shares the old version string alone", () =>
     writeFileSync(lockPath, planted);
     git(dir, "commit", "-q", "-am", "plant");
     assert.equal(runCli(["--set", "9.8.7"], dir).status, 0);
-    assert.match(readFileSync(lockPath, "utf8"), new RegExp(`"node_modules/[^"]+": \\{\\s*"version": "${old.replace(/\./g, "\\.")}"`));
+    const versions = [...readFileSync(lockPath, "utf8").matchAll(/"node_modules\/[^"]+": \{\s*"version": "([^"]*)"/g)].map((m) => m[1]);
+    assert.ok(versions.includes(old), `no dependency entry still carries ${old}; found ${versions.join(", ")}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

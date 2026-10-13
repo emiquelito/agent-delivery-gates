@@ -12,6 +12,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { escapeRegExp } from "./lib/regex-escape.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const README = readFileSync(join(ROOT, "README.md"), "utf8");
@@ -40,7 +41,7 @@ test("every file the README links to is really there", () => {
 // page npm shows, where a relative path has nothing to resolve against. The
 // path inside the URL still has to name a file that exists.
 test("every repository link in the README names a file that exists", () => {
-  const links = [...README.matchAll(new RegExp(`\\]\\(${REPO_BLOB}([^)#]+)`, "g"))].map(
+  const links = [...README.matchAll(new RegExp(`\\]\\(${escapeRegExp(REPO_BLOB)}([^)#]+)`, "g"))].map(
     (m) => m[1],
   );
   assert.ok(links.length > 0, "the README has no absolute links into this repository");
@@ -51,7 +52,7 @@ test("every repository link in the README names a file that exists", () => {
 
 test("every worked example on disk is listed in the README", () => {
   const listed = new Set(
-    [...README.matchAll(new RegExp(`\\]\\(${REPO_BLOB}(docs/examples/[^)]+\\.md)\\)`, "g"))].map(
+    [...README.matchAll(new RegExp(`\\]\\(${escapeRegExp(REPO_BLOB)}(docs/examples/[^)]+\\.md)\\)`, "g"))].map(
       (m) => m[1],
     ),
   );
