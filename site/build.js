@@ -829,8 +829,8 @@ ${renderTallyTable(rules, tally)}
       <p><code>init</code> first writes its starter files, then runs a setup plan. Without
         <code>--yes</code> it prints that plan and applies it only if you answer yes at a
         terminal; with no terminal (an agent session, CI) it prints the plan and applies
-        nothing, and until the package is installed the pre-commit hook it wrote stops every
-        commit. The plan can install this package as a dev dependency, write
+        none of it, so nothing is wired up and nothing is blocked: the starter files and the
+        hook file exist, but no gate is active until the plan is applied. The plan can install this package as a dev dependency, write
         <code>scripts.test</code> when the repository plainly has tests and no test script
         (<code>go test ./...</code> for a Go module, and so on for the other languages, only
         where the runner is certain), fetch the grammars for the languages it finds, add

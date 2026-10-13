@@ -331,7 +331,7 @@ async function runInitCommand(argv: string[]): Promise<never> {
     if (toRun.length === 0) {
       process.stdout.write(
         "\nNOT APPLIED: nothing in the setup plan was done. Re-run with --yes to apply it, or do the steps yourself.\n" +
-          "Until the package is installed, the pre-commit hook stops every commit.\n",
+          "The starter files and the hook file exist, but no gate is active until the plan is applied.\n",
       );
       process.exit(outcome.exitCode);
     }
