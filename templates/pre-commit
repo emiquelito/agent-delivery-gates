@@ -7,9 +7,10 @@
 #
 # Runs whatever of these four checks the project has set up: the
 # typecheck, the test suite, the prose scan, and the gate tally check. A
-# check with nothing to run against is skipped, and the skip is printed
-# on its own line so it is never mistaken for a pass. A fresh project has
-# no test suite yet, and that is fine; this hook says so and moves on.
+# check with nothing to run against is skipped and does not block the
+# commit, but a skip is never reported as a pass: each one is printed, the
+# closing line lists every check that did not run, and a skipped test step in
+# a repository that has tests prints a banner saying the tests did not run.
 #
 # Set ADG_SKIP_PRECOMMIT=1 to skip this hook for one commit. The skip is
 # never quiet.
@@ -72,12 +73,58 @@ run_step() {
   fi
 }
 
+SKIPPED=""
+RAN=0
+
 skip_step() {
-  printf 'pre-commit: %s -- skipped (%s)\n' "$1" "$2"
+  printf 'pre-commit: %s -- NOT RUN (%s)\n' "$1" "$2"
+  SKIPPED="${SKIPPED:+$SKIPPED, }$1"
+}
+
+# Prints a short description of the tests the repository tracks, or nothing
+# when it shows no sign of having any. This only looks at file names: it
+# cannot know how to run them, only that they are there.
+describe_tests() {
+  local files evidence="" n
+  files=$(git ls-files 2>/dev/null || true)
+  add() { evidence="${evidence:+$evidence, }$1"; }
+  count() { printf '%s\n' "$files" | grep -Ec "$1" || true; }
+  if [ "$(count '(^|/)go\.mod$')" -gt 0 ]; then add "go.mod"; fi
+  n=$(count '_test\.go$')
+  if [ "$n" -gt 0 ]; then add "$n *_test.go files"; fi
+  if [ "$(count '(^|/)Cargo\.toml$')" -gt 0 ]; then add "Cargo.toml"; fi
+  if [ "$(count '(^|/)pytest\.ini$')" -gt 0 ]; then add "pytest.ini"; fi
+  n=$(count '(^|/)test_[^/]*\.py$|_test\.py$')
+  if [ "$n" -gt 0 ]; then add "$n Python test files"; fi
+  n=$(count '\.(test|spec)\.[cm]?[jt]sx?$')
+  if [ "$n" -gt 0 ]; then add "$n *.test/*.spec script files"; fi
+  n=$(count '(^|/)(tests?|__tests__)/')
+  if [ "$n" -gt 0 ]; then add "$n files under a tests/ directory"; fi
+  printf '%s' "$evidence"
+}
+
+tests_not_run() {
+  local found
+  skip_step "tests" "no test command is configured"
+  found=$(describe_tests)
+  if [ -n "$found" ]; then
+    {
+      echo "=============================================================="
+      echo " pre-commit: THE TESTS DID NOT RUN"
+      echo " This repository has tests ($found)"
+      echo " but no test command is configured (no \"test\" script in"
+      echo " package.json), so this hook ran none"
+      echo " of them. Nothing below says they pass. Run them yourself, and"
+      echo " add a \"test\" script to package.json (for example"
+      echo " \"test\": \"go test ./...\") so this hook can run them."
+      echo "=============================================================="
+    } >&2
+  fi
 }
 
 if [ -f "$ROOT/tsconfig.json" ]; then
   run_step "typecheck" "npx tsc --noEmit" npx tsc --noEmit
+  RAN=$((RAN + 1))
 else
   skip_step "typecheck" "no tsconfig.json found"
 fi
@@ -94,8 +141,9 @@ if [ -f "$ROOT/package.json" ]; then
 fi
 if [ "$has_test_script" -eq 1 ]; then
   run_step "tests" "npm test" npm test
+  RAN=$((RAN + 1))
 else
-  skip_step "tests" "no test suite configured yet"
+  tests_not_run
 fi
 
 if [ -f "$ROOT/.adg/prose-rules.txt" ]; then
@@ -107,6 +155,7 @@ if [ -f "$ROOT/.adg/prose-rules.txt" ]; then
     run_step "prose scan" "npx --no-install agent-delivery-gates scan-prose --require-rules" \
       npx --no-install agent-delivery-gates scan-prose --require-rules
   fi
+  RAN=$((RAN + 1))
 else
   skip_step "prose scan" "no .adg/prose-rules.txt; run init --prose-preset to turn this on"
 fi
@@ -114,9 +163,14 @@ fi
 if [ -f "$ROOT/docs/gate-tally.md" ]; then
   run_step "tally check" "npx --no-install agent-delivery-gates tally --check" \
     npx --no-install agent-delivery-gates tally --check
+  RAN=$((RAN + 1))
 else
   skip_step "tally check" "no docs/gate-tally.md"
 fi
 
-echo "pre-commit: all checks that could run, passed"
+if [ -z "$SKIPPED" ]; then
+  echo "pre-commit: all checks passed"
+else
+  echo "pre-commit: no check failed, but $RAN of 4 ran. NOT RUN: $SKIPPED. Those are unchecked." >&2
+fi
 exit 0

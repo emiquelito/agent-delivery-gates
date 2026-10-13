@@ -209,3 +209,102 @@ test("ADG_SKIP_PRECOMMIT skips the hook and prints loudly", { skip: HOOK_SKIP },
     assert.doesNotMatch(r.stdout, /stub tsc ran/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// templates/pre-commit: the hook `init` writes into other people's projects.
+// It skips a step it has nothing to run for. The defect these tests pin: it
+// skipped the test step in a Go repository that had failing tests, said "no
+// test suite configured yet", and closed with "passed". A skipped step must
+// never read as a passing one.
+// ---------------------------------------------------------------------------
+
+const TEMPLATE_HOOK = join(REPO_ROOT, "templates", "pre-commit");
+
+function runTemplate(cwd: string): Run {
+  const r = spawnSync("bash", [TEMPLATE_HOOK], { cwd, encoding: "utf8" });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, all: r.stdout + r.stderr };
+}
+
+/** A repository with the package stub the template's first check needs and
+ * nothing else the hook could run. `files` are committed as given. */
+function buildBareProject(dir: string, files: Record<string, string>): void {
+  git(dir, ["init", "-q"]);
+  git(dir, ["config", "user.email", "fixture@example.invalid"]);
+  git(dir, ["config", "user.name", "Fixture"]);
+  writeExecutable(dir, "node_modules/.bin/agent-delivery-gates", `#!/usr/bin/env bash\necho 0.0.0\n`);
+  for (const [path, content] of Object.entries(files)) writeFile(dir, path, content);
+  git(dir, ["add", "-A", "-f"]);
+  git(dir, ["commit", "-q", "-m", "Fixture commit"]);
+}
+
+const FAILING_GO_TEST = 'package x\nimport "testing"\nfunc TestF(t *testing.T) { t.Fatal("fails") }\n';
+
+test("template: a Go repository with failing tests and no test script is not reported as passing", { skip: HOOK_SKIP }, () => {
+  // The state a user reaches after following the install instructions:
+  // `npm install` leaves a package.json with no scripts in a Go repository.
+  withTempRepo((dir) => {
+    buildBareProject(dir, {
+      "go.mod": "module x\n",
+      "a_test.go": FAILING_GO_TEST,
+      "b_test.go": FAILING_GO_TEST,
+      "package.json": JSON.stringify({ name: "x" }),
+    });
+    const r = runTemplate(dir);
+    assert.equal(r.status, 0, "loud but allowing: the commit is not blocked");
+    assert.doesNotMatch(r.all, /passed/, "no skipped step may be reported as a pass");
+    assert.match(r.all, /THE TESTS DID NOT RUN/);
+    assert.match(r.all, /go\.mod/);
+    assert.match(r.all, /2 \*_test\.go files/);
+    assert.match(r.all, /NOT RUN: .*tests/);
+    assert.doesNotMatch(r.all, /no test suite/, "must not claim the project has no tests");
+  });
+});
+
+test("template: the same Go repository with no package.json at all reports the same", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, { "go.mod": "module x\n", "a_test.go": FAILING_GO_TEST });
+    const r = runTemplate(dir);
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.all, /passed/);
+    assert.match(r.all, /THE TESTS DID NOT RUN/);
+  });
+});
+
+test("template: a project with no tests at all still commits, and still says the tests did not run", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, { "README.md": "hello\n", "package.json": JSON.stringify({ name: "x" }) });
+    const r = runTemplate(dir);
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.all, /passed/);
+    assert.doesNotMatch(r.all, /THE TESTS DID NOT RUN/, "no banner when there is nothing to warn about");
+    assert.match(r.all, /tests -- NOT RUN/);
+  });
+});
+
+test("template: when every step runs the closing line says all checks passed", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, {
+      "tsconfig.json": "{}\n",
+      "node_modules/.bin/tsc": "#!/usr/bin/env bash\nexit 0\n",
+      "package.json": JSON.stringify({ name: "x", scripts: { test: 'node -e "process.exit(0)"' } }),
+      ".adg/prose-rules.txt": "x\n",
+      "docs/gate-tally.md": "x\n",
+    });
+    chmodSync(join(dir, "node_modules/.bin/tsc"), 0o755);
+    const r = runTemplate(dir);
+    assert.equal(r.status, 0, r.all);
+    assert.match(r.stdout, /all checks passed/);
+    assert.doesNotMatch(r.all, /NOT RUN/);
+  });
+});
+
+test("template: a failing test script still blocks the commit", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, {
+      "package.json": JSON.stringify({ name: "x", scripts: { test: 'node -e "process.exit(1)"' } }),
+    });
+    const r = runTemplate(dir);
+    assert.equal(r.status, 1);
+    assert.match(r.all, /FAILED at: tests/);
+  });
+});
