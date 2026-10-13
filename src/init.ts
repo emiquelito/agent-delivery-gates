@@ -541,7 +541,7 @@ export function runInit(options: InitOptions): InitOutcome {
   if (grammarsToInstall.length > 0) {
     lines.push(
       `No tree-sitter grammar resolvable yet for: ${grammarsToInstall.map((entry) => entry.name).join(", ")}. ` +
-        "Until one is installed, mutate and test-diff fall back to the regex scanner for these files, with a warning.",
+        "Until one is installed, test-diff scans these files with the regex scanner and warns, and mutate refuses them and reports them as unmeasured (exit 3).",
     );
     if (omitManualSetupHints !== true) {
       lines.push("Install with:");

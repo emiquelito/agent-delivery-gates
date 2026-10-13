@@ -59,9 +59,11 @@ produced:
 npx agent-delivery-gates init --yes
 ```
 
-Without `--yes`, `init` prints its setup plan and applies it only if you
-answer yes at a terminal; with no terminal (an agent session, CI) it prints
-the plan and applies nothing. The plan can install this package as a dev
+`init` first writes its starter files, then runs a setup plan. Without
+`--yes` it prints that plan and applies it only if you answer yes at a
+terminal; with no terminal (an agent session, CI) it prints the plan and
+applies nothing, and until the package is installed the pre-commit hook it
+wrote stops every commit. The plan can install this package as a dev
 dependency, write `scripts.test` when the repository plainly has tests and no
 test script (`go test ./...` for a Go module, and so on for the other
 languages, only where the runner is certain), fetch the grammars for the
@@ -352,13 +354,23 @@ family, and its boolean literals and connectives (`True`, `False`, `and`,
 already keeps a docstring, an f-string, and a `#` comment out of reach.
 `induce` and `validate-report` care about neither language nor runner.
 
+A break that does not compile proves nothing about your tests, so `mutate`
+reports it as `build-failed`, which is unmeasured (exit 3), not as killed.
+That is recognised from the output of `go test`, `cargo test` and `tsc`
+only. For C, C++, Java, C# and every other compiled language, a break that
+fails to compile still counts as killed, so the kill count there can be
+higher than the tests earned.
+
 That tree-sitter mask needs one grammar per language, and none of the seven
 ships with the package: `npx adg lang add python` (or `rust`, `ruby`, `php`,
 `go`, `java`, `csharp`) fetches the one file it needs into `.adg/grammars/`
-in your project, once, at the moment you ask. `adg init` reports which of
-these languages it finds tracked in your repository and offers to fetch
-them; until one is installed, that file's language falls back to the regex
-scanner with a warning, not a block.
+in your project, once, at the moment you ask. `adg init --yes` fetches
+the ones it finds tracked in your repository. Until a language's grammar is
+installed, the two tools differ. `test-diff` falls back to the regex scanner
+for that file with a loud warning, and does not block. `mutate` does not fall
+back: it plans nothing for that file, reports it as having no grammar, and
+exits 3 as unmeasured, because mutating with a scanner written for another
+family of languages would be a guess.
 
 `.adg/grammars/` is a fetch cache, not source: `adg lang add` and `adg init`
 write a `.gitignore` into it the first time they create it, so an ordinary

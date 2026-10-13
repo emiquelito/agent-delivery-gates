@@ -825,9 +825,19 @@ ${renderTallyTable(rules, tally)}
 
     <section id="install">
       <h2>Install</h2>
-      <pre><code>npm install --save-dev ${escapeHtml(PACKAGE_NAME)}
-npx adg init
-git config core.hooksPath .githooks</code></pre>
+      <pre><code>npx ${escapeHtml(PACKAGE_NAME)} init --yes</code></pre>
+      <p><code>init</code> first writes its starter files, then runs a setup plan. Without
+        <code>--yes</code> it prints that plan and applies it only if you answer yes at a
+        terminal; with no terminal (an agent session, CI) it prints the plan and applies
+        nothing, and until the package is installed the pre-commit hook it wrote stops every
+        commit. The plan can install this package as a dev dependency, write
+        <code>scripts.test</code> when the repository plainly has tests and no test script
+        (<code>go test ./...</code> for a Go module, and so on for the other languages, only
+        where the runner is certain), fetch the grammars for the languages it finds, add
+        <code>node_modules/</code> to <code>.gitignore</code> when its own install created it,
+        set <code>core.hooksPath</code>, and stage what it created. A test script, hooks path or
+        gitignore entry that already exists is never replaced; the plan lists it as skipped
+        with the reason. <code>--no-setup</code> writes only the starter files.</p>
       <p><code>init</code> writes a git pre-commit hook, <code>AGENTS.md</code>, an empty
         gate tally log, a CI workflow, and the hook and MCP configs for the agents
         listed below, and only ever creates a file that does not already exist.
@@ -1009,8 +1019,8 @@ ${jsonLdText}
         always come from that host, never one a redirect substituted; and before anything is
         written, those bytes are checked against a sha256 digest this project pinned for that
         exact package version, so a wrong, truncated, or tampered download is rejected instead of
-        installed. <code>adg init</code> can do the same, but only after asking and only if you
-        say yes. Neither runs unless you invoke it; nothing else in this package ever does.</p>
+        installed. <code>adg init</code> can do the same, but only after you answer yes at
+        a terminal or pass <code>--yes</code>. Neither runs unless you invoke it; nothing else in this package ever does.</p>
       <p>That same digest is checked again every time a grammar already in
         <code>.adg/grammars/</code> is actually loaded, not only at the moment it is fetched: a
         file that fails is refused, not read. <code>.adg/grammars/</code> gets a
