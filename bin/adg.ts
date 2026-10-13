@@ -33,6 +33,8 @@ import { fileURLToPath } from "node:url";
 import { runInit, combineInitExitCode } from "../src/init.ts";
 import { createInterface } from "node:readline/promises";
 import { findLanguage, fetchGrammar } from "../src/tree-sitter-grammar-store.ts";
+import { planSetup, applySetup, type SetupStep } from "../src/init-setup.ts";
+import { findMissingGrammars } from "../src/init.ts";
 
 /** Walks upward from `startDir` to find the directory holding this
  * package's own package.json. Used instead of a fixed number of
@@ -85,13 +87,25 @@ wraps and exits with that tool's own exit code. Run any command with
 --help for its own usage.
 `;
 
-const INIT_USAGE = `Usage: agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--baseline] [--dir PATH] [--install-grammars | --no-install-grammars]
+const INIT_USAGE = `Usage: agent-delivery-gates init [--dry-run] [--force] [--prose-preset NAME] [--baseline] [--dir PATH] [--yes] [--no-setup] [--install-grammars | --no-install-grammars]
 
 Writes starter files into a project: a git pre-commit hook, AGENTS.md,
 and an empty gate tally log. It only ever creates a file that does not
 exist yet.
 
+Then it prints a setup plan for the steps that change something you may
+already own, and applies it only with your say-so: install this package as a
+dev dependency, write scripts.test when the repository plainly has tests and
+no test script, fetch tree-sitter grammars, ignore a node_modules this run
+created, set core.hooksPath, and stage what was created. A value that is
+already set is never replaced; the plan lists it as skipped, with the reason.
+
   --dry-run             print what would happen, change nothing
+  --yes, -y             apply the setup plan without asking. Without it, a
+                         real terminal is asked once; with no terminal (an
+                         agent session, CI) the plan is printed and NOT
+                         applied
+  --no-setup            write the starter files only; skip the setup plan
   --force               overwrite a file that already exists
   --prose-preset NAME   write .adg/prose-rules.txt including this preset
                          (from this package's presets/ directory); without
@@ -161,14 +175,15 @@ interface ParsedInitArgs {
   baseline: boolean;
   dir?: string;
   help: boolean;
-  /** undefined means "not decided on the command line": ask interactively
-   * when possible, otherwise default to not installing. See
-   * maybeInstallGrammars below. */
+  /** undefined means "not decided on the command line": the grammar step is
+   * part of the setup plan and follows --yes or the prompt. */
   installGrammars?: boolean;
+  yes: boolean;
+  noSetup: boolean;
 }
 
 function parseInitArgs(argv: string[]): ParsedInitArgs {
-  const result: ParsedInitArgs = { dryRun: false, force: false, baseline: false, help: false };
+  const result: ParsedInitArgs = { dryRun: false, force: false, baseline: false, help: false, yes: false, noSetup: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
@@ -184,6 +199,13 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
         break;
       case "--baseline":
         result.baseline = true;
+        break;
+      case "--yes":
+      case "-y":
+        result.yes = true;
+        break;
+      case "--no-setup":
+        result.noSetup = true;
         break;
       case "--install-grammars":
         result.installGrammars = true;
@@ -213,54 +235,37 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
   return result;
 }
 
-/**
- * Decides whether to fetch the grammars `runInit` found no local install
- * for, and does it when asked. Never installs on its own say-so: with
- * `--install-grammars` or `--no-install-grammars` given, that decision is
- * followed exactly; with neither given and stdin/stdout both a real
- * terminal, a person is asked directly; with neither given and no terminal
- * (piped, CI, a test spawning this process), the safe default is "no", and
- * the commands `runInit`'s own output already printed are left as the way
- * to do it by hand.
- *
- * Returns whether every language actually attempted succeeded. Declining
- * to install (no terminal, a "no" answer, or `--no-install-grammars`)
- * counts as success: nothing was promised and nothing failed. This is the
- * one signal `runInitCommand` has for whether to fold a fetch failure into
- * its own exit code -- see the comment there for why a partial failure is
- * treated the same as a total one.
- */
-async function maybeInstallGrammars(languageNames: readonly string[], targetDir: string, args: ParsedInitArgs): Promise<boolean> {
-  let install: boolean;
-  if (args.installGrammars !== undefined) {
-    install = args.installGrammars;
-  } else if (process.stdin.isTTY === true && process.stdout.isTTY === true) {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    let answer: string;
-    try {
-      answer = await rl.question(`Install the tree-sitter grammar(s) for ${languageNames.join(", ")} now? [y/N] `);
-    } finally {
-      rl.close();
-    }
-    install = /^y(es)?$/i.test(answer.trim());
-  } else {
-    install = false;
-  }
-
-  if (!install) {
-    process.stdout.write("Not installing. Run the commands above yourself when ready.\n");
-    return true;
-  }
-
+async function fetchGrammars(languageNames: readonly string[], targetDir: string): Promise<boolean> {
   let allOk = true;
   for (const name of languageNames) {
     const entry = findLanguage(name);
-    if (entry === undefined) continue; // cannot happen: names came from the same table findLanguage reads
+    if (entry === undefined) continue; // names came from the same table findLanguage reads
     const result = await fetchGrammar(entry, targetDir);
     process.stdout.write(`${result.ok ? "" : "FAILED: "}${result.message}\n`);
     if (!result.ok) allOk = false;
   }
   return allOk;
+}
+
+function printPlan(steps: SetupStep[], heading: string): void {
+  process.stdout.write(`\n${heading}\n`);
+  for (const step of steps) {
+    if (step.action === "do") {
+      process.stdout.write(`  will:    ${step.summary}\n`);
+    } else {
+      process.stdout.write(`  skipped: ${step.summary}: ${step.reason}\n`);
+      if (step.manual !== undefined) process.stdout.write(`           yours to do: ${step.manual}\n`);
+    }
+  }
+}
+
+async function askYesNo(question: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return /^y(es)?$/i.test((await rl.question(question)).trim());
+  } finally {
+    rl.close();
+  }
 }
 
 async function runInitCommand(argv: string[]): Promise<never> {
@@ -279,18 +284,76 @@ async function runInitCommand(argv: string[]): Promise<never> {
     force: args.force,
     prosePreset: args.prosePreset,
     baseline: args.baseline,
+    omitManualSetupHints: !args.noSetup,
   });
 
   for (const line of outcome.lines) {
     process.stdout.write(`${line}\n`);
   }
-
-  let grammarsOk = true;
-  if (!args.dryRun && outcome.missingGrammarLanguages.length > 0) {
-    grammarsOk = await maybeInstallGrammars(outcome.missingGrammarLanguages, targetDir, args);
+  if (outcome.exitCode !== 0 || args.noSetup) {
+    process.exit(outcome.exitCode);
   }
 
-  process.exit(combineInitExitCode(outcome.exitCode, grammarsOk));
+  // The setup plan. Everything above only created files that did not exist;
+  // everything below can change a file, a config value or the network, so it
+  // is printed in full first and applied only when the person agreed.
+  const steps = planSetup({
+    targetDir,
+    packageRoot: PACKAGE_ROOT,
+    packageVersion: readVersion(),
+    createdPaths: outcome.createdPaths,
+    missingGrammars: findMissingGrammars(targetDir),
+    grammarsAllowed: args.installGrammars !== false,
+    installSpec: process.env.ADG_INIT_INSTALL_SPEC,
+  });
+  const doSteps = steps.filter((s) => s.action === "do");
+
+  if (args.dryRun) {
+    printPlan(steps, "Setup plan (dry run: nothing below was done):");
+    process.exit(outcome.exitCode);
+  }
+
+  printPlan(steps, "Setup plan:");
+  if (doSteps.length === 0) process.exit(outcome.exitCode);
+
+  // --install-grammars alone keeps its older meaning: consent to the
+  // grammar step and nothing else.
+  const grammarsOnly = args.installGrammars === true && !args.yes;
+  let approved = args.yes;
+  if (!approved && !grammarsOnly) {
+    if (process.stdin.isTTY === true && process.stdout.isTTY === true) {
+      approved = await askYesNo("\nApply the steps marked 'will'? [y/N] ");
+    }
+  }
+  let toRun = steps;
+  if (!approved) {
+    toRun = grammarsOnly ? steps.filter((s) => s.id === "grammars") : [];
+    if (toRun.length === 0) {
+      process.stdout.write(
+        "\nNOT APPLIED: nothing in the setup plan was done. Re-run with --yes to apply it, or do the steps yourself.\n" +
+          "Until the package is installed, the pre-commit hook stops every commit.\n",
+      );
+      process.exit(outcome.exitCode);
+    }
+  }
+
+  process.stdout.write("\nApplying:\n");
+  let allOk = true;
+  const nonGrammar = toRun.filter((s) => s.id !== "grammars");
+  // Install and the other non-grammar steps first: an install can bring
+  // grammars with it, so which grammars are still missing is asked after.
+  const results = applySetup(nonGrammar, targetDir, (r) => {
+    process.stdout.write(`  ${r.ok ? "done" : "FAILED"}: ${r.message}\n`);
+  });
+  if (results.some((r) => !r.ok)) allOk = false;
+  if (toRun.some((s) => s.id === "grammars" && s.action === "do")) {
+    const still = findMissingGrammars(targetDir);
+    if (still.length > 0) {
+      const ok = await fetchGrammars(still, targetDir);
+      if (!ok) allOk = false;
+    }
+  }
+  process.exit(combineInitExitCode(outcome.exitCode, allOk));
 }
 
 function main(): void {

@@ -618,7 +618,8 @@ test("init: --no-install-grammars never prompts and never installs, even for a d
     execFileSync("git", ["add", "main.py"], { cwd: dir });
     const result = runInitCli(["--dir", dir, "--no-install-grammars"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Not installing\. Run the commands above yourself when ready\./);
+    assert.match(result.stdout, /skipped: fetch tree-sitter grammar\(s\): python: --no-install-grammars was given/);
+    assert.match(result.stdout, /yours to do: npx adg lang add python/);
     assert.equal(existsSync(join(dir, ".adg", "grammars")), false);
   });
 });
@@ -653,4 +654,123 @@ test("combineInitExitCode: a partial failure gets the same 1 as a total one, not
 test("combineInitExitCode: a non-zero base exit code always wins, never masked by a grammar result", () => {
   assert.equal(combineInitExitCode(2, true), 2);
   assert.equal(combineInitExitCode(2, false), 2);
+});
+
+// --- setup plan: test command, hooks path, staging ----------------------------
+
+function gitOut(dir: string, args: string[]): string {
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+}
+
+function goRepo(dir: string): void {
+  initGitRepo(dir);
+  writeFileSync(join(dir, "go.mod"), "module example.com/m\n\ngo 1.21\n");
+  writeFileSync(join(dir, "m.go"), "package m\n\nfunc Add(a, b int) int { return a + b }\n");
+  writeFileSync(join(dir, "m_test.go"), 'package m\n\nimport "testing"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal("bad")\n\t}\n}\n');
+  writeFileSync(join(dir, "package.json"), '{\n  "name": "m",\n  "version": "1.0.0"\n}\n');
+  gitOut(dir, ["add", "."]);
+  gitOut(dir, ["commit", "-qm", "base"]);
+}
+
+test("setup: with no --yes and no terminal, the plan is printed and nothing beyond the new files changes", () => {
+  withTempDir((dir) => {
+    goRepo(dir);
+    const result = runInitCli(["--dir", dir, "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /will:    set scripts\.test to "go test \.\/\.\.\."/);
+    assert.match(result.stdout, /NOT APPLIED/);
+    assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).scripts, undefined);
+    assert.equal(spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: dir }).status, 1);
+    assert.equal(gitOut(dir, ["diff", "--cached", "--name-only"]), "");
+  });
+});
+
+test("setup: --yes writes the test script, sets the hooks path and stages what it created", () => {
+  withTempDir((dir) => {
+    goRepo(dir);
+    const result = runInitCli(["--dir", dir, "--yes", "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).scripts.test, "go test ./...");
+    assert.equal(gitOut(dir, ["config", "--get", "core.hooksPath"]), ".githooks");
+    const staged = gitOut(dir, ["diff", "--cached", "--name-only"]).split("\n");
+    assert.ok(staged.includes(".githooks/pre-commit"));
+    assert.ok(staged.includes("package.json"));
+    assert.ok(!staged.some((f) => f.startsWith(".adg/grammars")));
+  });
+});
+
+test("setup: an existing test script and hooks path are left alone and reported as skipped", () => {
+  withTempDir((dir) => {
+    goRepo(dir);
+    writeFileSync(join(dir, "package.json"), '{\n  "name": "m",\n  "scripts": {\n    "test": "make check"\n  }\n}\n');
+    gitOut(dir, ["add", "package.json"]);
+    gitOut(dir, ["commit", "-qm", "scripts"]);
+    gitOut(dir, ["config", "core.hooksPath", "my-hooks"]);
+    const before = readFileSync(join(dir, "package.json"), "utf8");
+    const result = runInitCli(["--dir", dir, "--yes", "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(dir, "package.json"), "utf8"), before);
+    assert.equal(gitOut(dir, ["config", "--get", "core.hooksPath"]), "my-hooks");
+    assert.match(result.stdout, /skipped: set scripts\.test in package\.json: scripts\.test is already set \("make check"\)/);
+    assert.match(result.stdout, /skipped: set core\.hooksPath to \.githooks: core\.hooksPath is already set to "my-hooks"/);
+  });
+});
+
+test("setup: --dry-run prints the plan and changes nothing", () => {
+  withTempDir((dir) => {
+    goRepo(dir);
+    const before = gitOut(dir, ["status", "--short"]);
+    const result = runInitCli(["--dir", dir, "--dry-run", "--yes", "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Setup plan \(dry run/);
+    assert.equal(gitOut(dir, ["status", "--short"]), before);
+    assert.equal(spawnSync("git", ["config", "--get", "core.hooksPath"], { cwd: dir }).status, 1);
+  });
+});
+
+test("setup: a repository with no tests gets no test command", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "go.mod"), "module example.com/m\n");
+    writeFileSync(join(dir, "m.go"), "package m\n");
+    writeFileSync(join(dir, "package.json"), '{"name":"m"}\n');
+    gitOut(dir, ["add", "."]);
+    gitOut(dir, ["commit", "-qm", "base"]);
+    const result = runInitCli(["--dir", dir, "--yes", "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).scripts, undefined);
+    assert.match(result.stdout, /skipped: set scripts\.test in package\.json: no test runner could be identified/);
+  });
+});
+
+test("setup: a package.json with uncommitted edits is not swept into the staged set", () => {
+  withTempDir((dir) => {
+    goRepo(dir);
+    writeFileSync(join(dir, "package.json"), '{\n  "name": "m",\n  "description": "mine, uncommitted"\n}\n');
+    const result = runInitCli(["--dir", dir, "--yes", "--no-install-grammars"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!gitOut(dir, ["diff", "--cached", "--name-only"]).split("\n").includes("package.json"));
+    assert.match(result.stdout, /left unstaged because you had uncommitted changes in them: package\.json/);
+  });
+});
+
+test("detectTestCommand: only names a runner it is sure of", async () => {
+  const { detectTestCommand } = await import("../src/init-setup.ts");
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "Cargo.toml"), "[package]\nname=\"x\"\n");
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "lib.rs"), "#[cfg(test)]\nmod t {}\n");
+    assert.equal(detectTestCommand(dir).command, "cargo test");
+    // a second plausible runner means no choice is made
+    writeFileSync(join(dir, "go.mod"), "module x\n");
+    writeFileSync(join(dir, "x_test.go"), "package x\n");
+    assert.equal(detectTestCommand(dir).command, undefined);
+  });
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "package.json"), '{"name":"js"}\n');
+    writeFileSync(join(dir, "a.test.js"), "");
+    assert.equal(detectTestCommand(dir).command, undefined);
+  });
 });

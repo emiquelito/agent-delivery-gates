@@ -44,6 +44,11 @@ export interface InitOptions {
    * everything it already has. Only does anything alongside prosePreset;
    * on its own it is an argument error. */
   baseline?: boolean;
+  /** Set by the CLI, which prints its own setup plan (install, test script,
+   * grammars, hooks path) with the same commands as the fallback for
+   * anything it does not do. With this set, the "Install it first", "git
+   * config" and "Install with:" hints are not repeated here. */
+  omitManualSetupHints?: boolean;
 }
 
 export interface InitOutcome {
@@ -61,6 +66,8 @@ export interface InitOutcome {
    * decide whether to ask about installing them; runInit itself never
    * downloads anything; see fetchGrammar in src/tree-sitter-grammar-store.ts. */
   missingGrammarLanguages: string[];
+  /** Paths, relative to targetDir, of every file this run created. */
+  createdPaths: string[];
 }
 
 interface TemplateAction {
@@ -153,7 +160,7 @@ function writeOrPlan(
 }
 
 function fail(message: string): InitOutcome {
-  return { exitCode: 2, lines: [`init: ${message}`], missingGrammarLanguages: [] };
+  return { exitCode: 2, lines: [`init: ${message}`], missingGrammarLanguages: [], createdPaths: [] };
 }
 
 /** Every tracked file's extension in `targetDir`, matched against
@@ -272,6 +279,15 @@ function standaloneSettingsLines(targetDir: string, packageRoot: string): string
   return lines;
 }
 
+/** Languages found in the repository whose grammar is missing or corrupt,
+ * by name. Read-only; also used after an install, which can change the
+ * answer. */
+export function findMissingGrammars(targetDir: string): string[] {
+  return detectRepoLanguages(targetDir)
+    .filter((entry) => grammarState(targetDir, entry) !== "ok")
+    .map((entry) => entry.name);
+}
+
 function suggestedNpmScripts(): string[] {
   return [
     `"gates:check": "agent-delivery-gates check"`,
@@ -281,7 +297,7 @@ function suggestedNpmScripts(): string[] {
 }
 
 export function runInit(options: InitOptions): InitOutcome {
-  const { targetDir, packageRoot, dryRun, force, prosePreset, baseline } = options;
+  const { targetDir, packageRoot, dryRun, force, prosePreset, baseline, omitManualSetupHints } = options;
 
   if (baseline === true && prosePreset === undefined) {
     return fail("--baseline only makes sense together with --prose-preset; on its own there are no rules to baseline against");
@@ -497,14 +513,14 @@ export function runInit(options: InitOptions): InitOutcome {
   // Language detection and reporting only, on a dry run too, so a dry run
   // still shows what init would tell a real run about. Nothing here
   // downloads anything: dryRun aside, that decision belongs to bin/adg.ts,
-  // which asks before it acts (see maybeInstallGrammars there).
+  // which asks before it acts (see runInitCommand there).
   const detectedLanguages = detectRepoLanguages(targetDir);
   const languageStates = detectedLanguages.map((entry) => ({ entry, state: grammarState(targetDir, entry) }));
   const corruptGrammarLanguages = languageStates.filter((s) => s.state === "corrupt").map((s) => s.entry);
   const absentGrammarLanguages = languageStates.filter((s) => s.state === "missing").map((s) => s.entry);
   // corrupt and absent both need the same fix (fetch a freshly verified
   // copy), so both feed the one install-command block below and the one
-  // list bin/adg.ts's maybeInstallGrammars reads -- but corrupt gets its
+  // list bin/adg.ts reads -- but corrupt gets its
   // own line above it, since "a file is there and it is wrong" is not the
   // same fact as "nothing is there yet", even though the remedy is
   // identical. See grammarState's own doc comment for why.
@@ -527,9 +543,11 @@ export function runInit(options: InitOptions): InitOutcome {
       `No tree-sitter grammar resolvable yet for: ${grammarsToInstall.map((entry) => entry.name).join(", ")}. ` +
         "Until one is installed, mutate and test-diff fall back to the regex scanner for these files, with a warning.",
     );
-    lines.push("Install with:");
-    for (const entry of grammarsToInstall) {
-      lines.push(`  npx adg lang add ${entry.name}`);
+    if (omitManualSetupHints !== true) {
+      lines.push("Install with:");
+      for (const entry of grammarsToInstall) {
+        lines.push(`  npx adg lang add ${entry.name}`);
+      }
     }
   }
   if (detectedLanguages.length > 0) {
@@ -546,15 +564,19 @@ export function runInit(options: InitOptions): InitOutcome {
   // A one-off npx run leaves nothing installed, so the hook it writes cannot
   // find the tool later. Better to say so here than to let the first commit
   // discover it.
-  if (!existsSync(join(targetDir, "node_modules", "agent-delivery-gates"))) {
+  if (omitManualSetupHints === true) {
+    // The setup plan printed after this covers install and hooks path.
+  } else if (!existsSync(join(targetDir, "node_modules", "agent-delivery-gates"))) {
     lines.push("This project does not have agent-delivery-gates installed, so the hook");
     lines.push("written above cannot run yet. Install it first:");
     lines.push("  npm install --save-dev agent-delivery-gates");
     lines.push("");
   }
-  lines.push("Enable the git hook (run this yourself; init never touches git config):");
-  lines.push("  git config core.hooksPath .githooks");
-  lines.push("");
+  if (omitManualSetupHints !== true) {
+    lines.push("Enable the git hook (run this yourself; init never touches git config):");
+    lines.push("  git config core.hooksPath .githooks");
+    lines.push("");
+  }
   lines.push("For the standalone route, add these to .claude/settings.json:");
   for (const settingsLine of standaloneSettingsLines(targetDir, packageRoot)) {
     lines.push(`  ${settingsLine}`);
@@ -566,10 +588,17 @@ export function runInit(options: InitOptions): InitOutcome {
     lines.push(`  ${scriptLine}`);
   }
 
+  const createdPaths: string[] = [];
+  for (const line of lines) {
+    const m = /^created: (.+?)(?: \(\d+ match\(es\) recorded\))?$/.exec(line);
+    if (m) createdPaths.push(m[1]!);
+  }
+
   return {
     exitCode: 0,
     lines,
     missingGrammarLanguages: dryRun ? [] : grammarsToInstall.map((entry) => entry.name),
+    createdPaths,
   };
 }
 
