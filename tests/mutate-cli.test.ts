@@ -25,7 +25,15 @@ import {
 // behind because a lock had not yet let go (see cleanupTempDir in
 // tests/lib/process-tree.ts) get one more chance to come down here,
 // before anything else runs, so they do not just accumulate.
-sweepStaleTempDirs("adg-mutate-");
+sweepStaleTempDirs([
+  "adg-mutate-cli-test-",
+  "adg-mutate-nogit-test-",
+  "adg-mutate-orphan-pids-",
+  "adg-mutate-sigint-pids-",
+  "adg-mutate-sigint-post-baseline-pids-",
+  "adg-mutate-baseline-timeout-pids-",
+  "adg-mutate-grammar-kill-pids-",
+]);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "mutate.ts");

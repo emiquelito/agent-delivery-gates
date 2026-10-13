@@ -31,7 +31,7 @@ import {
 // behind because a lock had not yet let go (see cleanupTempDir in
 // tests/lib/process-tree.ts) get one more chance to come down here,
 // before anything else runs, so they do not just accumulate.
-sweepStaleTempDirs("adg-census-cli-test-");
+sweepStaleTempDirs(["adg-census-cli-test-"]);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "census.ts");

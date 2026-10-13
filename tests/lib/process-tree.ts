@@ -19,7 +19,7 @@
 //    sweepStaleTempDirs gives a later run a chance to finish the job so
 //    nothing accumulates.
 
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,27 +163,49 @@ export function cleanupTempDir(path: string): void {
   }
 }
 
-/** Best-effort removal of every leftover entry under `root` (the system
- * temp directory by default) whose name starts with `prefix`. Meant to be
- * called once, at module load, by each test file that uses
- * cleanupTempDir above, so a directory a previous run could not remove
- * (logged as a cleanup note, not a failure) gets another chance here
- * instead of sitting there forever. A single pass, no retries: this is
- * not the assertion that a directory came down, only routine upkeep, and
- * one more failed attempt just waits for the next run. */
-export function sweepStaleTempDirs(prefix: string, root: string = tmpdir()): void {
+/** How old a leftover directory must be before sweepStaleTempDirs will
+ * touch it. A directory a running test file is using is seconds old, and
+ * the longest a whole suite run takes is minutes, so an hour is far past
+ * anything live while still clearing a directory a Windows run could not
+ * remove by the time the next run starts. */
+export const STALE_TEMP_DIR_MIN_AGE_MS = 60 * 60 * 1000;
+
+/** Best-effort removal of leftover entries under `root` (the system temp
+ * directory by default) whose name starts with one of `prefixes` AND whose
+ * last modification is at least `minAgeMs` ago. Meant to be called once,
+ * at module load, by each test file that uses cleanupTempDir above, so a
+ * directory a previous run could not remove (logged as a cleanup note, not
+ * a failure) gets another chance here instead of sitting there forever.
+ *
+ * Two guards keep this from deleting a directory another test file is
+ * using right now (test files run in parallel): the age floor, which makes
+ * a live directory untouchable whatever it is named, and the prefix list,
+ * which each caller limits to the exact prefixes it creates itself, never
+ * a shorter one that a sibling file's names also start with.
+ *
+ * A single pass, no retries: this is not the assertion that a directory
+ * came down, only routine upkeep, and one more failed attempt just waits
+ * for the next run. */
+export function sweepStaleTempDirs(
+  prefixes: readonly string[],
+  root: string = tmpdir(),
+  minAgeMs: number = STALE_TEMP_DIR_MIN_AGE_MS,
+): void {
   let entries: string[];
   try {
     entries = readdirSync(root);
   } catch {
     return;
   }
+  const now = Date.now();
   for (const name of entries) {
-    if (!name.startsWith(prefix)) continue;
+    if (!prefixes.some((prefix) => name.startsWith(prefix))) continue;
     try {
-      rmSync(join(root, name), { recursive: true, force: true });
+      const path = join(root, name);
+      if (now - statSync(path).mtimeMs < minAgeMs) continue;
+      rmSync(path, { recursive: true, force: true });
     } catch {
-      // Still locked; left for the next sweep.
+      // Gone already, or still locked; left for the next sweep.
     }
   }
 }

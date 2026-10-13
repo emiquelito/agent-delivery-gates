@@ -30,7 +30,7 @@ import {
 // behind because a lock had not yet let go (see cleanupTempDir in
 // tests/lib/process-tree.ts) get one more chance to come down here,
 // before anything else runs, so they do not just accumulate.
-sweepStaleTempDirs("adg-induce-");
+sweepStaleTempDirs(["adg-induce-cli-test-", "adg-induce-orphan-pids-", "adg-induce-sigint-pids-"]);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = join(HERE, "..", "hooks", "induce.ts");
