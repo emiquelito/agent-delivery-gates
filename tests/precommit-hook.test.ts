@@ -253,8 +253,8 @@ test("template: a Go repository with failing tests and no test script is not rep
     assert.equal(r.status, 0, "loud but allowing: the commit is not blocked");
     assert.doesNotMatch(r.all, /passed/, "no skipped step may be reported as a pass");
     assert.match(r.all, /THE TESTS DID NOT RUN/);
-    assert.match(r.all, /go\.mod/);
-    assert.match(r.all, /2 \*_test\.go files/);
+    assert.match(r.all, /has tests \(2 \*_test\.go files\)/, "names the test files it found");
+    assert.doesNotMatch(r.all, /has tests \([^)]*go\.mod/, "a module file is not cited as a test");
     assert.match(r.all, /NOT RUN: .*tests/);
     assert.doesNotMatch(r.all, /no test suite/, "must not claim the project has no tests");
   });
@@ -278,6 +278,52 @@ test("template: a project with no tests at all still commits, and still says the
     assert.doesNotMatch(r.all, /passed/);
     assert.doesNotMatch(r.all, /THE TESTS DID NOT RUN/, "no banner when there is nothing to warn about");
     assert.match(r.all, /tests -- NOT RUN/);
+  });
+});
+
+test("template: a project file with no test files is not called a test", { skip: HOOK_SKIP }, () => {
+  // Observed on a real machine: a folder with only go.mod and a.go was told
+  // "This repository has tests (go.mod)".
+  withTempRepo((dir) => {
+    buildBareProject(dir, { "go.mod": "module x\n", "a.go": "package x\n" });
+    const r = runTemplate(dir);
+    assert.equal(r.status, 0);
+    assert.doesNotMatch(r.all, /has tests/, "no test file exists, so it must not say there are tests");
+    assert.doesNotMatch(r.all, /THE TESTS DID NOT RUN/);
+    assert.match(r.all, /NO TESTS RAN/);
+    assert.match(r.all, /looks like a Go \(go\.mod\) project/);
+    assert.match(r.all, /No test files were\s+found/);
+    assert.match(r.all, /go test \.\/\.\.\./, "still suggests the test command");
+    assert.match(r.all, /tests -- NOT RUN/);
+  });
+});
+
+test("template: Cargo.toml alone is a Rust project, not tests", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, { "Cargo.toml": "[package]\n", "src/lib.rs": "\n" });
+    const r = runTemplate(dir);
+    assert.doesNotMatch(r.all, /has tests/);
+    assert.match(r.all, /looks like a Rust \(Cargo\.toml\) project/);
+  });
+});
+
+test("template: test files with no recognised project file still say the repository has tests", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, { "a.test.ts": "x\n", "README.md": "x\n" });
+    const r = runTemplate(dir);
+    assert.match(r.all, /THE TESTS DID NOT RUN/);
+    assert.match(r.all, /has tests \(1 \*\.test\/\*\.spec script files\)/);
+    assert.doesNotMatch(r.all, /looks like a/);
+  });
+});
+
+test("template: a project file with test files names the test files, not the project file", { skip: HOOK_SKIP }, () => {
+  withTempRepo((dir) => {
+    buildBareProject(dir, { "go.mod": "module x\n", "a_test.go": FAILING_GO_TEST });
+    const r = runTemplate(dir);
+    assert.match(r.all, /has tests \(1 \*_test\.go files\)/);
+    assert.match(r.all, /go test \.\/\.\.\./);
+    assert.doesNotMatch(r.all, /NO TESTS RAN/);
   });
 });
 
