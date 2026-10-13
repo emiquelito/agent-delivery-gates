@@ -54,6 +54,7 @@ import {
   type MutationResult,
   type SourceFile,
 } from "../src/mutate.ts";
+import { isBuildFailure } from "../src/build-failure.ts";
 import { runOneMutation, type CommandRun } from "../src/mutate-runner.ts";
 import {
   formatDirtyTreeMessage,
@@ -156,8 +157,9 @@ Exit codes:
      tree left dirty afterwards
   3  nothing survived, but at least one mutation never got a verdict: it
      timed out, printed more than this tool will hold, was killed by a
-     signal that had nothing to do with the suite, or was skipped, so that
-     part of the run is unmeasured. Also used when a selected file's
+     signal that had nothing to do with the suite, failed to compile (only
+     Go, Rust and tsc output is recognised; see src/build-failure.ts), or
+     was skipped, so that part of the run is unmeasured. Also used when a selected file's
      extension has no operator set this tool speaks yet, or when a
      selected file's tree-sitter grammar failed to load (an adopter's
      install with no devDependency for that language, most commonly):
@@ -477,6 +479,7 @@ async function runCommand(command: string, repoRoot: string, timeoutMs?: number)
     durationMs: result.durationMs,
     outputOverflowed: result.outputOverflowed,
     killedBySignal: result.killedBySignal,
+    buildFailed: result.status !== 0 && isBuildFailure(`${result.stdout}\n${result.stderr}`),
   };
 }
 

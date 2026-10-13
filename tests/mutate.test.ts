@@ -641,6 +641,7 @@ test("a timeout is its own verdict, not a kill and not a survivor", () => {
     skipped: 0,
     outputOverflow: 0,
     killedBySignal: 0,
+    buildFailed: 0,
   });
   assert.equal(exitCodeFor(results), 3);
 });
@@ -654,6 +655,7 @@ test("an output-overflow kill and a killed-by-signal run are each counted apart 
     skipped: 0,
     outputOverflow: 1,
     killedBySignal: 1,
+    buildFailed: 0,
   });
 });
 
@@ -729,7 +731,7 @@ test("the text report separates an output-overflow kill and a killed-by-signal r
     attempted: 2,
     results: [resultWith("output-overflow"), resultWith("killed-by-signal")],
   });
-  assert.match(text, /killed 0, survived 0, timeout 0, skipped 0, output-overflow 1, killed-by-signal 1/);
+  assert.match(text, /killed 0, survived 0, timeout 0, skipped 0, output-overflow 1, killed-by-signal 1, build-failed 0/);
   assert.match(text, /No verdict on these \(2\):/);
   assert.match(text, /output-overflow\s+src\/a\.ts:1:7/);
   assert.match(text, /killed-by-signal\s+src\/a\.ts:1:7/);
@@ -855,4 +857,23 @@ test("grammarUnavailablePaths reports nothing when every extension's grammar loa
 test("warmAndSplitByGrammar puts every mutable path in `trustworthy` when nothing failed to load", async () => {
   const result = await warmAndSplitByGrammar(["src/order.ts", "lib/discount.py"]);
   assert.deepEqual(result, { trustworthy: ["src/order.ts", "lib/discount.py"], grammarUnavailable: [] });
+});
+
+test("a mutation that did not compile is unmeasured, counted apart from killed", () => {
+  const results = [resultWith("killed"), resultWith("build-failed")];
+  assert.equal(summarize(results).buildFailed, 1);
+  assert.equal(summarize(results).killed, 1);
+  assert.equal(exitCodeFor(results), 3);
+  assert.equal(exitCodeFor([resultWith("survived"), resultWith("build-failed")]), 1);
+  const text = formatReportText({
+    command: "go test ./...",
+    baselineMs: 1000,
+    timeoutMs: 13000,
+    filesConsidered: ["src/a.ts"],
+    planned: 1,
+    attempted: 1,
+    results: [resultWith("build-failed")],
+  });
+  assert.match(text, /killed 0, .*build-failed 1/);
+  assert.match(text, /No verdict on these \(1\):/);
 });

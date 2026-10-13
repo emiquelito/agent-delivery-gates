@@ -177,3 +177,26 @@ test("a mutation that changes nothing is skipped without writing at all", async 
     assert.equal(readFileSync(path, "utf8"), ORIGINAL);
   });
 });
+
+test("a non-zero exit whose output was a compiler failure is build-failed, not killed", async () => {
+  await withFile(async (path) => {
+    const result = await runOneMutation(firstMutation(), ORIGINAL, path, {
+      writeFile: writeToDisk,
+      runCommand: () => Promise.resolve({ status: 1, timedOut: false, durationMs: 50, buildFailed: true }),
+    });
+    assert.equal(result.verdict, "build-failed");
+    assert.equal(result.exitCode, null);
+    assert.equal(readFileSync(path, "utf8"), ORIGINAL);
+  });
+});
+
+test("a non-zero exit with no build failure is still killed", async () => {
+  await withFile(async (path) => {
+    const result = await runOneMutation(firstMutation(), ORIGINAL, path, {
+      writeFile: writeToDisk,
+      runCommand: () => Promise.resolve({ status: 1, timedOut: false, durationMs: 50, buildFailed: false }),
+    });
+    assert.equal(result.verdict, "killed");
+    assert.equal(result.exitCode, 1);
+  });
+});

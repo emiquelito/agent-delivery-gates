@@ -1121,6 +1121,7 @@ if (shouldDie(0)) {
         skipped: 0,
         outputOverflow: 0,
         killedBySignal: 1,
+        buildFailed: 0,
       });
     });
   },
@@ -1573,5 +1574,61 @@ test("once the grammar is back, the same file mutates only the real code, not th
     assert.deepEqual(report.grammarFailedFiles, []);
     assert.equal(report.planned, 3, "only the comparison, connective, and arithmetic in real code, not the docstring");
     assert.equal(readFileSync(join(dir, "lib/discount.py"), "utf8"), DOCSTRING_SOURCE);
+  });
+});
+
+// --- a mutation that did not compile ------------------------------------------
+
+// The fixture command stands in for a toolchain: it reads src/gate.mjs and,
+// when the mutation `<` -> `<=` is present, prints what `go test` prints for
+// a package that does not build (taken from a real run against
+// github.com/google/uuid) or what it prints for a failing test, then exits 1.
+// Both exit non-zero; only the output tells them apart.
+function buildOrTestRepo(mutatedOutput: string): string {
+  return makeRepo({
+    "src/gate.mjs": "export function shouldDie(n) {\n  return n < 0;\n}\n",
+    "run.mjs": `import { readFileSync } from "node:fs";
+const text = readFileSync("src/gate.mjs", "utf8");
+if (text.includes("<=")) {
+  process.stdout.write(${JSON.stringify(mutatedOutput)});
+  process.exit(1);
+}
+process.exit(0);
+`,
+  });
+}
+
+function runGate(dir: string) {
+  const result = runCli(dir, ["--paths", "src/gate.mjs", "--command", "node run.mjs", "--format", "json"]);
+  const report = JSON.parse(result.stdout) as {
+    results: Array<{ verdict: string; exitCode: number | null }>;
+    summary: Record<string, number>;
+  };
+  return { result, report };
+}
+
+test("a mutation the compiler rejected is build-failed and unmeasured: exit 3, not a kill", () => {
+  const dir = buildOrTestRepo(
+    '# github.com/google/uuid\nuuid.go:197:9: invalid operation: operator - not defined on "uuid: Parse(" (constant of type string)\nFAIL\tgithub.com/google/uuid [build failed]\n',
+  );
+  withRepo(dir, () => {
+    const { result, report } = runGate(dir);
+    assert.equal(report.results[0].verdict, "build-failed", result.stdout);
+    assert.equal(report.results[0].exitCode, null);
+    assert.equal(report.summary.killed, 0);
+    assert.equal(report.summary.buildFailed, 1);
+    assert.equal(result.status, 3);
+  });
+});
+
+test("a real test failure on the same exit code is still a kill: exit 0", () => {
+  const dir = buildOrTestRepo("--- FAIL: TestGate (0.00s)\n    gate_test.go:9: got true\nFAIL\nFAIL\tgithub.com/x/y\t0.004s\n");
+  withRepo(dir, () => {
+    const { result, report } = runGate(dir);
+    assert.equal(report.results[0].verdict, "killed", result.stdout);
+    assert.equal(report.results[0].exitCode, 1);
+    assert.equal(report.summary.killed, 1);
+    assert.equal(report.summary.buildFailed, 0);
+    assert.equal(result.status, 0);
   });
 });

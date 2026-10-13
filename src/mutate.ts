@@ -34,7 +34,7 @@ export type MutationOperator =
   | "boolean-literal"
   | "arithmetic";
 
-export type Verdict = "killed" | "survived" | "timeout" | "skipped" | "output-overflow" | "killed-by-signal";
+export type Verdict = "killed" | "survived" | "timeout" | "skipped" | "output-overflow" | "killed-by-signal" | "build-failed";
 
 export interface Mutation {
   /** Path as the caller gave it, usually relative to the repository root. */
@@ -625,13 +625,18 @@ export interface RunSummary {
    * have noticed the mutation either, so it is kept apart from `killed`
    * for the same reason `outputOverflow` is. */
   killedBySignal: number;
+  /** A mutation the compiler rejected, so no test ran. Kept apart from
+   * `killed` because it says nothing about the suite. Only languages
+   * src/build-failure.ts lists are detected. */
+  buildFailed: number;
 }
 
 export function summarize(results: MutationResult[]): RunSummary {
-  const summary: RunSummary = { killed: 0, survived: 0, timeout: 0, skipped: 0, outputOverflow: 0, killedBySignal: 0 };
+  const summary: RunSummary = { killed: 0, survived: 0, timeout: 0, skipped: 0, outputOverflow: 0, killedBySignal: 0, buildFailed: 0 };
   for (const result of results) {
     if (result.verdict === "output-overflow") summary.outputOverflow++;
     else if (result.verdict === "killed-by-signal") summary.killedBySignal++;
+    else if (result.verdict === "build-failed") summary.buildFailed++;
     else summary[result.verdict]++;
   }
   return summary;
@@ -651,7 +656,8 @@ function isUnmeasured(result: MutationResult): boolean {
     result.verdict === "timeout" ||
     result.verdict === "skipped" ||
     result.verdict === "output-overflow" ||
-    result.verdict === "killed-by-signal"
+    result.verdict === "killed-by-signal" ||
+    result.verdict === "build-failed"
   );
 }
 
@@ -780,7 +786,7 @@ export function formatReportText(input: ReportInput): string {
   lines.push("");
   lines.push(
     `killed ${summary.killed}, survived ${summary.survived}, timeout ${summary.timeout}, skipped ${summary.skipped}, ` +
-      `output-overflow ${summary.outputOverflow}, killed-by-signal ${summary.killedBySignal}`,
+      `output-overflow ${summary.outputOverflow}, killed-by-signal ${summary.killedBySignal}, build-failed ${summary.buildFailed}`,
   );
 
   if (input.attempted < input.planned) {

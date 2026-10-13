@@ -29,6 +29,10 @@ export interface CommandRun {
    * timeout or the output cap did: a segfault, an out-of-memory kill, a
    * command that signals itself. Null or absent when nothing did. */
   killedBySignal?: string | null;
+  /** True when the command's output shows a compiler rejected the mutated
+   * code (see src/build-failure.ts for the languages recognised). No test
+   * ran, so a non-zero exit here is not a kill. */
+  buildFailed?: boolean;
 }
 
 /** The two effects one mutation step has on the world outside this module.
@@ -74,8 +78,10 @@ export async function runOneMutation(
           ? "killed-by-signal"
           : run.status === 0
             ? "survived"
-            : "killed";
-    const unjudged = verdict === "timeout" || verdict === "output-overflow" || verdict === "killed-by-signal";
+            : run.buildFailed === true
+              ? "build-failed"
+              : "killed";
+    const unjudged = verdict === "timeout" || verdict === "output-overflow" || verdict === "killed-by-signal" || verdict === "build-failed";
     return { mutation, verdict, durationMs: run.durationMs, exitCode: unjudged ? null : run.status };
   } finally {
     io.writeFile(absolutePath, originalText);
