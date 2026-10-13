@@ -352,6 +352,14 @@ async function runInitCommand(argv: string[]): Promise<never> {
       const ok = await fetchGrammars(still, targetDir);
       if (!ok) allOk = false;
     }
+    // The fetch cache carries its own .gitignore, which ignores everything
+    // else in it, so staging that one file is what keeps the wasm out of a
+    // later `git add -A`.
+    const cacheIgnore = join(".adg", "grammars", ".gitignore");
+    if (toRun.some((s) => s.id === "stage" && s.action === "do") && existsSync(join(targetDir, cacheIgnore))) {
+      const r = spawnSync("git", ["add", "--", cacheIgnore], { cwd: targetDir, encoding: "utf8" });
+      process.stdout.write(r.status === 0 ? `  done: staged: ${cacheIgnore}\n` : `  FAILED: could not stage ${cacheIgnore}\n`);
+    }
   }
   process.exit(combineInitExitCode(outcome.exitCode, allOk));
 }
