@@ -66,7 +66,12 @@ function readPackageJson(targetDir: string): PackageJson | undefined {
   }
 }
 
-function listFiles(targetDir: string): string[] {
+/** The one view of the repository's files that init uses: tracked and
+ * untracked, minus anything ignored, minus dependency and build trees.
+ * Language detection and test-command detection both read this, so they
+ * cannot disagree about what the repository contains. Empty when
+ * `targetDir` is not a git repository or git is unavailable. */
+export function listFiles(targetDir: string): string[] {
   const r = git(targetDir, ["ls-files", "-co", "--exclude-standard"]);
   if (!r.ok) return [];
   return r.out

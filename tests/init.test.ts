@@ -533,6 +533,70 @@ test("init: reports every tracked language it recognises, and none it does not",
   });
 });
 
+function writeGoProject(dir: string): void {
+  writeFileSync(join(dir, "go.mod"), "module example.com/x\n\ngo 1.22\n");
+  writeFileSync(join(dir, "a.go"), "package a\n");
+  writeFileSync(join(dir, "a_test.go"), "package a\n");
+}
+
+test("init: a fresh repository with only uncommitted Go files still finds go and plans the grammar step", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeGoProject(dir);
+    const result = runInitCli(["--dir", dir, "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Languages found in this repository: go\./);
+    assert.match(result.stdout, /fetch the verified tree-sitter grammar\(s\) into \.adg\/grammars\/: go/);
+  });
+});
+
+test("init: the same Go repository fully committed gives the same language and grammar step", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeGoProject(dir);
+    execFileSync("git", ["add", "go.mod", "a.go", "a_test.go"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "x", "--no-verify"], { cwd: dir });
+    const result = runInitCli(["--dir", dir, "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Languages found in this repository: go\./);
+    assert.match(result.stdout, /fetch the verified tree-sitter grammar\(s\) into \.adg\/grammars\/: go/);
+  });
+});
+
+test("init: Go files that are all git-ignored plan no grammar, and the output says why", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    mkdirSync(join(dir, "gen"));
+    writeFileSync(join(dir, "gen", "a.go"), "package a\n");
+    writeFileSync(join(dir, ".gitignore"), "gen/\n");
+    const result = runInitCli(["--dir", dir, "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /Languages found/);
+    assert.doesNotMatch(result.stdout, /tree-sitter grammar\(s\)/);
+    assert.match(result.stdout, /No language with a tree-sitter grammar was found/);
+  });
+});
+
+test("init: a repository with no recognisable language still succeeds and says none was found", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    writeFileSync(join(dir, "notes.txt"), "hello\n");
+    const result = runInitCli(["--dir", dir, "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No language with a tree-sitter grammar was found/);
+  });
+});
+
+test("init: hook paths printed for pasting use one separator", () => {
+  withTempDir((dir) => {
+    initGitRepo(dir);
+    const result = runInitCli(["--dir", dir, "--dry-run"]);
+    const lines = result.stdout.split("\n").filter((l) => l.includes("$CLAUDE_PROJECT_DIR"));
+    assert.ok(lines.length > 0, "expected hook lines");
+    for (const l of lines) assert.ok(!l.includes("\\"), `backslash in: ${l}`);
+  });
+});
+
 test("init: a language whose grammar is already in .adg/grammars/, and matches its pinned digest, is not reported as missing", () => {
   withTempDir((dir) => {
     initGitRepo(dir);

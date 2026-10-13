@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { listFiles } from "./init-setup.ts";
 import { resolveWithinRoot, realPath } from "./path-allowlist.ts";
 import {
   LANGUAGES,
@@ -163,24 +164,17 @@ function fail(message: string): InitOutcome {
   return { exitCode: 2, lines: [`init: ${message}`], missingGrammarLanguages: [], createdPaths: [] };
 }
 
-/** Every tracked file's extension in `targetDir`, matched against
- * src/tree-sitter-grammar-store.ts's LANGUAGES table. Empty, quietly, when
- * `targetDir` is not a git repository at all (an empty scratch directory,
- * most commonly in this project's own tests) or `git` itself is not on
- * PATH: init already writes useful files with no repository behind it, and
- * a language detection step failing to find any languages is not a reason
- * to fail the whole command. */
+/** Every listed file's extension in `targetDir`, matched against
+ * src/tree-sitter-grammar-store.ts's LANGUAGES table. The file list is
+ * init-setup.ts's listFiles: tracked and untracked, ignored files and
+ * dependency trees left out, so a brand-new repository with nothing
+ * committed still has languages. Empty, quietly, when `targetDir` is not a
+ * git repository or `git` is not on PATH: init already writes useful files
+ * with no repository behind it, and finding no languages is not a reason to
+ * fail the whole command. runInit says so when it finds none. */
 function detectRepoLanguages(targetDir: string): LanguageEntry[] {
-  let result;
-  try {
-    result = spawnSync("git", ["ls-files"], { cwd: targetDir, encoding: "utf8" });
-  } catch {
-    return [];
-  }
-  if (result.error || result.status !== 0) return [];
   const found = new Map<string, LanguageEntry>();
-  for (const line of result.stdout.split("\n")) {
-    if (line.trim() === "") continue;
+  for (const line of listFiles(targetDir)) {
     const lower = line.toLowerCase();
     const dot = lower.lastIndexOf(".");
     if (dot === -1) continue;
@@ -269,7 +263,10 @@ function standaloneSettingsLines(targetDir: string, packageRoot: string): string
 
   const distHooksDir = join(packageRoot, "dist", "hooks");
   const useDist = existsSync(distHooksDir);
-  const hooksDir = relative(targetDir, useDist ? distHooksDir : join(packageRoot, "hooks"));
+  // Forward slashes on every platform: this text is pasted into a config
+  // file, sits after a literal "/" already, and is run by a shell that reads
+  // a backslash as an escape. Node and Windows both accept "/".
+  const hooksDir = relative(targetDir, useDist ? distHooksDir : join(packageRoot, "hooks")).split("\\").join("/");
   const ext = useDist ? "js" : "ts";
   lines.push("");
   lines.push("Faster, but tied to how the package happens to be installed:");
@@ -525,7 +522,14 @@ export function runInit(options: InitOptions): InitOutcome {
   // same fact as "nothing is there yet", even though the remedy is
   // identical. See grammarState's own doc comment for why.
   const grammarsToInstall = [...corruptGrammarLanguages, ...absentGrammarLanguages];
-  if (detectedLanguages.length > 0) {
+  if (detectedLanguages.length === 0) {
+    lines.push("");
+    lines.push(
+      "No language with a tree-sitter grammar was found, so no grammar step is planned. Looked at tracked and " +
+        "untracked files that git does not ignore (node_modules, vendor and target are skipped); if this is " +
+        "not a git repository, nothing is looked at.",
+    );
+  } else {
     lines.push("");
     lines.push(`Languages found in this repository: ${detectedLanguages.map((entry) => entry.name).join(", ")}.`);
   }
